@@ -298,11 +298,19 @@ function credentialFromRow(row: {
   revoked_at: string | null;
   created_at: string;
 }): AgentCredentialSummary {
+  const scopes = parseJsonList(row.scopes_json, API_TOKEN_SCOPES);
+  // Credentials issued before explicit draft commits existed treated
+  // documents:write as the complete editor capability. Authentication keeps
+  // that contract, so management and connection flows must expose the same
+  // effective scope or they incorrectly force users to replace a valid key.
+  if (scopes.includes("documents:write") && !scopes.includes("documents:commit")) {
+    scopes.splice(scopes.indexOf("documents:write") + 1, 0, "documents:commit");
+  }
   return {
     id: row.id,
     name: row.name,
     prefix: row.token_prefix,
-    scopes: parseJsonList(row.scopes_json, API_TOKEN_SCOPES),
+    scopes,
     defaultWorkspaceId: row.default_workspace_id,
     workspaceAllowlist: parseJsonList<string>(row.workspace_allowlist_json),
     ipAllowlist: parseJsonList<string>(row.ip_allowlist_json),
