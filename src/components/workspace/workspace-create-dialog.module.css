@@ -1,0 +1,230 @@
+.backdrop {
+  position: fixed;
+  z-index: 160;
+  inset: 0;
+  display: grid;
+  padding: 24px;
+  place-items: center;
+  background: rgba(34, 52, 45, .34);
+  backdrop-filter: blur(10px);
+}
+
+.dialog {
+  width: min(620px, 100%);
+  overflow: hidden;
+  border: 1px solid #dce5e0;
+  border-radius: 24px;
+  background: white;
+  box-shadow: 0 34px 110px rgba(26, 45, 38, .25);
+}
+
+.dialog > header {
+  display: grid;
+  min-height: 106px;
+  padding: 22px 24px;
+  align-items: center;
+  grid-template-columns: 48px minmax(0, 1fr) 38px;
+  gap: 14px;
+  border-bottom: 1px solid #e8eeea;
+}
+
+.dialog > header > span {
+  display: grid;
+  width: 48px;
+  height: 48px;
+  place-items: center;
+  border-radius: 15px;
+  background: #e9f7f0;
+  color: #349b78;
+}
+
+.dialog header p {
+  margin: 0 0 4px;
+  color: #6d60aa;
+  font-size: 11px;
+  font-weight: 850;
+  letter-spacing: .13em;
+}
+
+.dialog h2 {
+  margin: 0;
+  color: #193027;
+  font-size: 25px;
+  letter-spacing: -.045em;
+}
+
+.dialog header button {
+  display: grid;
+  width: 38px;
+  height: 38px;
+  padding: 0;
+  place-items: center;
+  border: 1px solid #dce5e0;
+  border-radius: 11px;
+  background: white;
+  color: #75847d;
+  cursor: pointer;
+}
+
+.body {
+  display: flex;
+  padding: 24px;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.progress {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: #8a9790;
+  font-size: 12px;
+  font-weight: 750;
+}
+
+.progress strong, .progress > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.progress strong { color: #3a9e7a; }
+.progress i { height: 1px; flex: 1; background: #dce5e0; }
+
+.progress strong span, .progress b {
+  display: grid;
+  width: 24px;
+  height: 24px;
+  place-items: center;
+  border-radius: 50%;
+  border: 1px solid #d8e3dd;
+  font-size: 11px;
+  font-style: normal;
+}
+
+.progress strong span {
+  border-color: #8bd0b3;
+  background: #e9f7f0;
+}
+
+.body h3 {
+  margin: 0;
+  color: #20362d;
+  font-size: 18px;
+  letter-spacing: -.025em;
+}
+
+.body p, .body > small {
+  margin: 5px 0 0;
+  color: #7c8a83;
+  font-size: 13px;
+  line-height: 1.65;
+}
+
+.body label {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  color: #5d6f66;
+  font-size: 12px;
+  font-weight: 750;
+}
+
+.body input,
+.body select {
+  width: 100%;
+  min-height: 50px;
+  padding: 0 14px;
+  border: 1px solid #cfdcd5;
+  border-radius: 12px;
+  outline: none;
+  color: #20362d;
+  font-family: inherit;
+  font-size: 15px;
+  font-weight: 650;
+  line-height: 1.4;
+}
+
+.body input:focus,
+.body select:focus {
+  border-color: #72c6a3;
+  box-shadow: 0 0 0 4px rgba(80, 181, 139, .12);
+}
+
+.ownerNotice {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  border: 1px solid #d6e5de;
+  border-radius: 13px;
+  background: #f7fbf9;
+  padding: 12px;
+}
+
+.ownerNotice > span {
+  display: grid;
+  width: 38px;
+  height: 38px;
+  place-items: center;
+  border-radius: 11px;
+  background: #e8f6ef;
+}
+
+.ownerNotice > div { display: grid; gap: 2px; }
+.ownerNotice small { color: #7c8a83; }
+
+.error {
+  padding: 10px 12px;
+  border: 1px solid #efc8be;
+  border-radius: 10px;
+  background: #fff1ed;
+  color: #985345;
+  font-size: 12px;
+}
+
+.dialog > footer {
+  display: flex;
+  min-height: 72px;
+  padding: 14px 24px;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 9px;
+  border-top: 1px solid #e8eeea;
+  background: #fbfcfb;
+}
+
+.dialog footer button {
+  display: inline-flex;
+  min-height: 42px;
+  padding: 0 15px;
+  align-items: center;
+  gap: 7px;
+  border: 1px solid #d8e2dd;
+  border-radius: 10px;
+  background: white;
+  color: #66776e;
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 750;
+  line-height: 1;
+}
+
+.dialog footer button[type="submit"] {
+  border-color: #3a9f7b;
+  background: #3a9f7b;
+  color: white;
+}
+
+.dialog button:disabled {
+  opacity: .45;
+  cursor: not-allowed;
+}
+
+@media (max-width: 640px) {
+  .backdrop { padding: 10px; }
+  .dialog { border-radius: 18px; }
+  .dialog > header, .body, .dialog > footer { padding-inline: 16px; }
+  .progress > span { font-size: 0; }
+  .dialog > footer button[type="submit"] { flex: 1; justify-content: center; }
+}

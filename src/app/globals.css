@@ -1,0 +1,119 @@
+:root {
+  --ink: #20312b;
+  --ink-soft: #3e514a;
+  --muted: #6d7d76;
+  --line: #dfe8e2;
+  --line-soft: #edf2ef;
+  --canvas: #f8fbf6;
+  --paper: #ffffff;
+  --mint: #ccefe1;
+  --mint-soft: #ecf9f2;
+  --mint-strong: #3b9977;
+  --yellow: #ffe89d;
+  --yellow-soft: #fff8dd;
+  --coral: #ffb8aa;
+  --coral-soft: #fff0ec;
+  --lilac: #dcd4ff;
+  --lilac-soft: #f3f0ff;
+  --shadow: 0 24px 70px rgba(59, 86, 74, 0.12);
+  --font-sans: var(--font-geist-sans), "Pretendard", "Noto Sans KR", Arial, sans-serif;
+  --font-mono: var(--font-geist-mono), "SFMono-Regular", Consolas, monospace;
+}
+
+* { box-sizing: border-box; }
+html, body { min-height: 100%; }
+body {
+  margin: 0;
+  background: var(--canvas);
+  color: var(--ink);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+}
+a { color: inherit; text-decoration: none; }
+button, input, textarea { font: inherit; }
+button, a { -webkit-tap-highlight-color: transparent; }
+button { color: inherit; }
+:focus-visible { outline: 3px solid rgba(59, 153, 119, .3); outline-offset: 3px; }
+
+.brand-lockup {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 21px;
+  font-weight: 780;
+  letter-spacing: -.045em;
+}
+.brand-symbol {
+  display: grid;
+  width: 44px;
+  height: 44px;
+  place-items: center;
+  border-radius: 15px;
+}
+.brand-symbol img { display: block; }
+.welcome-page {
+  position: relative;
+  display: grid;
+  min-height: 100vh;
+  overflow: hidden;
+  padding: 48px 24px;
+  place-items: center;
+}
+.welcome-orb { position: absolute; border-radius: 50%; filter: blur(2px); }
+.welcome-orb-mint { width: 520px; height: 520px; left: -170px; bottom: -210px; background: var(--mint); opacity: .54; }
+.welcome-orb-yellow { width: 410px; height: 410px; right: -100px; top: -150px; background: var(--yellow-soft); box-shadow: 0 0 0 55px rgba(255,248,221,.34); }
+.welcome-card {
+  position: relative;
+  z-index: 1;
+  width: min(720px, 100%);
+  padding: 64px;
+  border: 1px solid rgba(210,224,216,.9);
+  border-radius: 34px;
+  background: rgba(255,255,255,.9);
+  box-shadow: var(--shadow);
+  backdrop-filter: blur(18px);
+}
+.welcome-kicker {
+  margin: 48px 0 0;
+  color: var(--mint-strong);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 750;
+  letter-spacing: .12em;
+}
+.welcome-card h1 { margin: 18px 0 0; font-size: clamp(43px, 7vw, 66px); line-height: 1.08; letter-spacing: -.065em; }
+.welcome-card h1 em { position: relative; z-index: 0; font-style: normal; }
+.welcome-card h1 em::after { position: absolute; z-index: -1; right: -6px; bottom: 3px; left: -6px; height: 18px; border-radius: 50%; background: var(--yellow); content: ""; transform: rotate(-1deg); }
+.welcome-copy { max-width: 560px; margin: 25px 0 0; color: var(--ink-soft); font-size: 17px; line-height: 1.75; }
+.welcome-actions { display: flex; margin-top: 34px; gap: 11px; flex-wrap: wrap; }
+.primary-button, .quiet-button {
+  display: inline-flex;
+  min-height: 52px;
+  padding: 0 20px;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  border: 0;
+  border-radius: 16px;
+  cursor: pointer;
+  font-size: 14px;
+  font-weight: 720;
+}
+.primary-button { background: var(--mint-strong); color: white; box-shadow: 0 12px 24px rgba(59,153,119,.2); }
+.quiet-button { border: 1px solid var(--line); background: white; color: var(--ink-soft); }
+.primary-button:hover, .quiet-button:hover { transform: translateY(-1px); }
+.welcome-trust { display: flex; margin-top: 35px; padding-top: 25px; gap: 18px; border-top: 1px solid var(--line-soft); color: var(--muted); flex-wrap: wrap; font-size: 12px; font-weight: 620; }
+.welcome-trust span { display: inline-flex; align-items: center; gap: 6px; }
+.welcome-trust svg { color: var(--mint-strong); }
+
+@media (max-width: 620px) {
+  .welcome-page { padding: 12px; }
+  .welcome-card { padding: 35px 25px; border-radius: 25px; }
+  .welcome-kicker { margin-top: 38px; }
+  .welcome-actions { flex-direction: column; }
+  .welcome-actions a { width: 100%; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { scroll-behavior: auto !important; transition-duration: .01ms !important; animation-duration: .01ms !important; }
+}

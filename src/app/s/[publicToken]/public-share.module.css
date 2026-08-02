@@ -1,0 +1,14 @@
+.page { min-height: 100dvh; background: #f6f9f6; color: var(--ink); }
+.header { display: flex; min-height: 58px; padding: 0 24px; align-items: center; justify-content: space-between; gap: 18px; border-bottom: 1px solid var(--line); background: rgba(255, 255, 255, .96); }
+.brand { display: inline-flex; align-items: center; gap: 9px; font-size: 19px; font-weight: 790; letter-spacing: -.045em; }
+.readOnly { padding: 6px 10px; border-radius: 999px; background: var(--mint-soft); color: #2d7a5e; font-size: 11px; font-weight: 730; }
+.document { width: min(1080px, calc(100% - 40px)); min-height: calc(100dvh - 150px); margin: 28px auto 0; padding: clamp(34px, 6vw, 72px) clamp(28px, 7vw, 86px) 80px; border: 1px solid #e0e8e3; border-radius: 18px; background: white; box-shadow: 0 18px 56px rgba(43, 72, 59, .06); }
+.workspaceName { color: #608173; font-size: 12px; font-weight: 720; }
+.document > h1 { margin: 10px 0 42px; color: #1d3229; font-size: clamp(34px, 5vw, 52px); line-height: 1.15; letter-spacing: -.055em; }
+.footer { padding: 24px; color: #8a9790; font-size: 11px; text-align: center; }
+
+@media (max-width: 700px) {
+  .header { padding: 0 14px; }
+  .document { width: 100%; margin-top: 0; padding: 32px 20px 60px; border: 0; border-radius: 0; box-shadow: none; }
+  .document > h1 { margin-bottom: 32px; }
+}

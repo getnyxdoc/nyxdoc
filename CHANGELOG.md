@@ -1,0 +1,71 @@
+# Changelog
+
+All notable user-facing changes are recorded here.
+
+## 0.24.1 - 2026-08-02
+
+- Resolve agent- or Markdown-authored `[URL](URL)` links to the public page
+  title in authenticated workspace readers, keep the raw URL as a safe
+  fallback, and open external links in a separate browser tab.
+- Relicensed Nyxdoc from the Elastic License 2.0 to the MIT License, allowing
+  unrestricted commercial use, redistribution, paid products, and hosted or
+  managed services subject to the MIT notice requirement.
+- Added a browser-save synchronization fence using the collaboration
+  generation, acknowledged draft version, and Yjs state vector so an explicit
+  save cannot silently omit the editor's latest input.
+- Expire live collaboration connections at their token boundary and reject
+  post-expiry updates before they can mutate the shared document.
+- Seal and rotate every collaboration room both when a document tree enters
+  trash and when it is restored, preserve the latest open draft for recovery,
+  and reject pre-trash and trash-era room updates.
+- Recheck current human and agent authorization when a draft first requests a
+  document move and again inside the canonical commit transaction, including
+  destination scope and permissions changed after editing.
+- Return deterministic document-scoped node-ID remaps from agent writes so
+  follow-up block operations can use the effective IDs safely.
+- Build and verify media backups from the exact asset inventory in the SQLite
+  snapshot, failing closed on missing, extra, or mismatched files.
+- Let self-host operators disable all new in-app diagnostic collection and its
+  UI with `NYXDOC_DIAGNOSTICS_ENABLED=false`.
+
+## 0.23.2
+
+- Normalize every draft-aware MCP read and mutation response to expose the
+  latest `draftVersion` at the top level while retaining nested state fields.
+- Let editor agents move only document trees they created to the recoverable
+  trash while keeping other documents and permanent purge protected.
+- Explicitly forbid agents from borrowing a person's logged-in browser session
+  to bypass Nyxdoc permission decisions.
+- Prepared Nyxdoc for its first public source release under the Elastic
+  License 2.0 (ELv2).
+- Added English, Korean, and Japanese interfaces and account locale
+  preferences.
+- Added secure first-owner setup, invite-only registration by default,
+  one-time invitation links, and no-mail password-recovery links.
+- Generalized self-host configuration and Docker Compose deployment.
+- Preserved the existing workspace, agent, editor, MCP, revision, backup, and
+  trash data models during the public-release migration.
+- Added optional organizations with owner/admin/member roles, email or
+  one-time-link invitations, flat teams, and explicit person/team workspace
+  grants that do not expose documents through organization membership alone.
+- Added organization-owned workspaces and agents, approved personal-agent
+  BYOA, cross-organization database guards, lifecycle audit records, and
+  reversible organization trash.
+- Decoupled MCP routing from the browser's active workspace. One credential
+  can now use every allowed workspace: resource-ID tools infer the tenant,
+  ambiguous tools accept `workspaceId`, and the connection workspace is only
+  a fallback default.
+- Added Agent Protocol 4.7 image uploads. External agents can request a
+  five-minute, single-use, workspace/document-bound upload URL, PUT raw image
+  bytes outside MCP JSON, and insert the returned canonical image block without
+  storing base64 in a document.
+- Revalidate credential, membership, document scope, and `media.upload`
+  permission when an agent upload is consumed, with decoded-image, size, MIME,
+  and optional SHA-256 checks before persistence.
+- Preserved collaborative editor node identities and the active caret when an
+  agent-side AST replacement arrives during human editing, including inside
+  table cells.
+- Added an opt-in caret incident recorder with a short incident code and
+  30-day structural trace retention. It records selection paths and event
+  categories only, never document text, typed characters, URLs, or raw user
+  agent strings.

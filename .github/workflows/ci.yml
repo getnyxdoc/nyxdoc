@@ -1,0 +1,62 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run lint
+      - run: npm test
+      - run: npm run build
+
+  editor-e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+      - run: npm run test:editor-e2e
+
+  compose-lifecycle:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - name: Validate lifecycle scripts
+        run: |
+          shellcheck scripts/*.sh
+          bash -n scripts/*.sh
+      - name: Build and install
+        run: ./scripts/install.sh --build
+      - name: Stop without deleting data
+        run: ./scripts/uninstall.sh
+      - name: Reinstall preserved data
+        run: ./scripts/install.sh --build
+      - name: Permanently remove the test installation
+        run: ./scripts/uninstall.sh --purge --confirm-purge=nyxdoc
+      - name: Clean up after failure
+        if: always()
+        run: |
+          if [ -f .env.production ]; then
+            docker compose --env-file .env.production -f compose.yaml down --volumes --remove-orphans || true
+          fi

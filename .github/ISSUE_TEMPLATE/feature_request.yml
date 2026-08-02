@@ -1,0 +1,29 @@
+name: Feature request
+description: Propose an improvement for people and external agents working through documents.
+title: "[Feature] "
+labels:
+  - enhancement
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What document workflow is difficult today, and for whom?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed outcome
+      description: Describe the user-visible result rather than only an implementation.
+    validations:
+      required: true
+  - type: textarea
+    id: agent_contract
+    attributes:
+      label: Human and agent workflow
+      description: Explain any effect on MCP, permissions, revisions, or approval boundaries.
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered

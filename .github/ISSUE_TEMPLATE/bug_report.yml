@@ -1,0 +1,52 @@
+name: Bug report
+description: Report a reproducible Nyxdoc problem using synthetic data.
+title: "[Bug] "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not include connection keys, passwords, private documents, databases, or production logs.
+        Report security vulnerabilities privately to security@nyxdoc.com.
+  - type: input
+    id: version
+    attributes:
+      label: Nyxdoc version or commit
+      placeholder: 0.24.1 or a commit SHA
+    validations:
+      required: true
+  - type: dropdown
+    id: installation
+    attributes:
+      label: Installation
+      options:
+        - Docker Compose on Linux
+        - Local development
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction
+      description: Give the smallest sequence that reproduces the problem with synthetic content.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: Browser, operating system, sanitized logs, or screenshots.

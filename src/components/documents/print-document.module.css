@@ -1,0 +1,23 @@
+.page { min-height: 100dvh; padding-bottom: 48px; background: #edf2ef; color: var(--ink); }
+.toolbar { position: sticky; z-index: 10; top: 0; display: flex; min-height: 58px; padding: 0 18px; align-items: center; justify-content: space-between; gap: 20px; border-bottom: 1px solid var(--line); background: rgba(255, 255, 255, .97); }
+.toolbar > span { display: inline-flex; align-items: center; gap: 8px; font-size: 18px; font-weight: 790; letter-spacing: -.04em; }
+.toolbar > div { display: flex; align-items: center; gap: 12px; }
+.toolbar small { color: #7e8b84; font-size: 11px; }
+.toolbar button { min-height: 36px; padding: 0 13px; border: 0; border-radius: 9px; background: var(--mint-strong); color: white; cursor: pointer; font-family: inherit; font-size: 12px; font-weight: 730; }
+.paper { width: min(210mm, calc(100% - 32px)); min-height: 297mm; margin: 24px auto 0; padding: 20mm 18mm 24mm; background: white; box-shadow: 0 14px 46px rgba(37, 60, 50, .12); }
+.workspaceName { color: #658174; font-size: 11px; font-weight: 700; }
+.paper > h1 { margin: 9px 0 36px; color: #1d3229; font-size: 40px; line-height: 1.18; letter-spacing: -.05em; }
+
+@page { size: A4; margin: 14mm 15mm 18mm; }
+
+@media print {
+  .page { min-height: 0; padding: 0; background: white; }
+  .toolbar { display: none; }
+  .paper { width: auto; min-height: 0; margin: 0; padding: 0; box-shadow: none; }
+  .paper > h1 { font-size: 30pt; }
+  .paper :global(pre),
+  .paper :global(table),
+  .paper :global(figure),
+  .paper :global(aside) { break-inside: avoid; }
+  .paper :global(a) { color: inherit; text-decoration: underline; }
+}

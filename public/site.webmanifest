@@ -1,0 +1,21 @@
+{
+  "name": "Nyxdoc",
+  "short_name": "Nyxdoc",
+  "description": "사람과 에이전트가 문서를 함께 만드는 공간",
+  "start_url": "/app",
+  "display": "standalone",
+  "background_color": "#F7FAF7",
+  "theme_color": "#EAF7F1",
+  "icons": [
+    {
+      "src": "/nyxdoc-icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png"
+    },
+    {
+      "src": "/nyxdoc-icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png"
+    }
+  ]
+}

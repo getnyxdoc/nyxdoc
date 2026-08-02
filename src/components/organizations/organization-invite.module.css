@@ -1,0 +1,105 @@
+.card {
+  width: min(620px, calc(100vw - 32px));
+  margin: 8vh auto;
+  padding: 42px;
+  border: 1px solid #dce8e1;
+  border-radius: 28px;
+  background: #fff;
+  box-shadow: 0 24px 70px rgb(31 70 53 / 12%);
+  color: #18362b;
+}
+
+.icon {
+  display: grid;
+  width: 58px;
+  height: 58px;
+  place-items: center;
+  border-radius: 18px;
+  background: #eaf8f1;
+  color: #29976d;
+}
+
+.card > p {
+  margin: 26px 0 8px;
+  color: #7164aa;
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: .13em;
+}
+
+.card h1 {
+  margin: 0 0 28px;
+  font-size: clamp(30px, 6vw, 48px);
+  line-height: 1.08;
+}
+
+.details {
+  display: grid;
+  gap: 10px;
+  padding: 20px;
+  border-radius: 18px;
+  background: #f7faf8;
+}
+
+.details span {
+  display: flex;
+  gap: 16px;
+}
+
+.details b {
+  width: 86px;
+  color: #708078;
+}
+
+.actions {
+  display: grid;
+  gap: 10px;
+  margin-top: 24px;
+}
+
+.actions a,
+.accept {
+  display: flex;
+  min-height: 52px;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  border: 0;
+  border-radius: 14px;
+  background: #329d77;
+  color: #fff;
+  font: inherit;
+  font-weight: 750;
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.actions a[data-secondary] {
+  border: 1px solid #dce8e1;
+  background: #fff;
+  color: #345247;
+}
+
+.accept {
+  width: 100%;
+  margin-top: 24px;
+}
+
+.accept:disabled {
+  cursor: wait;
+  opacity: .65;
+}
+
+.error {
+  margin-top: 18px;
+  padding: 14px 16px;
+  border: 1px solid #f0c7bb;
+  border-radius: 14px;
+  background: #fff4f0;
+  color: #9a4b37;
+}
+
+@media (max-width: 600px) {
+  .card { padding: 28px 22px; }
+  .details span { display: grid; gap: 3px; }
+}

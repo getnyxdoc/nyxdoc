@@ -1,0 +1,16 @@
+.git
+.next
+node_modules
+data
+debug
+output
+coverage
+uploads
+*.tsbuildinfo
+.env*
+!.env.example
+npm-debug.log*
+Dockerfile*
+compose*.yaml
+README.md
+DEPLOYMENT.md
