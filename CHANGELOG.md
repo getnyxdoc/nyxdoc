@@ -4,6 +4,8 @@ All notable user-facing changes are recorded here.
 
 ## 0.24.1 - 2026-08-02
 
+- Reuse legacy editor credentials in new workspace assignments by applying the
+  same implicit `documents:commit` compatibility used during authentication.
 - Resolve agent- or Markdown-authored `[URL](URL)` links to the public page
   title in authenticated workspace readers, keep the raw URL as a safe
   fallback, and open external links in a separate browser tab.

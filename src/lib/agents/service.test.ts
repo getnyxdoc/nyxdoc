@@ -118,6 +118,53 @@ describe("global agents and workspace memberships", () => {
     });
   });
 
+  it("reuses a legacy write credential as an editor credential", () => {
+    const database = createTestDatabase();
+    databases.push(database);
+    const { user, workspace: first } = createTestUser(database);
+    const second = createWorkspace(database, user, "Threads");
+    const agent = createAccountAgent(database, { userId: user.id, displayName: "gameroom" });
+    assignAgentToWorkspace(database, {
+      userId: user.id,
+      workspaceId: first.id,
+      agentId: agent.id,
+      role: "editor",
+    });
+    const created = createAgentCredential(database, {
+      userId: user.id,
+      agentId: agent.id,
+      name: "Legacy gameroom key",
+      scopes: ["documents:read", "documents:write", "documents:commit", "changes:read"],
+      defaultWorkspaceId: first.id,
+    });
+    database.prepare("UPDATE agent_credentials SET scopes_json = ? WHERE id = ?").run(
+      JSON.stringify(["documents:read", "documents:write", "changes:read"]),
+      created.credential.id,
+    );
+
+    const listedCredential = listAccountAgents(database, user.id)[0]?.credentials[0];
+    expect(listedCredential?.scopes).toContain("documents:commit");
+
+    const connected = connectAgentToWorkspace(database, {
+      userId: user.id,
+      workspaceId: second.id,
+      agent: { mode: "existing", agentId: agent.id },
+      role: "editor",
+      rootDocumentId: null,
+      credential: { mode: "existing", credentialId: created.credential.id },
+    });
+
+    expect(connected.token).toBeNull();
+    expect(connected.credential.id).toBe(created.credential.id);
+    expect(connected.membership).toMatchObject({
+      workspaceId: second.id,
+      role: "editor",
+    });
+    expect(authenticateApiToken(database, `Bearer ${created.token}`, {
+      workspaceId: second.id,
+    }).workspaceId).toBe(second.id);
+  });
+
   it("rolls back a newly created identity when a later connection step fails", () => {
     const database = createTestDatabase();
     databases.push(database);
