@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { agentIdentityIdSchema } from "@/lib/agents/identifiers";
 import { auth } from "@/lib/auth";
 import { sqlite } from "@/lib/db/client";
 import {
@@ -24,7 +25,7 @@ const agentSchema = z.discriminatedUnion("mode", [
     }).strict(),
     z.object({
       mode: z.literal("existing"),
-      agentId: z.string().uuid(),
+      agentId: agentIdentityIdSchema,
     }).strict(),
 ]);
 

@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { requireWorkspaceSession } from "@/data/workspace-context";
+import { agentIdentityIdSchema } from "@/lib/agents/identifiers";
 import { assignAgentToWorkspace, listWorkspaceAgentMemberships } from "@/lib/agents/service";
 import { AGENT_ACCESS_PROFILES, WORKSPACE_PERMISSIONS } from "@/lib/authz/permissions";
 import { sqlite } from "@/lib/db/client";
@@ -10,7 +11,7 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 const assignSchema = z.object({
-  agentId: z.string().uuid(),
+  agentId: agentIdentityIdSchema,
   accessProfile: z.enum(AGENT_ACCESS_PROFILES),
   capabilities: z.array(z.enum(WORKSPACE_PERMISSIONS)).max(WORKSPACE_PERMISSIONS.length).optional(),
   rootDocumentId: z.string().uuid().nullable().optional(),

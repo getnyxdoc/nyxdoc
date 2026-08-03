@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { requireWorkspaceSession } from "@/data/workspace-context";
+import { agentIdentityIdSchema } from "@/lib/agents/identifiers";
 import { connectAgentToWorkspace } from "@/lib/agents/service";
 import { AGENT_ACCESS_PROFILES, WORKSPACE_PERMISSIONS } from "@/lib/authz/permissions";
 import { sqlite } from "@/lib/db/client";
@@ -13,7 +14,7 @@ const connectSchema = z.object({
   agent: z.discriminatedUnion("mode", [
     z.object({
       mode: z.literal("existing"),
-      agentId: z.string().uuid(),
+      agentId: agentIdentityIdSchema,
     }),
     z.object({
       mode: z.literal("new"),

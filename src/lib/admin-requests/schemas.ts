@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { agentIdentityIdSchema } from "@/lib/agents/identifiers";
 import {
   AGENT_ACCESS_PROFILES,
   AGENT_NON_DELEGABLE_PERMISSIONS,
@@ -53,7 +54,7 @@ export const agentConnectPayloadSchema = z.object({
 });
 
 export const agentUpdatePayloadSchema = z.object({
-  agentId: z.string().uuid(),
+  agentId: agentIdentityIdSchema,
   accessProfile: z.enum(AGENT_ACCESS_PROFILES).optional(),
   capabilities: z.array(z.enum(WORKSPACE_PERMISSIONS)).min(1).max(WORKSPACE_PERMISSIONS.length).optional(),
   rootDocumentId: z.string().uuid().nullable().optional(),

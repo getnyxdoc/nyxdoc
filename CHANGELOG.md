@@ -2,6 +2,15 @@
 
 All notable user-facing changes are recorded here.
 
+## 0.25.1 - 2026-08-03
+
+- Fixed workspace assignment and OAuth consent for agent identities preserved
+  from pre-global-agent releases. Migrated IDs such as `legacy-agent-<uuid>` are
+  opaque internal identifiers and are no longer rejected by UUID-only request
+  validation.
+- Added regression coverage for both current UUID identities and preserved
+  legacy identities at the shared API validation boundary.
+
 ## 0.25.0 - 2026-08-03
 
 - Replaced the ambiguous agent `admin | editor | viewer` model with global agent

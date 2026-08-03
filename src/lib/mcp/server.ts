@@ -279,7 +279,7 @@ const handoffTodoSchema = z.object({
 
 const capabilities = {
   protocolVersion: "5.0.0",
-  serverVersion: "0.25.0",
+  serverVersion: "0.25.1",
   workspace: {
     tenantBoundary: true,
     authorizationModel: "global-agent-identity + workspace-grant + credential-binding",
