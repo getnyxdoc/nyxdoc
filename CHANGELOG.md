@@ -7,6 +7,8 @@ All notable user-facing changes are recorded here.
 - Made the isolated MCP HTTP smoke test accept a real workspace membership
   when email verification is disabled instead of requiring Better Auth's
   email-verification flag.
+- Run release-candidate MCP database checks as the same unprivileged user as
+  the application so SQLite WAL ownership remains consistent.
 
 ## 0.25.6 - 2026-08-04
 

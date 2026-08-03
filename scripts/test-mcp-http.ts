@@ -368,6 +368,6 @@ function expectSearchResult(value: unknown, documentId: string) {
 }
 
 main().catch((error) => {
-  console.error(error instanceof Error ? error.message : error);
+  console.error(error instanceof Error ? error.stack ?? error.message : error);
   process.exitCode = 1;
 });

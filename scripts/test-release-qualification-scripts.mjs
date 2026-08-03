@@ -83,6 +83,7 @@ async function main() {
       "candidate image pull not ready yet",
       "qualification.log",
       "npm run test:mcp-http",
+      "exec -T --user node",
       "scripts/update.sh",
       "integrity_check",
       "http://127.0.0.1:${httpPort}",

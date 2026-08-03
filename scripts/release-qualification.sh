@@ -266,7 +266,11 @@ NODE
 
 run_mcp_http() {
   local directory="$1"
-  compose_for "$directory" exec -T -e NYXDOC_TEST_BASE_URL=http://gateway:3002 app npm run test:mcp-http
+  # The application process owns the SQLite database and WAL as `node`.
+  # Compose exec otherwise defaults to the image's root user, which can leave
+  # SQLite sidecar ownership inconsistent with the running application.
+  compose_for "$directory" exec -T --user node \
+    -e NYXDOC_TEST_BASE_URL=http://gateway:3002 app npm run test:mcp-http
 }
 
 run_browser_vertical() {
