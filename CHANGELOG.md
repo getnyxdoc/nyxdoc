@@ -2,6 +2,12 @@
 
 All notable user-facing changes are recorded here.
 
+## 0.25.7 - 2026-08-04
+
+- Made the isolated MCP HTTP smoke test accept a real workspace membership
+  when email verification is disabled instead of requiring Better Auth's
+  email-verification flag.
+
 ## 0.25.6 - 2026-08-04
 
 - Fixed fresh-install release qualification to treat an empty optional

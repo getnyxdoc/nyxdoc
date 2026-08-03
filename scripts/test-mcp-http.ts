@@ -19,12 +19,10 @@ async function main() {
     .prepare(
       `SELECT wm.workspace_id, wm.user_id
        FROM workspace_members wm
-       JOIN user u ON u.id = wm.user_id
-       WHERE u.emailVerified = 1
        ORDER BY wm.created_at ASC LIMIT 1`,
     )
     .get() as { workspace_id: string; user_id: string } | undefined;
-  assert(membership, "A verified local workspace is required. Sign in once before this test.");
+  assert(membership, "A local workspace is required. Sign in once before this test.");
 
   const createdToken = createWorkspaceToken(sqlite, {
     workspaceId: membership.workspace_id,
