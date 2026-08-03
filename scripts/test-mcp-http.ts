@@ -113,7 +113,7 @@ async function main() {
       actionType: "agent.update",
       payload: {
         agentId: managementContext.agent.id,
-        displayName: "MCP HTTP test",
+        status: "active",
       },
     };
     const adminProposal = await client.callTool({

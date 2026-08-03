@@ -9,6 +9,8 @@ All notable user-facing changes are recorded here.
   email-verification flag.
 - Run release-candidate MCP database checks as the same unprivileged user as
   the application so SQLite WAL ownership remains consistent.
+- Align the human-approved administration smoke request with the canonical
+  workspace-access update contract.
 
 ## 0.25.6 - 2026-08-04
 
