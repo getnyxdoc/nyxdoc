@@ -1,4 +1,6 @@
+import { randomUUID } from "node:crypto";
 import { afterEach, describe, expect, it } from "vitest";
+import { updateAgentWorkspaceMembership } from "@/lib/agents/service";
 import type { NyxDatabase } from "@/lib/db/client";
 import { createAssignmentSchema, savedViewQuerySchema } from "@/lib/collaboration/schemas";
 import {
@@ -11,7 +13,8 @@ import {
   runSavedView,
   updateAssignment,
 } from "@/lib/collaboration/service";
-import { queryDocuments } from "@/lib/documents/service";
+import { createDocument, queryDocuments, updateDocument } from "@/lib/documents/service";
+import { parseNyxdocDocumentV2 } from "@/lib/editor/schema";
 import { createWorkspaceToken } from "@/lib/tokens/service";
 import { createTestDatabase, createTestUser } from "@/test/fixture";
 
@@ -50,6 +53,13 @@ function fixture() {
     second,
     actor: { type: "human" as const, userId: user.id, label: user.name },
   };
+}
+
+function content(text: string) {
+  return parseNyxdocDocumentV2({
+    schemaVersion: 2,
+    blocks: [{ id: randomUUID(), type: "p", children: [{ text }] }],
+  });
 }
 
 describe("workspace collaboration service", () => {
@@ -198,36 +208,160 @@ describe("workspace collaboration service", () => {
     }).map((view) => view.name)).not.toContain("나만 보는 보기");
   });
 
-  it("treats migrated legacy agent IDs as opaque stable identities", () => {
+  it("treats migrated identity and workspace grant IDs as separate opaque stable identifiers", () => {
     const { database, user, workspace, document, actor } = fixture();
     const now = new Date().toISOString();
     database.prepare(
       `INSERT INTO agents
        (id, owner_user_id, display_name, avatar_media_id, status,
         created_by_user_id, created_at, updated_at)
-       VALUES ('legacy-agent-gameroom', ?, 'Gameroom Main', NULL, 'active', ?, ?, ?)`,
+       VALUES ('legacy-agent-identity-gameroom', ?, 'Gameroom Main', NULL, 'active', ?, ?, ?)`,
     ).run(user.id, user.id, now, now);
     database.prepare(
       `INSERT INTO agent_ownership
        (agent_id, owner_type, owner_user_id, organization_id, created_at, updated_at)
-       VALUES ('legacy-agent-gameroom', 'personal', ?, NULL, ?, ?)`,
+       VALUES ('legacy-agent-identity-gameroom', 'personal', ?, NULL, ?, ?)`,
     ).run(user.id, now, now);
     database.prepare(
       `INSERT INTO workspace_agents
        (id, workspace_id, display_name, avatar_media_id, role, status,
          created_by_user_id, created_at, updated_at, agent_identity_id)
-       VALUES ('legacy-agent-gameroom', ?, 'Gameroom Main', NULL, 'editor', 'active', ?, ?, ?,
-               'legacy-agent-gameroom')`,
+       VALUES ('legacy-agent-grant-gameroom', ?, 'Gameroom Main', NULL, 'editor', 'active', ?, ?, ?,
+               'legacy-agent-identity-gameroom')`,
     ).run(workspace.id, user.id, now, now);
 
     const input = createAssignmentSchema.parse({
       documentId: document.id,
-      agentId: "legacy-agent-gameroom",
+      agentId: "legacy-agent-grant-gameroom",
       assignmentType: "owner",
     });
-    expect(savedViewQuerySchema.parse({ assignedAgentId: "legacy-agent-gameroom" }))
-      .toEqual({ assignedAgentId: "legacy-agent-gameroom" });
+    expect(savedViewQuerySchema.parse({ assignedAgentId: "legacy-agent-grant-gameroom" }))
+      .toEqual({ assignedAgentId: "legacy-agent-grant-gameroom" });
     expect(assignDocument(database, workspace.id, actor, input))
-      .toMatchObject({ agentId: "legacy-agent-gameroom" });
+      .toMatchObject({
+        agentId: "legacy-agent-grant-gameroom",
+        agentIdentityId: "legacy-agent-identity-gameroom",
+      });
+  });
+
+  it("denies out-of-tree assignments without inserting an assignment row", () => {
+    const { database, user, workspace, first, actor } = fixture();
+    const root = createDocument(database, workspace.id, {
+      type: "human",
+      userId: user.id,
+      label: user.name,
+      source: "web",
+    }, { title: "허용 루트", content: content("root") });
+    const child = createDocument(database, workspace.id, {
+      type: "human",
+      userId: user.id,
+      label: user.name,
+      source: "web",
+    }, { title: "허용 하위", parentDocumentId: root.document.id, content: content("child") });
+    const outside = createDocument(database, workspace.id, {
+      type: "human",
+      userId: user.id,
+      label: user.name,
+      source: "web",
+    }, { title: "범위 밖", content: content("outside") });
+    database.prepare(
+      "UPDATE workspace_agents SET root_document_id = ?, scope_mode = 'document_tree' WHERE id = ?",
+    ).run(root.document.id, first.summary.agentId);
+
+    expect(assignDocument(database, workspace.id, actor, {
+      documentId: child.document.id,
+      agentId: first.summary.agentId,
+      assignmentType: "owner",
+    })).toMatchObject({ documentId: child.document.id, status: "active" });
+
+    let failure: unknown;
+    try {
+      assignDocument(database, workspace.id, actor, {
+        documentId: outside.document.id,
+        agentId: first.summary.agentId,
+        assignmentType: "owner",
+      });
+    } catch (error) {
+      failure = error;
+    }
+    expect(failure).toMatchObject({
+      code: "FORBIDDEN",
+      details: expect.objectContaining({
+        reason: "ASSIGNEE_DOCUMENT_SCOPE_DENIED",
+        field: "agentId",
+        documentId: outside.document.id,
+        rootDocumentId: root.document.id,
+      }),
+    });
+    expect(database.prepare(
+      "SELECT COUNT(*) AS count FROM agent_document_assignments WHERE document_id = ?",
+    ).get(outside.document.id)).toEqual({ count: 0 });
+  });
+
+  it("cancels and audits assignments when a grant root narrows or its assigned document moves outside", () => {
+    const { database, user, workspace, first, actor } = fixture();
+    const human = { type: "human" as const, userId: user.id, label: user.name, source: "web" as const };
+    const root = createDocument(database, workspace.id, human, { title: "범위 루트", content: content("root") });
+    const child = createDocument(database, workspace.id, human, {
+      title: "이동 대상",
+      parentDocumentId: root.document.id,
+      content: content("child"),
+    });
+    const outside = createDocument(database, workspace.id, human, {
+      title: "범위 축소로 해제될 대상",
+      content: content("outside"),
+    });
+    const firstAssignment = assignDocument(database, workspace.id, actor, {
+      documentId: child.document.id,
+      agentId: first.summary.agentId,
+      assignmentType: "owner",
+    });
+    const outsideAssignment = assignDocument(database, workspace.id, actor, {
+      documentId: outside.document.id,
+      agentId: first.summary.agentId,
+      assignmentType: "reviewer",
+    });
+    const globalAgent = database.prepare(
+      "SELECT agent_identity_id FROM workspace_agents WHERE id = ?",
+    ).get(first.summary.agentId) as { agent_identity_id: string };
+
+    updateAgentWorkspaceMembership(database, {
+      userId: user.id,
+      workspaceId: workspace.id,
+      agentId: globalAgent.agent_identity_id,
+      accessProfile: "writer",
+      rootDocumentId: root.document.id,
+      status: "active",
+    });
+    expect(listAssignmentHistory(database, workspace.id, { documentId: child.document.id }))
+      .toEqual(expect.arrayContaining([expect.objectContaining({ id: firstAssignment.id, status: "active" })]));
+    expect(listAssignmentHistory(database, workspace.id, { documentId: outside.document.id }))
+      .toEqual(expect.arrayContaining([expect.objectContaining({ id: outsideAssignment.id, status: "cancelled" })]));
+    expect(() => updateAssignment(database, workspace.id, outsideAssignment.id, actor, {
+      status: "active",
+    })).toThrowError(expect.objectContaining({
+      code: "FORBIDDEN",
+      details: expect.objectContaining({
+        reason: "ASSIGNEE_DOCUMENT_SCOPE_DENIED",
+        documentId: outside.document.id,
+      }),
+    }));
+
+    updateDocument(database, workspace.id, human, child.document.id, {
+      baseRevision: child.document.revisionNumber,
+      parentDocumentId: null,
+    });
+    expect(listAssignmentHistory(database, workspace.id, { documentId: child.document.id }))
+      .toEqual(expect.arrayContaining([expect.objectContaining({ id: firstAssignment.id, status: "cancelled" })]));
+    expect(database.prepare(
+      `SELECT COUNT(*) AS count FROM workspace_audit_events
+       WHERE workspace_id = ? AND action = 'assignment.cancelled_outside_agent_boundary'
+         AND target_id = ?`,
+    ).get(workspace.id, firstAssignment.id)).toEqual({ count: 1 });
+    expect(database.prepare(
+      `SELECT COUNT(*) AS count FROM workspace_audit_events
+       WHERE workspace_id = ? AND action = 'assignment.cancelled_outside_agent_boundary'
+         AND target_id = ?`,
+    ).get(workspace.id, outsideAssignment.id)).toEqual({ count: 1 });
   });
 });

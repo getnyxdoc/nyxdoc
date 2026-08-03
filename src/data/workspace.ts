@@ -50,13 +50,16 @@ export function loadWorkspaceView(
     fallbackOnMissingSelector: fallbackOnMissingWorkspace,
     locale,
   });
-  const workspaceMember = workspace.accessSource === "membership";
-  let documents = workspaceMember
+  // `membership` and `team` are both resolved by getHumanWorkspacePrincipal
+  // into a full workspace principal. Only a direct document grant is limited
+  // to its explicitly shared documents.
+  const hasWorkspaceAccess = workspace.accessSource !== "document_grant";
+  let documents = hasWorkspaceAccess
     ? listDocuments(sqlite, workspace.id)
     : listHumanGrantedDocuments(sqlite, workspace.id, user.id);
   if (
     documents.length === 0
-    && workspaceMember
+    && hasWorkspaceAccess
     && humanRoleAllows(workspace.role, "documents.create")
   ) {
     const starter = workspaceStarterContent(locale);
@@ -107,14 +110,14 @@ export function loadWorkspaceView(
     revisions: listDocumentRevisions(sqlite, workspace.id, activeSummary.id, 12),
     trashWorkspaces,
     trashedWorkspaces: listUserTrashedWorkspaces(sqlite, user.id),
-    agents: workspaceMember ? listWorkspaceAgents(sqlite, workspace.id) : [],
-    assignments: workspaceMember
+    agents: hasWorkspaceAccess ? listWorkspaceAgents(sqlite, workspace.id) : [],
+    assignments: hasWorkspaceAccess
       ? listAssignments(sqlite, workspace.id, { status: "active" })
       : [],
-    tasks: workspaceMember
+    tasks: hasWorkspaceAccess
       ? listDocumentTasks(sqlite, workspace.id, { limit: 200 }).tasks
       : [],
-    savedViews: workspaceMember ? listSavedViews(sqlite, workspace.id, actor) : [],
+    savedViews: hasWorkspaceAccess ? listSavedViews(sqlite, workspace.id, actor) : [],
     navigation: getWorkspaceNavigationPreference(sqlite, {
       userId: user.id,
       workspaceId: workspace.id,
@@ -132,21 +135,21 @@ export function loadWorkspaceView(
       publicUrl: getCollaborationPublicUrl(),
     },
     permissions: {
-      canAccessWorkspaceFeatures: workspaceMember,
-      canCreateDocuments: workspaceMember && humanRoleAllows(workspace.role, "documents.create"),
+      canAccessWorkspaceFeatures: hasWorkspaceAccess,
+      canCreateDocuments: hasWorkspaceAccess && humanRoleAllows(workspace.role, "documents.create"),
       canEditDocuments: humanDocumentPrincipalAllows(activePrincipal, "documents.update"),
       canCommitDocuments: humanDocumentPrincipalAllows(activePrincipal, "documents.commit"),
       canExportDocuments: humanDocumentPrincipalAllows(activePrincipal, "exports.create"),
-      canShareDocuments: workspaceMember && humanRoleAllows(workspace.role, "documents.share"),
-      canTrashDocuments: workspaceMember && humanRoleAllows(workspace.role, "documents.trash"),
-      canManageDocumentStructure: workspaceMember && humanRoleAllows(workspace.role, "documents.update"),
+      canShareDocuments: hasWorkspaceAccess && humanRoleAllows(workspace.role, "documents.share"),
+      canTrashDocuments: hasWorkspaceAccess && humanRoleAllows(workspace.role, "documents.trash"),
+      canManageDocumentStructure: hasWorkspaceAccess && humanRoleAllows(workspace.role, "documents.update"),
       canRestoreRevisions: humanDocumentPrincipalAllows(activePrincipal, "revisions.restore"),
-      canManageAssignments: workspaceMember && humanRoleAllows(workspace.role, "assignments.manage"),
-      canCreateTasks: workspaceMember && humanRoleAllows(workspace.role, "tasks.create"),
-      canUpdateTasks: workspaceMember && humanRoleAllows(workspace.role, "tasks.update"),
-      canManageTasks: workspaceMember && humanRoleAllows(workspace.role, "tasks.manage"),
-      canManageSavedViews: workspaceMember && humanRoleAllows(workspace.role, "saved_views.manage"),
-      canManageAllSavedViews: workspaceMember
+      canManageAssignments: hasWorkspaceAccess && humanRoleAllows(workspace.role, "assignments.manage"),
+      canCreateTasks: hasWorkspaceAccess && humanRoleAllows(workspace.role, "tasks.create"),
+      canUpdateTasks: hasWorkspaceAccess && humanRoleAllows(workspace.role, "tasks.update"),
+      canManageTasks: hasWorkspaceAccess && humanRoleAllows(workspace.role, "tasks.manage"),
+      canManageSavedViews: hasWorkspaceAccess && humanRoleAllows(workspace.role, "saved_views.manage"),
+      canManageAllSavedViews: hasWorkspaceAccess
         && (workspace.role === "owner" || workspace.role === "admin"),
     },
   };

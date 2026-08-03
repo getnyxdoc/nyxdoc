@@ -50,13 +50,15 @@ function lineNumber(source, offset) {
 }
 
 if (verticalDirectories.length === 0) {
-  console.log("No browser vertical test directory found; first-party route mock guard skipped.");
-  process.exit(0);
+  console.error("A browser vertical test directory is required; release qualification cannot skip the real boundary test.");
+  process.exit(1);
 }
 
 const violations = [];
+let inspectedFiles = 0;
 for (const directory of verticalDirectories) {
   for (const file of await sourceFiles(directory)) {
+    inspectedFiles += 1;
     const source = await readFile(file, "utf8");
     const mentionsFirstPartyRoute = firstPartyRoute.test(source);
     routeCall.lastIndex = 0;
@@ -78,10 +80,15 @@ for (const directory of verticalDirectories) {
   }
 }
 
+if (inspectedFiles === 0) {
+  console.error("Browser vertical test directories contain no executable test sources.");
+  process.exit(1);
+}
+
 if (violations.length > 0) {
   console.error("Browser vertical tests must exercise first-party boundaries over real HTTP; remove these route mocks:");
   for (const violation of violations) console.error(`  - ${violation}`);
   process.exit(1);
 }
 
-console.log("No first-party route mocks found in browser vertical tests.");
+console.log(`No first-party route mocks found in ${inspectedFiles} browser vertical test source(s).`);

@@ -233,4 +233,57 @@ describe("agent image upload tickets", () => {
       filename: "not-authorized.png",
     })).toThrowError(expect.objectContaining({ code: "UNAUTHORIZED" }));
   });
+
+  it("rechecks the current document subtree before finalizing a scoped ticket", async () => {
+    const { database, mediaRoot, user, workspace, document } = fixture();
+    const child = createDocument(database, workspace.id, {
+      type: "human",
+      userId: user.id,
+      label: user.name,
+      source: "web",
+    }, {
+      title: "Scoped child",
+      parentDocumentId: document.id,
+      content: {
+        schemaVersion: 2,
+        blocks: [{ id: "scoped-child", type: "p", children: [{ text: "Scoped" }] }],
+      },
+    }).document;
+    const outside = createDocument(database, workspace.id, {
+      type: "human",
+      userId: user.id,
+      label: user.name,
+      source: "web",
+    }, {
+      title: "Outside root",
+      content: {
+        schemaVersion: 2,
+        blocks: [{ id: "outside-root", type: "p", children: [{ text: "Outside" }] }],
+      },
+    }).document;
+    const scopedCredential = createWorkspaceToken(database, {
+      workspaceId: workspace.id,
+      userId: user.id,
+      name: "Scoped image agent",
+      role: "editor",
+      rootDocumentId: document.id,
+      scopes: ["documents:read", "documents:write"],
+    });
+    const scopedIdentity = authenticateApiToken(database, `Bearer ${scopedCredential.token}`);
+    const ticket = createAgentMediaUploadTicket(database, scopedIdentity, {
+      documentId: child.id,
+      filename: "scoped.png",
+    });
+
+    database.prepare("UPDATE workspace_agents SET root_document_id = ? WHERE id = ?")
+      .run(outside.id, scopedIdentity.agentId);
+
+    await expect(consumeAgentMediaUploadTicket(database, {
+      ticketId: ticket.id,
+      authorization: ticket.authorization,
+      bytes: PNG_BYTES,
+    }, { mediaRoot })).rejects.toMatchObject({ code: "UNAUTHORIZED" });
+    expect(database.prepare("SELECT COUNT(*) AS count FROM media_assets").get())
+      .toEqual({ count: 0 });
+  });
 });

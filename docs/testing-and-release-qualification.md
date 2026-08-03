@@ -31,10 +31,13 @@ fixture, `src/**/*.test.ts`의 Vitest 테스트, `e2e/`의 Playwright 테스트,
 
 | 작업 | 현재 검증 | 이 전략에서의 역할 |
 |---|---|---|
-| `test` | `npm run typecheck`, `npm run lint`, `npm test`, `npm run build` | 빠른 정적·단위 게이트 |
+| `test` | release qualification script contract, `npm run typecheck`, `npm run lint`, `npm test`, `npm run build` | 빠른 정적·단위 게이트 |
 | `editor-e2e` | Chromium 설치 후 `npm run test:editor-e2e` | 실제 브라우저 편집기 계약 게이트 |
 | `integration` | first-party browser vertical mock guard, legacy agent 연결 회귀, MCP OAuth | 실제 HTTP/DB/auth vertical의 빠른 게이트 |
-| `compose-lifecycle` | `install.sh --build` → 보존 uninstall → 재설치 → 확인된 purge | Compose 데이터 생명주기 게이트 |
+| `compose-lifecycle` | `install.sh --build` → 보존 uninstall → 재설치 → 확인된 purge | PR의 Compose 데이터 생명주기 게이트 |
+| `build-candidate` | 한 번의 multi-arch build를 candidate 태그와 immutable manifest digest로 push | release 후보의 provenance 고정 |
+| `qualify-candidate` | exact digest fresh install → health/MCP → 보존 재설치 → 직전 stable에서 update → DB integrity/MCP | release blocking Compose·HTTP·MCP·upgrade 게이트 |
+| `promote-image` | receipt의 candidate digest·commit·필수 matrix를 확인한 뒤 같은 manifest에 semver/latest 태그 부여 | 검증한 이미지와 공개한 이미지가 같은지 보장 |
 
 Forgejo와 GitHub CI의 `integration`은 임시 SQLite DB를 만들고 실제 Next 개발
 서버를 띄운다. `scripts/test-agent-connect-http.ts`는 과거 형식의 agent ID와
@@ -45,12 +48,24 @@ Forgejo와 GitHub CI의 `integration`은 임시 SQLite DB를 만들고 실제 Ne
 검사도 전용 browser vertical 디렉터리에만 적용되며, 현재 `e2e/`의 UI 계약
 mock을 release evidence로 승격시키는 장치가 아니다.
 
-GitHub release workflow의 `quality`도 두 실제 HTTP 회귀와 mock guard를
-실행한 뒤 멀티아키텍처 이미지를 publish한다. 다만 현재 자동화에는 후보 이미지
-대상 Compose vertical, historical fixture 전체 집합, ephemeral VM, 운영 smoke가
-release job의 blocking 단계로 연결되어 있지 않다.
-해당 VM 게이트가 실제 workflow에 연결되기 전까지는 tag가 생성되거나 이미지가
-publish된 사실만으로 “완전한 릴리스 qualification”이라고 부르지 않는다.
+GitHub release workflow는 `quality` 뒤에 multi-arch 후보 이미지를 한 번만
+`candidate-<run>` 태그로 push하고, Buildx가 반환한 immutable manifest digest를
+`qualify-candidate`에 전달한다. 이 job은 새 GitHub runner를 ephemeral Linux
+qualification 환경으로 사용한다. Compose에는 tag가 아니라
+`ghcr.io/getnyxdoc/nyxdoc@sha256:…`만 주입하며, registry에서 다시 확인한 digest와
+Compose config의 image reference가 다르면 실패한다.
+
+qualification은 exact digest의 fresh install, gateway/collaboration health,
+실제 계정 생성·세션 확인, 두 브라우저 세션의 실제 `/collaboration` WebSocket 동기화와 명시적
+저장·새로고침 보존, gateway를 통한 컨테이너 안의 실제 `test:mcp-http`,
+normal uninstall 뒤 volume 보존 재설치, 직전 stable source/image에서 후보
+source/image로의 `update.sh`, SQLite `integrity_check`, 다시 한 번의 인증·MCP
+HTTP 및 기존 계정 브라우저 vertical을 수행한다. baseline에서 만든 실제 authenticated workspace의 SQLite
+row count가 upgrade 뒤 감소하지 않는지도 확인한다. 결과는 artifact로
+보존되는 `nyxdoc-release-qualification/v1` receipt다. `promote-image`는 receipt의
+digest·commit·필수 matrix를 다시 검증하며, 하나라도 빠지면 public semver/latest
+태그나 GitHub Release를 만들지 않는다. 승격은 재빌드가 아니라 같은 manifest
+digest에 태그만 추가한다.
 
 `compose.yaml`은 단일 이미지에서 다음 세 프로세스를 묶는다.
 
@@ -121,6 +136,14 @@ L1의 원칙은 “경계를 대체한 테스트는 그 경계의 통합 증거�
 5. collaboration 기능이면 gateway를 통한 실제 WebSocket 두 세션과
    commit/reset/archive 경로를 검증한다.
 
+릴리스 전용 `e2e/vertical/release-candidate.spec.ts`는 first-party route를 mock하지 않는다.
+fresh 후보에서는 실제 가입·세션을 만들고, 같은 문서를 연 두 브라우저가 gateway의
+`/collaboration` WebSocket에 접속한 뒤 한쪽의 변경을 다른 쪽에서 commit 전에 관찰한다. 이후
+명시적으로 저장하고 관찰 브라우저를 새로고침해 정본 보존과 clean 상태를 확인한다. historical
+upgrade에서는 이전 stable 이미지에서 만든 기존 계정으로 후보 업데이트 뒤 로그인하여 같은 수직
+경계를 반복한다. 전용 spec 디렉터리가 없거나 실행 가능한 spec이 없거나 first-party route mocking이
+발견되면 `check-browser-vertical-no-first-party-mocks.mjs`가 hard fail한다.
+
 저장소에 이미 `scripts/test-mcp-http.ts`, `scripts/test-mcp-oauth-http.ts`,
 `scripts/test-codex-e2e.ts`가 있어 실제 MCP HTTP/OAuth/Codex 경로의 출발점으로
 사용할 수 있다. 현재 작업 트리의 `scripts/test-agent-connect-http.ts`도 실제
@@ -151,7 +174,7 @@ L3에서는 disposable DB/volume과 테스트 계정만 사용하고, production
 | 브라우저 계약 L2 | local dev server, Chromium | GitHub `editor-e2e` | PR blocking; 단독 release 근거 아님 |
 | HTTP/DB/auth vertical 일부 | 임시 SQLite 파일, Next dev, 실제 HTTP/auth/MCP OAuth | GitHub `integration` | PR blocking; Compose/릴리스 lifecycle 대체 불가 |
 | Compose lifecycle L4 | Docker Compose, 실제 volume | GitHub `compose-lifecycle` | PR blocking; 기능 vertical을 대체하지 않음 |
-| Compose vertical L3 | 후보 이미지, 실제 HTTP/DB/auth, disposable volume | release qualification 절차 | 릴리스 blocking |
+| Compose vertical L3 | 후보 이미지, 실제 HTTP/DB/auth, 두 브라우저 WebSocket, disposable volume | release qualification 절차 | 릴리스 blocking |
 | long-lived staging | 누적 상태의 장기 staging VM | 운영자 수동 탐색 | advisory; 실패는 조사 신호 |
 | ephemeral VM lifecycle | 후보마다 새 Linux VM, exact image/Compose/env | release qualification 절차 | 릴리스 정본·blocking |
 | production smoke | 운영 endpoint와 read-only 계정 | 배포 직후/변경 후 | 안전 신호; qualification 대체 불가 |
@@ -245,6 +268,10 @@ historical fixture와 그 사건이 침범한 경계에 대한 실제 vertical�
 5. 필요한 collaboration WebSocket 및 MCP/OAuth vertical을 실행한다.
 6. 로그, image digest, fixture ID, DB integrity 결과를 보관한 뒤 VM과 volume을
    폐기한다.
+
+브라우저 증거는 receipt 옆 `playwright/fresh`와 `playwright/historical-upgrade`에 로그·trace·실패
+캡처로 보존한다. receipt는 두 단계 각각의 실제 session과 collaboration WebSocket check가 모두
+`passed`가 아니면 검증되지 않으며, 검증되지 않은 후보는 semver/latest로 승격할 수 없다.
 
 설치·업데이트가 실패하면 자동으로 production을 rollback하거나 데이터를
    덮어쓰지 않는다. 실패한 VM과 증거를 보존하고 원인을 조사한 뒤 새 VM에서

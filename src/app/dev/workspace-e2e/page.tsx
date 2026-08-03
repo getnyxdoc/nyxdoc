@@ -59,6 +59,7 @@ const navigationDocuments = Array.from({ length: 48 }, (_, index) => ({
 
 const taskAgents = [{
   id: "00000000-0000-4000-8000-0000000000e1",
+  agentIdentityId: "00000000-0000-4000-8000-0000000000f1",
   displayName: "Editor Agent",
   avatarMediaId: null,
   accessProfile: "writer" as const,
@@ -69,6 +70,7 @@ const taskAgents = [{
   updatedAt: "2026-07-14T01:00:00.000Z",
 }, {
   id: "00000000-0000-4000-8000-0000000000a1",
+  agentIdentityId: "00000000-0000-4000-8000-0000000000b1",
   displayName: "Admin Agent",
   avatarMediaId: null,
   accessProfile: "custom" as const,
@@ -83,6 +85,7 @@ const taskAgents = [{
   updatedAt: "2026-07-14T01:00:00.000Z",
 }, {
   id: "00000000-0000-4000-8000-0000000000d1",
+  agentIdentityId: "00000000-0000-4000-8000-0000000000c1",
   displayName: "Disabled Admin",
   avatarMediaId: null,
   accessProfile: "custom" as const,

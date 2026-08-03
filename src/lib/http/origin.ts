@@ -5,7 +5,10 @@ export class OriginError extends Error {
   }
 }
 
-export function assertSameOrigin(request: Request) {
+export function assertSameOrigin(
+  request: Request,
+  trustedOrigins: readonly string[] = getTrustedOrigins(),
+) {
   const origin = request.headers.get("origin");
   const fetchSite = request.headers.get("sec-fetch-site");
   if (!origin) {
@@ -13,7 +16,7 @@ export function assertSameOrigin(request: Request) {
     return;
   }
   try {
-    const allowed = new Set(getTrustedOrigins().map((value) => new URL(value).origin));
+    const allowed = new Set(trustedOrigins.map((value) => new URL(value).origin));
     if (!allowed.has(new URL(origin).origin)) throw new OriginError();
   } catch (error) {
     if (error instanceof OriginError) throw error;

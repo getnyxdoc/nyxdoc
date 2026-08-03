@@ -109,6 +109,12 @@ function internalRequestContext(value: unknown) {
     expectedDraftVersion: Number.isInteger(input.expectedDraftVersion)
       ? input.expectedDraftVersion
       : undefined,
+    expectedGeneration: Number.isInteger(input.expectedGeneration)
+      ? input.expectedGeneration
+      : undefined,
+    expectedBaseRevision: Number.isInteger(input.expectedBaseRevision)
+      ? input.expectedBaseRevision
+      : undefined,
     actorType: diagnosticIdentifier(actor?.type),
     actorSource: diagnosticIdentifier(actor?.source),
     actorPrincipalId: diagnosticIdentifier(actor?.principalId ?? actor?.userId),
@@ -541,6 +547,18 @@ function parseResetRequest(value: unknown): ResetWorkingDocumentRequest {
   return {
     workspaceId: requireString(input.workspaceId, "workspaceId"),
     documentId: requireString(input.documentId, "documentId"),
+    expectedGeneration: optionalInteger(input.expectedGeneration, "expectedGeneration")
+      ?? (() => {
+        throw new DocumentServiceError("INVALID_INPUT", "expectedGeneration 값이 필요합니다.");
+      })(),
+    expectedDraftVersion: optionalInteger(input.expectedDraftVersion, "expectedDraftVersion")
+      ?? (() => {
+        throw new DocumentServiceError("INVALID_INPUT", "expectedDraftVersion 값이 필요합니다.");
+      })(),
+    expectedBaseRevision: optionalInteger(input.expectedBaseRevision, "expectedBaseRevision")
+      ?? (() => {
+        throw new DocumentServiceError("INVALID_INPUT", "expectedBaseRevision 값이 필요합니다.");
+      })(),
     actor: parseDraftActor(input.actor),
     revisionId: typeof input.revisionId === "string" ? input.revisionId : undefined,
     requestId: typeof input.requestId === "string" ? input.requestId : undefined,

@@ -6,6 +6,7 @@ import {
   humanRoleAllows,
   recordWorkspaceAuditEvent,
 } from "@/lib/authz/permissions";
+import { cancelAssignmentsOutsideWorkspaceAgentBoundaries } from "@/lib/agents/workspace-grant-boundary";
 import type { NyxDatabase } from "@/lib/db/client";
 import {
   type BlockType,
@@ -55,7 +56,7 @@ import {
   authenticateAgentCredential,
   requireTokenDocumentAccess,
   requireTokenParentAccess,
-  requireTokenScope,
+  requireTokenPermission,
 } from "@/lib/tokens/service";
 
 type DocumentRow = {
@@ -200,9 +201,9 @@ export function requireDocumentMoveAuthorization(
     if (actor.principalId && identity.globalAgentId !== actor.principalId) {
       throw new DocumentServiceError("FORBIDDEN", "에이전트 연결과 작업자 신원이 일치하지 않습니다.");
     }
-    requireTokenScope(identity, "documents:write");
+    requireTokenPermission(identity, "documents:write", "documents.update");
     if (options.requireCommitPermission) {
-      requireTokenScope(identity, "documents:commit");
+      requireTokenPermission(identity, "documents:commit", "documents.commit");
     }
     requireTokenDocumentAccess(database, identity, documentId);
     requireTokenParentAccess(database, identity, parentDocumentId);
@@ -699,6 +700,16 @@ function revisionOrigin(actor: DocumentActor) {
   return "seed";
 }
 
+function tableHasColumn(
+  database: NyxDatabase,
+  table: string,
+  column: string,
+) {
+  return Boolean(database.prepare(
+    "SELECT 1 FROM pragma_table_info(?) WHERE name = ?",
+  ).get(table, column));
+}
+
 function insertEvent(
   database: NyxDatabase,
   input: {
@@ -711,6 +722,35 @@ function insertEvent(
     createdAt: string;
   },
 ) {
+  const supportsActorSnapshot = tableHasColumn(
+    database,
+    "document_events",
+    "actor_principal_id",
+  ) && tableHasColumn(database, "document_events", "actor_avatar_media_id");
+  if (!supportsActorSnapshot) {
+    const result = database
+      .prepare(
+        `INSERT INTO document_events
+         (id, workspace_id, document_id, revision_id, event_type, actor_type,
+          actor_user_id, actor_token_id, actor_label, source, summary, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        randomUUID(),
+        input.workspaceId,
+        input.documentId,
+        input.revisionId,
+        input.eventType,
+        input.actor.type,
+        input.actor.userId,
+        input.actor.tokenId ?? null,
+        input.actor.label,
+        input.actor.source,
+        input.summary,
+        input.createdAt,
+      );
+    return Number(result.lastInsertRowid);
+  }
   const result = database
     .prepare(
       `INSERT INTO document_events
@@ -736,6 +776,86 @@ function insertEvent(
       input.actor.avatarMediaId ?? null,
     );
   return Number(result.lastInsertRowid);
+}
+
+type CanonicalRevisionWrite = {
+  workspaceId: string;
+  documentId: string;
+  revisionNumber: number;
+  baseRevisionId: string | null;
+  content: NyxdocDocumentV2;
+  title: string;
+  parentDocumentId: string | null;
+  metadata: DocumentMetadata;
+  actor: DocumentActor;
+  summary: string;
+  eventType: DocumentEvent["eventType"];
+  createdAt: string;
+};
+
+/**
+ * The only runtime writer for canonical revision rows and their matching event.
+ * Callers must already be inside the mutation transaction that persisted the
+ * corresponding document projection.
+ */
+function appendCanonicalRevision(
+  database: NyxDatabase,
+  input: CanonicalRevisionWrite,
+) {
+  const revisionId = randomUUID();
+  const revisionValues = [
+    revisionId,
+    input.documentId,
+    input.revisionNumber,
+    snapshot(input.content),
+    input.summary,
+    revisionOrigin(input.actor),
+    input.actor.userId,
+    input.createdAt,
+    input.baseRevisionId,
+    input.actor.type,
+    input.actor.userId,
+    input.actor.tokenId ?? null,
+    input.actor.label,
+    input.actor.source,
+    input.title,
+    input.parentDocumentId,
+    JSON.stringify(input.metadata),
+  ];
+  const supportsActorSnapshot = tableHasColumn(
+    database,
+    "document_revisions",
+    "actor_principal_id",
+  ) && tableHasColumn(database, "document_revisions", "actor_avatar_media_id");
+  database.prepare(
+    `INSERT INTO document_revisions
+     (id, document_id, revision_number, snapshot_json, summary, origin, patch_id,
+      created_by_user_id, created_at, base_revision_id, actor_type, actor_user_id,
+      actor_token_id, actor_label, source, title_snapshot, parent_document_id_snapshot,
+      document_metadata_json${supportsActorSnapshot ? ", actor_principal_id, actor_avatar_media_id" : ""})
+     VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?${supportsActorSnapshot ? ", ?, ?" : ""})`,
+  ).run(
+    ...revisionValues,
+    ...(supportsActorSnapshot
+      ? [
+          input.actor.principalId ?? (input.actor.type === "human" ? input.actor.userId : null),
+          input.actor.avatarMediaId ?? null,
+        ]
+      : []),
+  );
+  database
+    .prepare("UPDATE documents SET current_revision_id = ?, updated_at = ? WHERE id = ?")
+    .run(revisionId, input.createdAt, input.documentId);
+  const eventCursor = insertEvent(database, {
+    workspaceId: input.workspaceId,
+    documentId: input.documentId,
+    revisionId,
+    eventType: input.eventType,
+    actor: input.actor,
+    summary: input.summary,
+    createdAt: input.createdAt,
+  });
+  return { revisionId, eventCursor };
 }
 
 function uniqueSlug(database: NyxDatabase, workspaceId: string, title: string) {
@@ -1104,7 +1224,6 @@ export function createDocument(
     );
     const now = new Date().toISOString();
     const blocks: PreparedBlockInput[] = persistedV2.blocks;
-    const revisionId = randomUUID();
     const treeOrder = nextTreeOrder(database, workspaceId, parentDocumentId);
     database
       .prepare(
@@ -1169,44 +1288,18 @@ export function createDocument(
       now,
     );
 
-    database
-      .prepare(
-        `INSERT INTO document_revisions
-         (id, document_id, revision_number, snapshot_json, summary, origin, patch_id,
-          created_by_user_id, created_at, base_revision_id, actor_type, actor_user_id,
-          actor_token_id, actor_label, source, title_snapshot, parent_document_id_snapshot,
-          document_metadata_json, actor_principal_id, actor_avatar_media_id)
-         VALUES (?, ?, 1, ?, ?, ?, NULL, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      )
-      .run(
-        revisionId,
-        documentId,
-        snapshot(persistedV2.content),
-        summary,
-        revisionOrigin(actor),
-        actor.userId,
-        now,
-        actor.type,
-        actor.userId,
-        actor.tokenId ?? null,
-        actor.label,
-        actor.source,
-        title,
-        parentDocumentId,
-        JSON.stringify({ documentType, workflowStatus, tags }),
-        actor.principalId ?? (actor.type === "human" ? actor.userId : null),
-        actor.avatarMediaId ?? null,
-      );
-    database
-      .prepare("UPDATE documents SET current_revision_id = ? WHERE id = ?")
-      .run(revisionId, documentId);
-    const eventCursor = insertEvent(database, {
+    const { revisionId, eventCursor } = appendCanonicalRevision(database, {
       workspaceId,
       documentId,
-      revisionId,
-      eventType: "created",
+      revisionNumber: 1,
+      baseRevisionId: null,
+      content: persistedV2.content,
+      title,
+      parentDocumentId,
+      metadata: { documentType, workflowStatus, tags },
       actor,
       summary,
+      eventType: "created",
       createdAt: now,
     });
     const result: DocumentMutationResult = {
@@ -1388,6 +1481,20 @@ export function updateDocument(
       database
         .prepare("UPDATE documents SET parent_document_id = ?, tree_order = ? WHERE id = ?")
         .run(parentDocumentId, nextTreeOrder(database, workspaceId, parentDocumentId), documentId);
+      // The move can take this document (or its descendants) outside another
+      // agent grant's document-tree root. Cancel stale active responsibility
+      // rows before this canonical revision is committed.
+      cancelAssignmentsOutsideWorkspaceAgentBoundaries(database, {
+        workspaceId,
+        actor: {
+          type: actor.type,
+          label: actor.label,
+          userId: actor.type === "human" ? actor.userId : null,
+          agentId: actor.type === "agent" ? actor.principalId ?? null : null,
+        },
+        reason: "document_moved",
+        now,
+      });
       changed = true;
     }
 
@@ -1500,53 +1607,24 @@ export function updateDocument(
     }
 
     const nextDocument = getDocument(database, workspaceId, documentId);
-    const revisionId = randomUUID();
     const revisionNumber = current.revision_number + 1;
     const summary = cleanSummary(input.summary, `${actor.label}가 문서를 수정했습니다.`);
-    database
-      .prepare(
-        `INSERT INTO document_revisions
-         (id, document_id, revision_number, snapshot_json, summary, origin, patch_id,
-          created_by_user_id, created_at, base_revision_id, actor_type, actor_user_id,
-          actor_token_id, actor_label, source, title_snapshot, parent_document_id_snapshot,
-          document_metadata_json, actor_principal_id, actor_avatar_media_id)
-         VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      )
-      .run(
-        revisionId,
-        documentId,
-        revisionNumber,
-        snapshot(nextDocument.content),
-        summary,
-        revisionOrigin(actor),
-        actor.userId,
-        now,
-        current.current_revision_id,
-        actor.type,
-        actor.userId,
-        actor.tokenId ?? null,
-        actor.label,
-        actor.source,
-        nextDocument.title,
-        nextDocument.parentDocumentId,
-        JSON.stringify({
-          documentType: nextDocument.documentType,
-          workflowStatus: nextDocument.workflowStatus,
-          tags: nextDocument.tags,
-        }),
-        actor.principalId ?? (actor.type === "human" ? actor.userId : null),
-        actor.avatarMediaId ?? null,
-      );
-    database
-      .prepare("UPDATE documents SET current_revision_id = ?, updated_at = ? WHERE id = ?")
-      .run(revisionId, now, documentId);
-    const eventCursor = insertEvent(database, {
+    const { eventCursor } = appendCanonicalRevision(database, {
       workspaceId,
       documentId,
-      revisionId,
-      eventType: actor.source === "rollback" ? "restored" : "updated",
+      revisionNumber,
+      baseRevisionId: current.current_revision_id,
+      content: nextDocument.content,
+      title: nextDocument.title,
+      parentDocumentId: nextDocument.parentDocumentId,
+      metadata: {
+        documentType: nextDocument.documentType,
+        workflowStatus: nextDocument.workflowStatus,
+        tags: nextDocument.tags,
+      },
       actor,
       summary,
+      eventType: actor.source === "rollback" ? "restored" : "updated",
       createdAt: now,
     });
     const result: DocumentMutationResult = {

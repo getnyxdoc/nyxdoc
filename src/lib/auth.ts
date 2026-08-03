@@ -28,6 +28,7 @@ import {
   MCP_OAUTH_DEFAULT_SCOPE,
   MCP_OAUTH_SCOPES,
 } from "@/lib/mcp/oauth";
+import { assertSameOrigin, OriginError } from "@/lib/http/origin";
 
 function reportBackgroundEmailFailure(kind: string, error: unknown) {
   console.error(`[nyxdoc] ${kind} email failed`, error instanceof Error ? error.message : "unknown error");
@@ -40,13 +41,17 @@ function authMessageLocale(userId: string, request?: Request) {
 
 const runtimeSiteSettings = getSiteSettings(sqlite);
 markSiteSettingsLoadedAtRuntime(runtimeSiteSettings);
+const trustedAuthOrigins = [...new Set([
+  ...getTrustedOrigins(),
+  runtimeSiteSettings.publicBaseUrl,
+])];
 
 export const auth = betterAuth({
   appName: "Nyxdoc",
   baseURL: runtimeSiteSettings.publicBaseUrl,
   secret: getAuthSecret(),
   database: sqlite,
-  trustedOrigins: [...new Set([...getTrustedOrigins(), runtimeSiteSettings.publicBaseUrl])],
+  trustedOrigins: trustedAuthOrigins,
   user: {
     changeEmail: { enabled: false },
     deleteUser: { enabled: false },
@@ -121,6 +126,21 @@ export const auth = betterAuth({
     before: createAuthMiddleware(async (context) => {
       if (context.path !== "/sign-up/email") return;
 
+      const locale = detectLocale(context.request?.headers.get("accept-language"));
+      if (context.request) {
+        try {
+          // The first-owner claim is a state-changing lock. Reject an invalid
+          // browser origin before it can reserve that lock for ten minutes.
+          assertSameOrigin(context.request, trustedAuthOrigins);
+        } catch (error) {
+          if (!(error instanceof OriginError)) throw error;
+          throw APIError.from("FORBIDDEN", {
+            code: "INVALID_ORIGIN",
+            message: translate(locale, "api.invalidOrigin"),
+          });
+        }
+      }
+
       const email = typeof context.body?.email === "string" ? normalizeEmail(context.body.email) : "";
       const settings = getSiteSettings(sqlite);
       const inviteToken = context.request?.headers.get("x-nyxdoc-invite-token")?.trim() ?? "";
@@ -129,7 +149,6 @@ export const auth = betterAuth({
         ? validateOrganizationInvitation(sqlite, email, inviteToken)
         : null;
       const firstOwnerSetup = initialSetupRequired(sqlite);
-      const locale = detectLocale(context.request?.headers.get("accept-language"));
       if (firstOwnerSetup && !claimInitialSetup(sqlite, email)) {
         throw APIError.from("CONFLICT", {
           code: "SETUP_IN_PROGRESS",

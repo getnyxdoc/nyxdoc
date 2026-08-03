@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { NyxDatabase } from "@/lib/db/client";
-import { v2ToStorageBlockInputs } from "@/lib/editor/storage-projection";
 import { parseNyxdocDocumentV2, type NyxdocTextBlock } from "@/lib/editor/schema";
+import { createDocument } from "@/lib/documents/service";
 import type { AppLocale } from "@/lib/i18n/locales";
 
 type BootstrapUser = {
@@ -155,45 +155,7 @@ export function ensurePersonalWorkspace(
       ).run(workspace.id, user.id, now, now);
     }
 
-    const insertDocument = database.prepare(
-      `INSERT INTO documents
-       (id, workspace_id, title, slug, parent_document_id, tree_order,
-        created_by_user_id, created_at, updated_at, content_schema_version)
-       VALUES (?, ?, ?, ?, NULL, ?, ?, ?, ?, 2)`,
-    );
-    const insertBlock = database.prepare(
-      `INSERT INTO document_blocks
-       (id, document_id, block_type, content, content_json, indent_level, metadata_json,
-        sort_order, version, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, '{}', ?, 1, ?, ?)`,
-    );
-    const insertRevision = database.prepare(
-      `INSERT INTO document_revisions
-       (id, document_id, revision_number, snapshot_json, summary, origin, created_by_user_id, created_at,
-        base_revision_id, actor_type, actor_user_id, actor_token_id, actor_label, source)
-       VALUES (?, ?, 1, ?, ?, 'seed', ?, ?, NULL, 'system', ?, NULL, 'Nyxdoc', 'seed')`,
-    );
-    const insertEvent = database.prepare(
-      `INSERT INTO document_events
-       (id, workspace_id, document_id, revision_id, event_type, actor_type,
-        actor_user_id, actor_token_id, actor_label, source, summary, created_at)
-       VALUES (?, ?, ?, ?, 'created', 'system', ?, NULL, 'Nyxdoc', 'seed', ?, ?)`,
-    );
-    const setRevision = database.prepare("UPDATE documents SET current_revision_id = ? WHERE id = ?");
-
-    for (const [documentIndex, document] of [starter.document].entries()) {
-      const documentId = randomUUID();
-      insertDocument.run(
-        documentId,
-        workspace.id,
-        document.title,
-        document.slug,
-        (documentIndex + 1) * 100,
-        user.id,
-        now,
-        now,
-      );
-
+    for (const document of [starter.document]) {
       const content = parseNyxdocDocumentV2({
         schemaVersion: 2,
         blocks: document.blocks.map((block) => ({
@@ -203,41 +165,26 @@ export function ensurePersonalWorkspace(
           children: [{ text: block.content }],
         })),
       });
-      const blocks = v2ToStorageBlockInputs(content);
-      for (const [blockIndex, block] of blocks.entries()) {
-        insertBlock.run(
-          block.id,
-          documentId,
-          block.type,
-          block.content,
-          block.contentJson,
-          block.indent,
-          (blockIndex + 1) * 100,
-          now,
-          now,
-        );
-      }
-
-      const revisionId = randomUUID();
-      insertRevision.run(
-        revisionId,
-        documentId,
-        JSON.stringify(content),
-        starter.revisionSummary,
-        user.id,
-        now,
-        user.id,
-      );
-      setRevision.run(revisionId, documentId);
-      insertEvent.run(
-        randomUUID(),
+      const created = createDocument(
+        database,
         workspace.id,
-        documentId,
-        revisionId,
-        user.id,
-        starter.revisionSummary,
-        now,
+        {
+          type: "system",
+          userId: user.id,
+          principalId: user.id,
+          label: "Nyxdoc",
+          source: "seed",
+        },
+        {
+          title: document.title,
+          content,
+          summary: starter.revisionSummary,
+        },
       );
+      // The localized starter keeps a stable URL slug, while the document,
+      // revision snapshot and event are still created by the canonical writer.
+      database.prepare("UPDATE documents SET slug = ? WHERE id = ?")
+        .run(document.slug, created.document.id);
     }
 
     return workspace;

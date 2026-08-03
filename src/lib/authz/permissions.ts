@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import type { AgentIdentityId, WorkspaceAgentGrantId } from "@/lib/agents/identifiers";
 import type { NyxDatabase } from "@/lib/db/client";
 
 export const WORKSPACE_PERMISSIONS = [
@@ -68,8 +69,10 @@ export type HumanDocumentPrincipal = HumanDocumentPrincipalBase & (
 export type AgentWorkspacePrincipal = {
   type: "agent";
   workspaceId: string;
-  membershipId: string;
-  agentId: string;
+  /** WorkspaceAgentGrantId (`workspace_agents.id`) for this workspace access grant. */
+  membershipId: WorkspaceAgentGrantId;
+  /** Global AgentIdentityId (`agents.id`) shared across all workspace grants. */
+  agentId: AgentIdentityId;
   accessProfile: AgentAccessProfile;
   /** Canonical grant capabilities. Authorization fails closed without these. */
   capabilities: WorkspacePermission[];

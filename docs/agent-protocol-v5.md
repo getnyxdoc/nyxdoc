@@ -38,6 +38,9 @@ Nyxdoc의 AST v2는 문서 형식이고, Yjs 공유 초안은 사람과 외부 �
 17. 이미지 원본은 문서나 MCP JSON에 base64로 넣지 않는다. `create_image_upload`가 발급한
     워크스페이스·선택 문서 결합형 5분 일회용 권한으로 바이너리를 직접 `PUT`하고, 응답의
     `imageBlock`만 공유 초안에 삽입한다.
+18. 성공한 모든 MCP mutation은 `receipt` version 1을 반환한다. receipt의 `operation`과
+    `actor.principalId`·`actor.source`는 쓰기 주체와 경로를 안정적으로 식별하며, 해당 요청이나
+    결과가 실제로 확정한 워크스페이스·문서·리비전·초안 식별자만 함께 반환한다.
 
 ## 권장 작업 순서
 
@@ -80,6 +83,30 @@ Nyxdoc의 AST v2는 문서 형식이고, Yjs 공유 초안은 사람과 외부 �
 문서 생성·수정·commit은 여기에 `responseMode`를 더한다. 기본 `summary`는 ID, 리비전, 초안 버전,
 블록 수, `contentDigest`, 경고를 중심으로 반환한다. `outline`과 `full`은 명시적으로 선택하며 전체
 AST와 전체 JSON Schema는 기본 응답에 포함되지 않는다.
+
+성공한 모든 mutation의 `structuredContent.receipt`는 다음 공통 계약을 사용한다.
+
+- `version`: 현재 `"1"`
+- `operation`: 호출한 MCP mutation의 안정 도구 이름
+- `actor`: `type: "agent"`, 전역 에이전트 `principalId`, `source: "mcp"`
+- `workspaceId`, `documentId`: 요청 또는 결과가 해당 리소스를 확정했을 때만 포함
+- `revisionId`, `revisionNumber`: 생성·참조된 정본 리비전을 결과에서 확인할 수 있을 때만 포함
+- `generation`, `draftVersion`, `baseRevisionNumber`, `committedDraftVersion`,
+  `hasUncommittedChanges`: 해당 mutation이 공유 초안 상태를 반환할 때만 포함
+- `requestId`와 `idempotency.requestId`: 그 도구가 `requestId`를 받는 경우에만 포함
+
+공유 초안 mutation의 최상위 `generation`, `draftVersion`, `committedDraftVersion`,
+`baseRevisionNumber`, `hasUncommittedChanges`는 응답을 관찰한 시점의 최신 상태다. 멱등 재시도에서는
+`replayed: true`이며 `receiptGeneration`, `receiptDraftVersion`,
+`receiptCommittedDraftVersion`, `receiptBaseRevisionNumber`,
+`receiptHasUncommittedChanges`가 원 실행 직후 상태를, 같은 이름의 `current*` 필드와 최상위 필드가
+현재 상태를 나타낸다. 다음 쓰기의 `expectedDraftVersion`에는 최상위 `draftVersion`을 사용한다.
+
+receipt에 없는 ID를 호출자가 추측해서는 안 된다. 특히 초안만 바꾼 응답에 새 정본 리비전 ID가
+없다는 것은 새 리비전이 생성되지 않았다는 뜻이다. 같은 `requestId`의 성공 재시도는 같은 원 실행
+receipt와 normalization remap을 반환하되, 다른 참여자가 초안을 전진시켰다면 현재 관찰 필드는
+최신값으로 갱신된다. receipt의 주체 식별자는 표시 이름이나 연결 키 이름이 아니라 전역 에이전트
+principal을 사용한다.
 
 ## 복원
 

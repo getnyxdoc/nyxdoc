@@ -32,5 +32,24 @@ describe("personal workspace bootstrap", () => {
     expect(database.prepare(
       "SELECT title FROM documents WHERE workspace_id = ?",
     ).all(workspace.id)).toEqual([{ title }]);
+    expect(database.prepare(
+      `SELECT revision.title_snapshot, revision.parent_document_id_snapshot,
+              revision.document_metadata_json, revision.actor_type,
+              revision.actor_principal_id, revision.source
+       FROM document_revisions revision
+       JOIN documents document ON document.current_revision_id = revision.id
+       WHERE document.workspace_id = ?`,
+    ).get(workspace.id)).toEqual({
+      title_snapshot: title,
+      parent_document_id_snapshot: null,
+      document_metadata_json: JSON.stringify({
+        documentType: null,
+        workflowStatus: "draft",
+        tags: [],
+      }),
+      actor_type: "system",
+      actor_principal_id: "localized-user",
+      source: "seed",
+    });
   });
 });

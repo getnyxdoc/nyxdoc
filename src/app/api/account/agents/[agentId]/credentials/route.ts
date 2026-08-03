@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { requireVerifiedSession } from "@/data/session";
+import { agentIdentityIdSchema } from "@/lib/agents/identifiers";
 import { createAgentCredential } from "@/lib/agents/service";
 import { sqlite } from "@/lib/db/client";
 import { apiErrorResponse } from "@/lib/http/errors";
@@ -22,7 +23,8 @@ export async function POST(request: Request, context: { params: Promise<{ agentI
   try {
     assertSameOrigin(request);
     const session = await requireVerifiedSession();
-    const { agentId } = await context.params;
+    const { agentId: rawAgentId } = await context.params;
+    const agentId = agentIdentityIdSchema.parse(rawAgentId);
     const body = createSchema.parse(await request.json());
     const result = createAgentCredential(sqlite, {
       userId: session.user.id,

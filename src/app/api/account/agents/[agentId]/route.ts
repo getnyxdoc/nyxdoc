@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { requireVerifiedSession } from "@/data/session";
+import { agentIdentityIdSchema } from "@/lib/agents/identifiers";
 import { deleteAccountAgent, updateAccountAgent } from "@/lib/agents/service";
 import { sqlite } from "@/lib/db/client";
 import { apiErrorResponse } from "@/lib/http/errors";
@@ -20,7 +21,8 @@ export async function PATCH(request: Request, context: { params: Promise<{ agent
   try {
     assertSameOrigin(request);
     const session = await requireVerifiedSession();
-    const { agentId } = await context.params;
+    const { agentId: rawAgentId } = await context.params;
+    const agentId = agentIdentityIdSchema.parse(rawAgentId);
     const body = updateSchema.parse(await request.json());
     return Response.json({
       agent: updateAccountAgent(sqlite, { userId: session.user.id, agentId, ...body }),
@@ -34,7 +36,8 @@ export async function DELETE(request: Request, context: { params: Promise<{ agen
   try {
     assertSameOrigin(request);
     const session = await requireVerifiedSession();
-    const { agentId } = await context.params;
+    const { agentId: rawAgentId } = await context.params;
+    const agentId = agentIdentityIdSchema.parse(rawAgentId);
     return Response.json({
       agent: deleteAccountAgent(sqlite, { userId: session.user.id, agentId }),
     }, { headers: { "Cache-Control": "no-store" } });

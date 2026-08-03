@@ -135,7 +135,16 @@ describe("collaboration command engine", () => {
       "SELECT COUNT(*) AS count FROM document_events WHERE document_id = ?",
     ).get(created.document.id)).toEqual(initialEventCount);
 
-    expect(await commands.replaceWorking(input)).toEqual(changed);
+    const replayedChange = await commands.replaceWorking(input);
+    expect(replayedChange).toMatchObject({
+      workingDocument: changed.workingDocument,
+      mutationState: {
+        source: "working",
+        replayed: true,
+        receipt: { draftVersion: 1 },
+        current: { draftVersion: 1 },
+      },
+    });
     await expect(commands.replaceWorking({
       ...input,
       replacement: { title: "같은 requestId의 다른 요청" },
@@ -162,11 +171,65 @@ describe("collaboration command engine", () => {
       baseRevisionNumber: 2,
       hasUncommittedChanges: false,
     });
-    expect(await commands.commitWorking(commitInput)).toEqual(committed);
+    const replayedCommit = await commands.commitWorking(commitInput);
+    expect(replayedCommit).toMatchObject({
+      document: committed.document,
+      workingDocument: committed.workingDocument,
+      mutationState: {
+        source: "working",
+        replayed: true,
+        receipt: { draftVersion: committed.workingDocument.draftVersion },
+        current: { draftVersion: committed.workingDocument.draftVersion },
+      },
+    });
     expect(listDocumentRevisions(database, workspace.id, created.document.id)).toHaveLength(2);
     expect(database.prepare(
       "SELECT COUNT(*) AS count FROM document_events WHERE document_id = ?",
     ).get(created.document.id)).toEqual({ count: initialEventCount.count + 1 });
+  });
+
+  it("separates an idempotent replay receipt from the current shared draft", async () => {
+    const { database, workspace, actor, created, commands } = fixture();
+    const state = ensureCollaborationState(database, workspace.id, created.document.id);
+    const firstInput = {
+      roomName: state.roomName,
+      actor,
+      requestId: "replay-observation-first-001",
+      expectedDraftVersion: 0,
+      replacement: { title: "첫 번째 초안" },
+    };
+    const first = await commands.replaceWorking(firstInput);
+    const second = await commands.replaceWorking({
+      roomName: state.roomName,
+      actor,
+      requestId: "replay-observation-second-001",
+      expectedDraftVersion: first.workingDocument.draftVersion,
+      replacement: { title: "현재 초안" },
+    });
+
+    const replayed = await commands.replaceWorking(firstInput);
+    expect(replayed.workingDocument).toMatchObject({
+      title: "현재 초안",
+      draftVersion: second.workingDocument.draftVersion,
+    });
+    expect(replayed.mutationState).toEqual({
+      source: "working",
+      replayed: true,
+      receipt: {
+        generation: first.workingDocument.generation,
+        draftVersion: first.workingDocument.draftVersion,
+        committedDraftVersion: first.workingDocument.committedDraftVersion,
+        baseRevisionNumber: first.workingDocument.baseRevisionNumber,
+        hasUncommittedChanges: first.workingDocument.hasUncommittedChanges,
+      },
+      current: {
+        generation: second.workingDocument.generation,
+        draftVersion: second.workingDocument.draftVersion,
+        committedDraftVersion: second.workingDocument.committedDraftVersion,
+        baseRevisionNumber: second.workingDocument.baseRevisionNumber,
+        hasUncommittedChanges: second.workingDocument.hasUncommittedChanges,
+      },
+    });
   });
 
   it("repairs legacy drafts whose top-level block IDs belong to another document before commit", async () => {
@@ -235,8 +298,166 @@ describe("collaboration command engine", () => {
       hasUncommittedChanges: false,
     });
     expect(committed.workingDocument.content.blocks[0].children[0]).toMatchObject({ text: "원자적 저장" });
-    expect(await commands.replaceAndCommitWorking(input)).toEqual(committed);
+    expect(await commands.replaceAndCommitWorking(input)).toMatchObject({
+      document: committed.document,
+      workingDocument: committed.workingDocument,
+      mutationState: {
+        source: "working",
+        replayed: true,
+        receipt: { draftVersion: committed.workingDocument.draftVersion },
+        current: { draftVersion: committed.workingDocument.draftVersion },
+      },
+    });
     expect(listDocumentRevisions(database, workspace.id, created.document.id)).toHaveLength(2);
+  });
+
+  it("rolls back both the candidate draft and canonical write when replace-and-commit fails", async () => {
+    const { database, workspace, actor, created } = fixture();
+    const state = ensureCollaborationState(database, workspace.id, created.document.id);
+    const liveDocument = collaborationYDocFromState(state.state);
+    const commands = createCollaborationCommands({
+      database,
+      provider: {
+        async withDocument(roomName, callback) {
+          expect(roomName).toBe(state.roomName);
+          return await callback(liveDocument);
+        },
+        closeConnections() {},
+      },
+    });
+    const input = {
+      roomName: state.roomName,
+      actor,
+      requestId: "replace-commit-fault-001",
+      expectedDraftVersion: state.draftVersion,
+      replacement: {
+        title: "실패하면 남지 않을 제목",
+        content: parseNyxdocDocumentV2({
+          schemaVersion: 2,
+          blocks: [{ id: "initial", type: "p", children: [{ text: "실패하면 남지 않을 본문" }] }],
+        }),
+      },
+      summary: "고장 주입 원자성 테스트",
+    };
+    database.exec(`
+      CREATE TEMP TRIGGER inject_revision_failure
+      BEFORE INSERT ON document_revisions
+      BEGIN
+        SELECT RAISE(ABORT, 'injected revision failure');
+      END;
+    `);
+
+    await expect(commands.replaceAndCommitWorking(input)).rejects.toThrow("injected revision failure");
+    database.exec("DROP TRIGGER inject_revision_failure");
+
+    const afterFailure = await commands.readWorking({
+      workspaceId: workspace.id,
+      documentId: created.document.id,
+    });
+    expect(afterFailure.workingDocument).toMatchObject({
+      title: "공유 초안 테스트",
+      draftVersion: 0,
+      committedDraftVersion: 0,
+      baseRevisionNumber: 1,
+      hasUncommittedChanges: false,
+    });
+    expect(afterFailure.workingDocument.content.blocks[0].children[0]).toMatchObject({ text: "정본 1" });
+    expect(getDocument(database, workspace.id, created.document.id)).toMatchObject({
+      title: "공유 초안 테스트",
+      revisionNumber: 1,
+    });
+    expect(listDocumentRevisions(database, workspace.id, created.document.id)).toHaveLength(1);
+
+    const retried = await commands.replaceAndCommitWorking(input);
+    expect(retried.document).toMatchObject({
+      title: "실패하면 남지 않을 제목",
+      revisionNumber: 2,
+    });
+    expect(retried.workingDocument).toMatchObject({
+      draftVersion: 1,
+      committedDraftVersion: 1,
+      hasUncommittedChanges: false,
+    });
+  });
+
+  it("rejects destructive reset and restore requests with stale draft, generation, or base revision", async () => {
+    const { database, workspace, actor, created, commands } = fixture();
+    const initial = ensureCollaborationState(database, workspace.id, created.document.id);
+    const changed = await commands.replaceWorking({
+      roomName: initial.roomName,
+      actor,
+      expectedDraftVersion: initial.draftVersion,
+      replacement: { title: "버리기 전 초안" },
+    });
+
+    await expect(commands.resetWorking({
+      workspaceId: workspace.id,
+      documentId: created.document.id,
+      actor,
+      expectedGeneration: initial.generation,
+      expectedDraftVersion: initial.draftVersion,
+      expectedBaseRevision: initial.baseRevisionNumber,
+      requestId: "discard-stale-draft-001",
+    })).rejects.toMatchObject({
+      code: "DRAFT_VERSION_CONFLICT",
+      details: {
+        expectedDraftVersion: 0,
+        currentDraftVersion: 1,
+      },
+    });
+    await expect(commands.resetWorking({
+      workspaceId: workspace.id,
+      documentId: created.document.id,
+      actor,
+      expectedGeneration: initial.generation + 1,
+      expectedDraftVersion: changed.workingDocument.draftVersion,
+      expectedBaseRevision: changed.workingDocument.baseRevisionNumber,
+      requestId: "discard-stale-generation-001",
+    })).rejects.toMatchObject({
+      code: "DRAFT_VERSION_CONFLICT",
+      details: {
+        expectedGeneration: initial.generation + 1,
+        currentGeneration: initial.generation,
+      },
+    });
+
+    const committed = await commands.commitWorking({
+      roomName: initial.roomName,
+      actor,
+      expectedDraftVersion: changed.workingDocument.draftVersion,
+    });
+    await expect(commands.resetWorking({
+      workspaceId: workspace.id,
+      documentId: created.document.id,
+      actor,
+      expectedGeneration: committed.workingDocument.generation,
+      expectedDraftVersion: committed.workingDocument.draftVersion,
+      expectedBaseRevision: initial.baseRevisionNumber,
+      requestId: "restore-stale-base-001",
+      revisionId: created.document.revisionId!,
+    })).rejects.toMatchObject({
+      code: "DRAFT_VERSION_CONFLICT",
+      details: {
+        expectedBaseRevision: 1,
+        currentBaseRevision: 2,
+      },
+    });
+
+    const discarded = await commands.resetWorking({
+      workspaceId: workspace.id,
+      documentId: created.document.id,
+      actor,
+      expectedGeneration: committed.workingDocument.generation,
+      expectedDraftVersion: committed.workingDocument.draftVersion,
+      expectedBaseRevision: committed.workingDocument.baseRevisionNumber,
+      requestId: "discard-current-cas-001",
+    });
+    expect(discarded.workingDocument).toMatchObject({
+      generation: initial.generation + 1,
+      draftVersion: 0,
+      baseRevisionNumber: 2,
+      hasUncommittedChanges: false,
+    });
   });
 
   it("refuses a browser save until the submitted Yjs state vector is present", async () => {
@@ -640,7 +861,7 @@ describe("collaboration command engine", () => {
       expectedDraftVersion: 0,
       replacement: { title: "정본 2" },
     });
-    await commands.commitWorking({
+    const committedBeforeRestore = await commands.commitWorking({
       roomName: state.roomName,
       actor,
       requestId: "commit-before-restore-001",
@@ -659,6 +880,9 @@ describe("collaboration command engine", () => {
       revisionId: revisionOne.id,
       actor,
       requestId: "restore-to-draft-001",
+      expectedGeneration: committedBeforeRestore.workingDocument.generation,
+      expectedDraftVersion: committedBeforeRestore.workingDocument.draftVersion,
+      expectedBaseRevision: committedBeforeRestore.workingDocument.baseRevisionNumber,
     });
     expect(restored.workingDocument).toMatchObject({
       title: "공유 초안 테스트",

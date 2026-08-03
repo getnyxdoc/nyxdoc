@@ -2,16 +2,27 @@
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { FormEvent, useState } from "react";
+import { FormEvent, useState, useSyncExternalStore } from "react";
 import { ArrowRight } from "lucide-react";
 import { authClient } from "@/lib/auth-client";
 import { useI18n } from "@/lib/i18n/client";
 import styles from "./auth.module.css";
 
+const subscribeToHydration = () => () => undefined;
+
+function useHydrated() {
+  return useSyncExternalStore(
+    subscribeToHydration,
+    () => true,
+    () => false,
+  );
+}
+
 export function SignInForm({ callbackURL = "/app" }: { callbackURL?: string }) {
   const { t } = useI18n();
   const router = useRouter();
   const [error, setError] = useState("");
+  const hydrated = useHydrated();
   const [pending, setPending] = useState(false);
 
   async function submit(event: FormEvent<HTMLFormElement>) {
@@ -54,7 +65,7 @@ export function SignInForm({ callbackURL = "/app" }: { callbackURL?: string }) {
           <input id="password" name="password" type="password" autoComplete="current-password" required />
         </div>
         {error && <div className={styles.error} role="alert">{error}</div>}
-        <button className={styles.submit} disabled={pending}>
+        <button className={styles.submit} type="submit" disabled={!hydrated || pending}>
           {pending ? t("auth.checking") : t("auth.openWorkspace")} <ArrowRight size={17} />
         </button>
       </form>

@@ -4,7 +4,7 @@ import { listDocuments, searchDocumentContents } from "@/lib/documents/service";
 import { DOCUMENT_WORKFLOW_STATUSES } from "@/lib/documents/types";
 import { apiErrorResponse } from "@/lib/http/errors";
 import { authenticateRequestApiToken } from "@/lib/tokens/request";
-import { requireTokenScope, resolveTokenReadRoot } from "@/lib/tokens/service";
+import { requireTokenPermission, resolveTokenReadRoot } from "@/lib/tokens/service";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -25,7 +25,7 @@ const searchQuerySchema = z.object({
 export async function GET(request: Request) {
   try {
     const identity = authenticateRequestApiToken(sqlite, request);
-    requireTokenScope(identity, "documents:read");
+    requireTokenPermission(identity, "documents:read", "documents.read");
     const url = new URL(request.url);
     const query = searchQuerySchema.parse(Object.fromEntries(url.searchParams));
     const limit = query.limit ?? 20;

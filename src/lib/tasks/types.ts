@@ -66,7 +66,8 @@ export type DocumentTask = {
   targetDocumentId: string | null;
   targetDocumentTitle: string | null;
   targetDocumentPath: Array<{ id: string; title: string }>;
-  assignedAgentId: string | null;
+  /** WorkspaceAgentGrantId (`workspace_agents.id`), never AgentIdentityId. */
+  assignedAgentId: WorkspaceAgentGrantId | null;
   assignedAgentDisplayName: string | null;
   assignedAgentAvatarMediaId: string | null;
   requiresReview: boolean;
@@ -121,3 +122,4 @@ export class TaskServiceError extends Error {
     this.name = "TaskServiceError";
   }
 }
+import type { WorkspaceAgentGrantId } from "@/lib/agents/identifiers";

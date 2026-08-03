@@ -25,13 +25,16 @@ export async function POST(
       session.user.id,
       "revisions.restore",
     );
-    restoreDocumentRevisionSchema.parse(await request.json());
+    const body = restoreDocumentRevisionSchema.parse(await request.json());
     getDocumentRevisionSnapshot(sqlite, workspace.id, documentId, revisionId);
     const actor = { ...humanDocumentActor(session.user), source: "rollback" as const };
     return Response.json(await resetWorkingDocument({
       workspaceId: workspace.id,
       documentId,
       revisionId,
+      expectedGeneration: body.expectedGeneration,
+      expectedDraftVersion: body.expectedDraftVersion,
+      expectedBaseRevision: body.baseRevision,
       actor,
     }));
   } catch (error) {

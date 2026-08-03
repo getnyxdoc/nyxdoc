@@ -1,5 +1,6 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
+import { workspaceAgentGrantIdSchema } from "@/lib/agents/identifiers";
 import { proposeAdminActionSchema } from "@/lib/admin-requests/schemas";
 import { listAdminActionRequests, proposeAdminAction } from "@/lib/admin-requests/service";
 import { AdminActionRequestError } from "@/lib/admin-requests/types";
@@ -8,7 +9,6 @@ import {
   agentPrincipalAllows,
   AuthorizationError,
   listAgentPrincipalPermissions,
-  requireAgentWorkspacePermission,
 } from "@/lib/authz/permissions";
 import {
   createAssignmentSchema,
@@ -100,10 +100,12 @@ import {
 } from "@/lib/media/service";
 import { getSiteSettings } from "@/lib/site-settings/service";
 import {
+  buildMcpMutationReceipt,
   canonicalDraftFields,
   mcpContentDigest,
   mcpResponseModeSchema,
   projectMutationResponse,
+  type McpMutationReceiptContext,
   type McpResponseMode,
 } from "@/lib/mcp/response-projection";
 import {
@@ -139,7 +141,7 @@ import {
   listApiTokenWorkspaceIdentities,
   requireTokenDocumentAccess,
   requireTokenParentAccess,
-  requireTokenScope,
+  requireTokenPermission,
   resolveTokenCreateParent,
   resolveTokenReadRoot,
   setTokenCursor,
@@ -165,7 +167,7 @@ const instructions = [
   "get_document reads the immutable canonical revision. get_working_document reads the shared CRDT draft that people and agents are currently editing.",
   "get_document, get_working_document, and batch_get_documents include myWork for the current agent. Treat it as a work instruction, not as an access grant.",
   "Read tools never change draftVersion or persist normalization-only changes.",
-  "Draft-aware read and mutation responses always expose the latest draftVersion at the top level. Nested document or workingDocument fields remain available, but agents should use the top-level value for the next expectedDraftVersion.",
+  "Draft-aware read and mutation responses always expose the latest draftVersion at the top level. On an idempotent replay, receiptDraftVersion and other receipt* fields describe the original mutation while top-level and current* fields describe the latest shared draft. Use the top-level draftVersion for the next expectedDraftVersion.",
   "Assignment roles mean: owner leads the document and is accountable for completion; contributor writes or improves the assigned scope; reviewer checks accuracy, omissions, consistency, and records findings.",
   "For focused prose work, use search_documents or get_document_outline, then get_document_markdown for one section, patch_document_markdown with dryRun, and finally patch with an optional explicit commit. This path never needs the full AST.",
   "Use get_working_document only for whole-AST or metadata work. Before changing a document with AST tools, pass its draftVersion as expectedDraftVersion.",
@@ -175,6 +177,7 @@ const instructions = [
   "patch_document_markdown modifies only the selected heading section. In section concurrency mode, sectionHash is the scope guard and expectedDraftVersion is the observed document version: a stale document version is safely rebased when the selected sectionHash is unchanged.",
   "Creating a document creates its initial canonical revision 1. Later draft changes create a canonical revision only through commit_document or an explicit patch_document_markdown.commit. Include a concise summary after reviewing the draft or dry-run result.",
   "Document mutation tools return summary structuredContent by default. Request responseMode=outline or responseMode=full only when that additional payload is necessary.",
+  "Every successful mutation returns receipt version 1 with the stable operation and MCP actor principal/source. Workspace, document, revision, generation, and draft identifiers appear only when the request or result establishes them. Tools that accept requestId repeat it in receipt.idempotency for retry correlation.",
   "The document title is separate page metadata and is already rendered as the page's top-level heading. Set title once in the title field; never repeat the same title as a leading H1 or other heading inside content or Markdown. Begin the body with an introductory paragraph or the first subsection at H2 or lower.",
   "The document.content field is the only document body representation. It is lossless AST v2.",
   "update_document replaces the whole content body and must retain every stable node ID that should survive.",
@@ -273,7 +276,7 @@ const handoffTodoSchema = z.object({
   description: z.string().trim().max(10_000).optional(),
   acceptanceCriteria: z.string().trim().max(5_000).optional(),
   priority: z.enum(DOCUMENT_TASK_PRIORITIES).optional(),
-  assignedAgentId: z.string().trim().min(1).max(160).nullable().optional(),
+  assignedAgentId: workspaceAgentGrantIdSchema.nullable().optional(),
   requiresReview: z.boolean().optional(),
 }).strict();
 
@@ -599,6 +602,25 @@ const capabilities = {
     schemasIncludedByDefault: false,
     schemaTool: "get_schema",
     duplicateFullAstInText: false,
+    mutationReceipt: {
+      version: "1",
+      requiredOnSuccess: true,
+      actorIdentity: ["type", "principalId", "source"],
+      conditionalResourceIdentity: [
+        "workspaceId",
+        "documentId",
+        "revisionId",
+        "revisionNumber",
+        "generation",
+        "draftVersion",
+      ],
+      idempotencyIdentity: "requestId-when-accepted-by-tool",
+      replayState: {
+        originalMutation: "receipt*-fields",
+        latestObservation: "top-level-and-current*-fields",
+        nextExpectedDraftVersion: "top-level-draftVersion",
+      },
+    },
   },
   recommendedWorkflow: {
     focusedMarkdownEdit: [
@@ -936,14 +958,22 @@ function mcpErrorMessage(code: string) {
 
 async function renderMutationToolResult(
   action: () => Record<string, unknown> | Promise<Record<string, unknown>>,
-  projection?: { operation: string; responseMode: McpResponseMode },
+  receiptContext: McpMutationReceiptContext,
+  responseMode?: McpResponseMode,
   publicBaseUrl = getAuthBaseUrl(),
 ) {
   try {
     const result = withPrimaryDocumentWebUrl(await action(), publicBaseUrl);
-    return renderToolResult(projection
-      ? projectMutationResponse(projection.operation, result, projection.responseMode)
-      : result, publicBaseUrl);
+    const receipt = buildMcpMutationReceipt(result, receiptContext);
+    const envelopedResult = {
+      resultVersion: "1",
+      operation: receiptContext.operation,
+      ...result,
+      receipt,
+    };
+    return renderToolResult(responseMode
+      ? projectMutationResponse(receiptContext.operation, envelopedResult, responseMode)
+      : envelopedResult, publicBaseUrl);
   } catch (error) {
     if (error instanceof z.ZodError) {
       const structuredContent = {
@@ -1036,9 +1066,30 @@ export function createNyxdocMcpServer(
     publicBaseUrl,
   );
   const mutationToolResult = (
+    operation: string,
     action: () => Record<string, unknown> | Promise<Record<string, unknown>>,
-    projection?: { operation: string; responseMode: McpResponseMode },
-  ) => renderMutationToolResult(action, projection, publicBaseUrl);
+    options: {
+      responseMode?: McpResponseMode;
+      requestId?: string;
+      workspaceId?: string;
+      documentId?: string;
+    } = {},
+  ) => renderMutationToolResult(
+    action,
+    {
+      operation,
+      actor: {
+        type: "agent",
+        principalId: actor.principalId ?? identity.globalAgentId,
+        source: "mcp",
+      },
+      requestId: options.requestId,
+      workspaceId: options.workspaceId,
+      documentId: options.documentId,
+    },
+    options.responseMode,
+    publicBaseUrl,
+  );
 
   function readCredentialWorkspaces() {
     return listApiTokenWorkspaceIdentities(database, identity);
@@ -1571,7 +1622,8 @@ export function createNyxdocMcpServer(
         updatedAfter: z.string().datetime().optional(),
         updatedBefore: z.string().datetime().optional(),
         updatedWithinDays: z.number().int().min(1).max(3650).optional(),
-        assignedAgentId: z.string().uuid().optional(),
+        // Assignment filtering uses the workspace-local WorkspaceAgentGrantId.
+        assignedAgentId: workspaceAgentGrantIdSchema.optional(),
         assignmentType: z.enum(["owner", "contributor", "reviewer"]).optional(),
         unassigned: z.boolean().optional(),
         sort: z.enum(["tree", "updated_desc"]).optional(),
@@ -1585,7 +1637,7 @@ export function createNyxdocMcpServer(
         query.workspaceId,
         [query.parentDocumentId, query.withinDocumentId],
       );
-      requireTokenScope(workspaceIdentity, "documents:read");
+      requireTokenPermission(workspaceIdentity, "documents:read", "documents.read");
       if (query.parentDocumentId) {
         requireTokenDocumentAccess(database, workspaceIdentity, query.parentDocumentId);
       }
@@ -1622,7 +1674,7 @@ export function createNyxdocMcpServer(
     },
     async ({ documentId }) => {
       const workspaceIdentity = workspaceIdentityForDocument(documentId);
-      requireTokenScope(workspaceIdentity, "documents:read");
+      requireTokenPermission(workspaceIdentity, "documents:read", "documents.read");
       requireTokenDocumentAccess(database, workspaceIdentity, documentId);
       return toolResult(projectedReadPayload("get_document", {
         workspaceId: workspaceIdentity.workspaceId,
@@ -1643,7 +1695,7 @@ export function createNyxdocMcpServer(
     },
     async ({ documentId }) => {
       const workspaceIdentity = workspaceIdentityForDocument(documentId);
-      requireTokenScope(workspaceIdentity, "documents:read");
+      requireTokenPermission(workspaceIdentity, "documents:read", "documents.read");
       requireTokenDocumentAccess(database, workspaceIdentity, documentId);
       const result = await collaboration.readWorking({
         workspaceId: workspaceIdentity.workspaceId,
@@ -1684,7 +1736,7 @@ export function createNyxdocMcpServer(
       includeHeadingPath,
     }) => {
       const workspaceIdentity = workspaceIdentityForDocument(documentId);
-      requireTokenScope(workspaceIdentity, "documents:read");
+      requireTokenPermission(workspaceIdentity, "documents:read", "documents.read");
       requireTokenDocumentAccess(database, workspaceIdentity, documentId);
       const projection = {
         rootSectionId,
@@ -1756,7 +1808,7 @@ export function createNyxdocMcpServer(
     },
     async ({ documentId, source, sectionId }) => {
       const workspaceIdentity = workspaceIdentityForDocument(documentId);
-      requireTokenScope(workspaceIdentity, "documents:read");
+      requireTokenPermission(workspaceIdentity, "documents:read", "documents.read");
       requireTokenDocumentAccess(database, workspaceIdentity, documentId);
       const readable = source === "canonical"
         ? (() => {
@@ -1867,11 +1919,11 @@ export function createNyxdocMcpServer(
       dryRun,
       responseMode,
       commit,
-    }) => mutationToolResult(async () => {
+    }) => mutationToolResult("patch_document_markdown", async () => {
       const workspaceIdentity = workspaceIdentityForDocument(documentId);
-      requireTokenScope(workspaceIdentity, "documents:write");
+      requireTokenPermission(workspaceIdentity, "documents:write", "documents.update");
       requireTokenDocumentAccess(database, workspaceIdentity, documentId);
-      if (commit) requireTokenScope(workspaceIdentity, "documents:commit");
+      if (commit) requireTokenPermission(workspaceIdentity, "documents:commit", "documents.commit");
       const conversion = markdownToNyxdocWithReport(markdown, {
         idSeed: `${identity.id}:${documentId}:${sectionId}:${requestId}`,
       });
@@ -1974,6 +2026,7 @@ export function createNyxdocMcpServer(
               dryRun: false,
               draftVersion: committed.workingDocument.draftVersion,
               hasUncommittedChanges: committed.workingDocument.hasUncommittedChanges,
+              mutationState: committed.mutationState,
               section: getDocumentSection(committed.workingDocument.content, sectionId).section,
               committedRevision: {
                 id: committed.document.revisionId,
@@ -1983,9 +2036,7 @@ export function createNyxdocMcpServer(
               },
             };
           }
-          const patched = alreadyApplied
-            ? { workingDocument }
-            : await collaboration.replaceWorking({
+          const patched = await collaboration.replaceWorking({
               roomName: state.roomName,
               actor,
               requestId,
@@ -1999,6 +2050,7 @@ export function createNyxdocMcpServer(
               dryRun: false,
               draftVersion: patched.workingDocument.draftVersion,
               hasUncommittedChanges: patched.workingDocument.hasUncommittedChanges,
+              mutationState: patched.mutationState,
               section: patchedSection.section,
             };
           }
@@ -2012,7 +2064,7 @@ export function createNyxdocMcpServer(
         }
       }
       throw new DocumentServiceError("DRAFT_CONFLICT", "The shared draft changed while applying the section patch.");
-    }, { operation: "patch_document_markdown", responseMode }),
+    }, { responseMode, requestId, documentId }),
   );
 
   server.registerTool(
@@ -2040,7 +2092,7 @@ export function createNyxdocMcpServer(
           continue;
         }
         const workspaceIdentity = workspaceIdentityForDocument(documentId);
-        requireTokenScope(workspaceIdentity, "documents:read");
+        requireTokenPermission(workspaceIdentity, "documents:read", "documents.read");
         requireTokenDocumentAccess(database, workspaceIdentity, documentId);
         const document = getDocument(database, workspaceIdentity.workspaceId, documentId);
         documents.push({
@@ -2072,7 +2124,7 @@ export function createNyxdocMcpServer(
     },
     async ({ documentId }) => {
       const workspaceIdentity = workspaceIdentityForDocument(documentId);
-      requireTokenScope(workspaceIdentity, "documents:read");
+      requireTokenPermission(workspaceIdentity, "documents:read", "documents.read");
       requireTokenDocumentAccess(database, workspaceIdentity, documentId);
       return toolResult(projectedReadPayload("get_backlinks", {
         workspaceId: workspaceIdentity.workspaceId,
@@ -2111,7 +2163,7 @@ export function createNyxdocMcpServer(
     },
     async ({ documentId, format }) => {
       const workspaceIdentity = workspaceIdentityForDocument(documentId);
-      requireTokenScope(workspaceIdentity, "documents:read");
+      requireTokenPermission(workspaceIdentity, "documents:read", "exports.create");
       requireTokenDocumentAccess(database, workspaceIdentity, documentId);
       const exported = format === "markdown"
         ? exportDocumentMarkdown(database, workspaceIdentity.workspaceId, documentId)
@@ -2145,7 +2197,7 @@ export function createNyxdocMcpServer(
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
     },
     async ({ workspaceId, documentId, filename, mimeType, byteSize, sha256, alt }) => (
-      mutationToolResult(() => {
+      mutationToolResult("create_image_upload", () => {
         const workspaceIdentity = workspaceIdentityForSelectors(workspaceId, [documentId]);
         const ticket = createAgentMediaUploadTicket(database, workspaceIdentity, {
           documentId,
@@ -2177,7 +2229,7 @@ export function createNyxdocMcpServer(
             "Use imageBlock from the successful upload response in patch_document or a document creation tool.",
           ],
         };
-      })
+      }, { workspaceId, documentId })
     ),
   );
 
@@ -2214,12 +2266,12 @@ export function createNyxdocMcpServer(
       content,
       summary,
       responseMode,
-    }) => mutationToolResult(() => {
+    }) => mutationToolResult("create_document", () => {
       const workspaceIdentity = workspaceIdentityForSelectors(
         workspaceId,
         [parentDocumentId],
       );
-      requireTokenScope(workspaceIdentity, "documents:write");
+      requireTokenPermission(workspaceIdentity, "documents:write", "documents.create");
       const resolvedParentDocumentId = resolveTokenCreateParent(
         database,
         workspaceIdentity,
@@ -2237,7 +2289,7 @@ export function createNyxdocMcpServer(
         summary,
       }) as unknown as Record<string, unknown>;
       return { workspaceId: workspaceIdentity.workspaceId, ...result };
-    }, { operation: "create_document", responseMode }),
+    }, { responseMode, requestId, workspaceId }),
   );
 
   server.registerTool(
@@ -2273,12 +2325,12 @@ export function createNyxdocMcpServer(
       tags,
       content,
       responseMode,
-    }) => mutationToolResult(async () => {
+    }) => mutationToolResult("update_document", async () => {
       const workspaceIdentity = workspaceIdentityForSelectors(
         undefined,
         [documentId, parentDocumentId],
       );
-      requireTokenScope(workspaceIdentity, "documents:write");
+      requireTokenPermission(workspaceIdentity, "documents:write", "documents.update");
       requireTokenDocumentAccess(database, workspaceIdentity, documentId);
       requireTokenParentAccess(database, workspaceIdentity, parentDocumentId);
       const state = ensureCollaborationState(database, workspaceIdentity.workspaceId, documentId);
@@ -2297,7 +2349,7 @@ export function createNyxdocMcpServer(
         },
       }) as unknown as Record<string, unknown>;
       return { workspaceId: workspaceIdentity.workspaceId, ...result };
-    }, { operation: "update_document", responseMode }),
+    }, { responseMode, requestId, documentId }),
   );
 
   server.registerTool(
@@ -2335,12 +2387,12 @@ export function createNyxdocMcpServer(
       tags,
       summary,
       responseMode,
-    }) => mutationToolResult(() => {
+    }) => mutationToolResult("create_document_from_markdown", () => {
       const workspaceIdentity = workspaceIdentityForSelectors(
         workspaceId,
         [parentDocumentId],
       );
-      requireTokenScope(workspaceIdentity, "documents:write");
+      requireTokenPermission(workspaceIdentity, "documents:write", "documents.create");
       const resolvedParentDocumentId = resolveTokenCreateParent(
         database,
         workspaceIdentity,
@@ -2365,7 +2417,7 @@ export function createNyxdocMcpServer(
         ...(result as unknown as Record<string, unknown>),
         conversionWarnings: conversion.warnings,
       };
-    }, { operation: "create_document_from_markdown", responseMode }),
+    }, { responseMode, requestId, workspaceId }),
   );
 
   server.registerTool(
@@ -2424,12 +2476,12 @@ export function createNyxdocMcpServer(
       tags,
       dryRun,
       responseMode,
-    }) => mutationToolResult(() => {
+    }) => mutationToolResult("capture_handoff", () => {
       const workspaceIdentity = workspaceIdentityForSelectors(
         workspaceId,
         [parentDocumentId],
       );
-      requireTokenScope(workspaceIdentity, "documents:write");
+      requireTokenPermission(workspaceIdentity, "documents:write", "documents.create");
       const resolvedParentDocumentId = resolveTokenCreateParent(
         database,
         workspaceIdentity,
@@ -2437,7 +2489,7 @@ export function createNyxdocMcpServer(
       );
       const taskPrincipal = workspacePrincipal(workspaceIdentity);
       if (todos?.length) {
-        requireAgentWorkspacePermission(taskPrincipal, "tasks.create");
+        requireTokenPermission(workspaceIdentity, "documents:write", "tasks.create");
         for (const todo of todos) {
           if (
             todo.assignedAgentId
@@ -2539,7 +2591,7 @@ export function createNyxdocMcpServer(
           conversionWarnings: conversion.warnings,
         };
       }).immediate();
-    }, { operation: "capture_handoff", responseMode }),
+    }, { responseMode, requestId, workspaceId }),
   );
 
   server.registerTool(
@@ -2577,12 +2629,12 @@ export function createNyxdocMcpServer(
       workflowStatus,
       tags,
       responseMode,
-    }) => mutationToolResult(async () => {
+    }) => mutationToolResult("update_document_from_markdown", async () => {
       const workspaceIdentity = workspaceIdentityForSelectors(
         undefined,
         [documentId, parentDocumentId],
       );
-      requireTokenScope(workspaceIdentity, "documents:write");
+      requireTokenPermission(workspaceIdentity, "documents:write", "documents.update");
       requireTokenDocumentAccess(database, workspaceIdentity, documentId);
       requireTokenParentAccess(database, workspaceIdentity, parentDocumentId);
       const conversion = markdownToNyxdocWithReport(markdown, {
@@ -2608,7 +2660,7 @@ export function createNyxdocMcpServer(
         ...(result as unknown as Record<string, unknown>),
         conversionWarnings: conversion.warnings,
       };
-    }, { operation: "update_document_from_markdown", responseMode }),
+    }, { responseMode, requestId, documentId }),
   );
 
   server.registerTool(
@@ -2627,9 +2679,9 @@ export function createNyxdocMcpServer(
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     },
     async ({ documentId, expectedDraftVersion, requestId, operations, responseMode }) =>
-      mutationToolResult(async () => {
+      mutationToolResult("patch_document", async () => {
         const workspaceIdentity = workspaceIdentityForDocument(documentId);
-        requireTokenScope(workspaceIdentity, "documents:write");
+        requireTokenPermission(workspaceIdentity, "documents:write", "documents.update");
         requireTokenDocumentAccess(database, workspaceIdentity, documentId);
         const parsedOperations = z.array(documentPatchOperationSchema).min(1).max(100)
           .parse(operations);
@@ -2646,7 +2698,7 @@ export function createNyxdocMcpServer(
           operations: parsedOperations,
         }) as unknown as Record<string, unknown>;
         return { workspaceId: workspaceIdentity.workspaceId, ...result };
-      }, { operation: "patch_document", responseMode }),
+      }, { responseMode, requestId, documentId }),
   );
 
   server.registerTool(
@@ -2665,9 +2717,9 @@ export function createNyxdocMcpServer(
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     },
     async ({ documentId, expectedDraftVersion, requestId, summary, responseMode }) =>
-      mutationToolResult(async () => {
+      mutationToolResult("commit_document", async () => {
         const workspaceIdentity = workspaceIdentityForDocument(documentId);
-        requireTokenScope(workspaceIdentity, "documents:commit");
+        requireTokenPermission(workspaceIdentity, "documents:commit", "documents.commit");
         requireTokenDocumentAccess(database, workspaceIdentity, documentId);
         const state = ensureCollaborationState(
           database,
@@ -2682,7 +2734,7 @@ export function createNyxdocMcpServer(
           summary,
         }) as unknown as Record<string, unknown>;
         return { workspaceId: workspaceIdentity.workspaceId, ...result };
-      }, { operation: "commit_document", responseMode }),
+      }, { responseMode, requestId, documentId }),
   );
 
   server.registerTool(
@@ -2700,7 +2752,7 @@ export function createNyxdocMcpServer(
     },
     async ({ workspaceId, sinceCursor, limit }) => {
       const workspaceIdentity = workspaceIdentityForId(workspaceId);
-      requireTokenScope(workspaceIdentity, "changes:read");
+      requireTokenPermission(workspaceIdentity, "changes:read", "changes.read");
       const changes = getChanges(
         database,
         workspaceIdentity.workspaceId,
@@ -2780,7 +2832,7 @@ export function createNyxdocMcpServer(
         workspaceId,
         [withinDocumentId],
       );
-      requireTokenScope(workspaceIdentity, "documents:read");
+      requireTokenPermission(workspaceIdentity, "documents:read", "documents.read");
       const results = searchDocumentContents(database, workspaceIdentity.workspaceId, query, {
         limit,
         matchLimit,
@@ -2864,8 +2916,7 @@ export function createNyxdocMcpServer(
     async ({ workspaceId }) => {
       const workspaceIdentity = workspaceIdentityForId(workspaceId);
       const agentPrincipal = workspacePrincipal(workspaceIdentity);
-      requireTokenScope(workspaceIdentity, "documents:read");
-      requireAgentWorkspacePermission(agentPrincipal, "workspace.read");
+      requireTokenPermission(workspaceIdentity, "documents:read", "workspace.read");
       const workspace = database.prepare(
         `SELECT id, name, slug, trash_retention_days, trash_auto_purge
          FROM workspaces WHERE id = ?`,
@@ -2938,9 +2989,7 @@ export function createNyxdocMcpServer(
     },
     async ({ workspaceId, includeDisabled }) => {
       const workspaceIdentity = workspaceIdentityForId(workspaceId);
-      const agentPrincipal = workspacePrincipal(workspaceIdentity);
-      requireTokenScope(workspaceIdentity, "documents:read");
-      requireAgentWorkspacePermission(agentPrincipal, "agents.read");
+      requireTokenPermission(workspaceIdentity, "documents:read", "agents.read");
       return toolResult({
         workspaceId: workspaceIdentity.workspaceId,
         agents: listWorkspaceAgents(database, workspaceIdentity.workspaceId, { includeDisabled }),
@@ -2965,9 +3014,7 @@ export function createNyxdocMcpServer(
     },
     async (query) => {
       const workspaceIdentity = workspaceIdentityForId(query.workspaceId);
-      const agentPrincipal = workspacePrincipal(workspaceIdentity);
-      requireTokenScope(workspaceIdentity, "documents:read");
-      requireAgentWorkspacePermission(agentPrincipal, "audit.read");
+      requireTokenPermission(workspaceIdentity, "documents:read", "audit.read");
       const { workspaceId: workspaceSelector, ...auditQuery } = query;
       void workspaceSelector;
       return toolResult({
@@ -2992,9 +3039,7 @@ export function createNyxdocMcpServer(
     },
     async (query) => {
       const workspaceIdentity = workspaceIdentityForId(query.workspaceId);
-      const agentPrincipal = workspacePrincipal(workspaceIdentity);
-      requireTokenScope(workspaceIdentity, "documents:read");
-      requireAgentWorkspacePermission(agentPrincipal, "admin_requests.read");
+      requireTokenPermission(workspaceIdentity, "documents:read", "admin_requests.read");
       const { workspaceId: workspaceSelector, ...requestQuery } = query;
       void workspaceSelector;
       return toolResult({
@@ -3031,11 +3076,10 @@ export function createNyxdocMcpServer(
       },
       annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
     },
-    async ({ workspaceId, requestId, reason, actionType, payload }) => mutationToolResult(() => {
+    async ({ workspaceId, requestId, reason, actionType, payload }) => mutationToolResult("propose_admin_action", () => {
       const workspaceIdentity = workspaceIdentityForId(workspaceId);
       const agentPrincipal = workspacePrincipal(workspaceIdentity);
-      requireTokenScope(workspaceIdentity, "documents:read");
-      requireAgentWorkspacePermission(agentPrincipal, "admin_requests.create");
+      requireTokenPermission(workspaceIdentity, "documents:read", "admin_requests.create");
       const parsed = proposeAdminActionSchema.parse({
         requestId,
         reason,
@@ -3047,7 +3091,7 @@ export function createNyxdocMcpServer(
         requiresHumanApproval: true,
         executed: false,
       };
-    }),
+    }, { requestId, workspaceId }),
   );
 
   server.registerTool(
@@ -3061,9 +3105,7 @@ export function createNyxdocMcpServer(
     },
     async ({ workspaceId }) => {
       const workspaceIdentity = workspaceIdentityForId(workspaceId);
-      const agentPrincipal = workspacePrincipal(workspaceIdentity);
-      requireTokenScope(workspaceIdentity, "documents:read");
-      requireAgentWorkspacePermission(agentPrincipal, "documents.restore");
+      requireTokenPermission(workspaceIdentity, "documents:read", "documents.restore");
       return toolResult({
         workspaceId: workspaceIdentity.workspaceId,
         trash: listTrashBatches(database, workspaceIdentity.workspaceId).filter((batch) =>
@@ -3085,14 +3127,15 @@ export function createNyxdocMcpServer(
       },
       annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false },
     },
-    async ({ documentId, baseRevision }) => mutationToolResult(async () => {
+    async ({ documentId, baseRevision }) => mutationToolResult("trash_document", async () => {
       const workspaceIdentity = workspaceIdentityForDocument(documentId);
       const agentPrincipal = workspacePrincipal(workspaceIdentity);
-      requireTokenScope(workspaceIdentity, "documents:write");
       const mayTrashAnyDocument = agentPrincipalAllows(agentPrincipal, "documents.trash");
-      if (!mayTrashAnyDocument) {
-        requireAgentWorkspacePermission(agentPrincipal, "documents.trash_own");
-      }
+      requireTokenPermission(
+        workspaceIdentity,
+        "documents:write",
+        mayTrashAnyDocument ? "documents.trash" : "documents.trash_own",
+      );
       requireTokenDocumentAccess(database, workspaceIdentity, documentId);
       const result = await collaboration.archiveWorkingTree({
         workspaceId: workspaceIdentity.workspaceId,
@@ -3102,7 +3145,7 @@ export function createNyxdocMcpServer(
         createdByAgentId: mayTrashAnyDocument ? undefined : actor.principalId,
       }) as unknown as Record<string, unknown>;
       return { workspaceId: workspaceIdentity.workspaceId, ...result };
-    }),
+    }, { documentId }),
   );
 
   server.registerTool(
@@ -3114,11 +3157,9 @@ export function createNyxdocMcpServer(
       inputSchema: { documentId: z.string().uuid() },
       annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
     },
-    async ({ documentId }) => mutationToolResult(() => {
+    async ({ documentId }) => mutationToolResult("restore_trashed_document", () => {
       const workspaceIdentity = workspaceIdentityForDocument(documentId);
-      const agentPrincipal = workspacePrincipal(workspaceIdentity);
-      requireTokenScope(workspaceIdentity, "documents:write");
-      requireAgentWorkspacePermission(agentPrincipal, "documents.restore");
+      requireTokenPermission(workspaceIdentity, "documents:write", "documents.restore");
       if (!tokenCanAccessDocument(database, workspaceIdentity, documentId, true)) {
         throw new ApiTokenError("FORBIDDEN", "The document is outside this connection's allowed scope.");
       }
@@ -3129,7 +3170,7 @@ export function createNyxdocMcpServer(
         documentId,
       ) as unknown as Record<string, unknown>;
       return { workspaceId: workspaceIdentity.workspaceId, ...result };
-    }),
+    }, { documentId }),
   );
 
   server.registerTool(
@@ -3142,10 +3183,8 @@ export function createNyxdocMcpServer(
     },
     async ({ workspaceId }) => {
       const workspaceIdentity = workspaceIdentityForId(workspaceId);
-      const agentPrincipal = workspacePrincipal(workspaceIdentity);
       const collaborationActor = collaborationActorFor(workspaceIdentity);
-      requireTokenScope(workspaceIdentity, "documents:read");
-      requireAgentWorkspacePermission(agentPrincipal, "saved_views.read");
+      requireTokenPermission(workspaceIdentity, "documents:read", "saved_views.read");
       const views = listSavedViews(database, workspaceIdentity.workspaceId, collaborationActor)
         .filter((view) => {
           const documentIds = [view.query.parentDocumentId, view.query.withinDocumentId]
@@ -3168,10 +3207,8 @@ export function createNyxdocMcpServer(
     },
     async ({ viewId }) => {
       const workspaceIdentity = workspaceIdentityForResource("saved_view", viewId);
-      const agentPrincipal = workspacePrincipal(workspaceIdentity);
       const collaborationActor = collaborationActorFor(workspaceIdentity);
-      requireTokenScope(workspaceIdentity, "documents:read");
-      requireAgentWorkspacePermission(agentPrincipal, "saved_views.read");
+      requireTokenPermission(workspaceIdentity, "documents:read", "saved_views.read");
       const view = getSavedView(
         database,
         workspaceIdentity.workspaceId,
@@ -3221,16 +3258,14 @@ export function createNyxdocMcpServer(
       },
       annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
     },
-    async ({ workspaceId, ...input }) => mutationToolResult(() => {
+    async ({ workspaceId, ...input }) => mutationToolResult("create_saved_view", () => {
       const parsed = createSavedViewSchema.parse(input);
       const workspaceIdentity = workspaceIdentityForSelectors(
         workspaceId,
         [parsed.query.parentDocumentId, parsed.query.withinDocumentId],
       );
-      const agentPrincipal = workspacePrincipal(workspaceIdentity);
       const collaborationActor = collaborationActorFor(workspaceIdentity);
-      requireTokenScope(workspaceIdentity, "documents:write");
-      requireAgentWorkspacePermission(agentPrincipal, "saved_views.manage");
+      requireTokenPermission(workspaceIdentity, "documents:write", "saved_views.manage");
       if (parsed.query.parentDocumentId) {
         requireTokenDocumentAccess(database, workspaceIdentity, parsed.query.parentDocumentId);
       }
@@ -3246,7 +3281,7 @@ export function createNyxdocMcpServer(
           parsed,
         ),
       };
-    }),
+    }, { workspaceId }),
   );
 
   server.registerTool(
@@ -3262,12 +3297,10 @@ export function createNyxdocMcpServer(
       },
       annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
     },
-    async ({ viewId, ...input }) => mutationToolResult(() => {
+    async ({ viewId, ...input }) => mutationToolResult("update_saved_view", () => {
       const workspaceIdentity = workspaceIdentityForResource("saved_view", viewId);
-      const agentPrincipal = workspacePrincipal(workspaceIdentity);
       const collaborationActor = collaborationActorFor(workspaceIdentity);
-      requireTokenScope(workspaceIdentity, "documents:write");
-      requireAgentWorkspacePermission(agentPrincipal, "saved_views.manage");
+      requireTokenPermission(workspaceIdentity, "documents:write", "saved_views.manage");
       const parsed = updateSavedViewSchema.parse(input);
       if (parsed.query?.parentDocumentId) {
         const parentIdentity = workspaceIdentityForDocument(parsed.query.parentDocumentId);
@@ -3304,12 +3337,10 @@ export function createNyxdocMcpServer(
       inputSchema: { viewId: z.string().uuid() },
       annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false },
     },
-    async ({ viewId }) => mutationToolResult(() => {
+    async ({ viewId }) => mutationToolResult("delete_saved_view", () => {
       const workspaceIdentity = workspaceIdentityForResource("saved_view", viewId);
-      const agentPrincipal = workspacePrincipal(workspaceIdentity);
       const collaborationActor = collaborationActorFor(workspaceIdentity);
-      requireTokenScope(workspaceIdentity, "documents:write");
-      requireAgentWorkspacePermission(agentPrincipal, "saved_views.manage");
+      requireTokenPermission(workspaceIdentity, "documents:write", "saved_views.manage");
       deleteSavedView(database, workspaceIdentity.workspaceId, viewId, collaborationActor);
       return { deleted: true, workspaceId: workspaceIdentity.workspaceId, viewId };
     }),
@@ -3387,11 +3418,7 @@ export function createNyxdocMcpServer(
     },
     async ({ taskId, eventLimit }) => {
       const { task, workspace } = requireVisibleTask(taskId);
-      requireTokenScope(workspace.identity, "documents:read");
-      requireAgentWorkspacePermission(
-        workspacePrincipal(workspace.identity),
-        "tasks.read",
-      );
+      requireTokenPermission(workspace.identity, "documents:read", "tasks.read");
       return toolResult({
         task,
         events: listDocumentTaskEvents(
@@ -3429,12 +3456,12 @@ export function createNyxdocMcpServer(
         }).strict()).max(20).optional(),
         priority: z.enum(DOCUMENT_TASK_PRIORITIES).optional(),
         targetDocumentId: z.string().uuid().nullable().optional(),
-        assignedAgentId: z.string().trim().min(1).max(160).nullable().optional(),
+        assignedAgentId: workspaceAgentGrantIdSchema.nullable().optional(),
         requiresReview: z.boolean().optional(),
       },
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     },
-    async (input) => mutationToolResult(() => {
+    async (input) => mutationToolResult("create_task", () => {
       const { workspaceId, ...taskInput } = input;
       const parsed = createDocumentTaskSchema.parse(taskInput);
       const workspace = readCredentialWorkspaces()
@@ -3445,9 +3472,8 @@ export function createNyxdocMcpServer(
           "The workspace is outside this connection's allowed scope.",
         );
       }
-      requireTokenScope(workspace.identity, "documents:write");
+      requireTokenPermission(workspace.identity, "documents:write", "tasks.create");
       const taskPrincipal = workspacePrincipal(workspace.identity);
-      requireAgentWorkspacePermission(taskPrincipal, "tasks.create");
       if (parsed.targetDocumentId) {
         requireTokenDocumentAccess(
           database,
@@ -3480,7 +3506,7 @@ export function createNyxdocMcpServer(
         grantsAccess: false,
         started: false,
       };
-    }),
+    }, { requestId: input.requestId, workspaceId: input.workspaceId }),
   );
 
   server.registerTool(
@@ -3497,13 +3523,9 @@ export function createNyxdocMcpServer(
       },
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     },
-    async ({ taskId, ...input }) => mutationToolResult(() => {
+    async ({ taskId, ...input }) => mutationToolResult("claim_task", () => {
       const { task, workspace } = requireVisibleTask(taskId);
-      requireTokenScope(workspace.identity, "documents:write");
-      requireAgentWorkspacePermission(
-        workspacePrincipal(workspace.identity),
-        "tasks.update",
-      );
+      requireTokenPermission(workspace.identity, "documents:write", "tasks.update");
       const parsed = claimDocumentTaskSchema.parse(input);
       return {
         task: claimDocumentTask(
@@ -3515,7 +3537,7 @@ export function createNyxdocMcpServer(
         ),
         grantsAccess: false,
       };
-    }),
+    }, { requestId: input.requestId }),
   );
 
   server.registerTool(
@@ -3534,13 +3556,9 @@ export function createNyxdocMcpServer(
       },
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     },
-    async ({ taskId, ...input }) => mutationToolResult(() => {
+    async ({ taskId, ...input }) => mutationToolResult("report_task", () => {
       const { task, workspace } = requireVisibleTask(taskId);
-      requireTokenScope(workspace.identity, "documents:write");
-      requireAgentWorkspacePermission(
-        workspacePrincipal(workspace.identity),
-        "tasks.update",
-      );
+      requireTokenPermission(workspace.identity, "documents:write", "tasks.update");
       const parsed = reportDocumentTaskSchema.parse(input);
       return {
         task: reportDocumentTask(
@@ -3552,7 +3570,7 @@ export function createNyxdocMcpServer(
         ),
         grantsAccess: false,
       };
-    }),
+    }, { requestId: input.requestId }),
   );
 
   server.registerTool(
@@ -3571,13 +3589,9 @@ export function createNyxdocMcpServer(
       },
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     },
-    async ({ taskId, ...input }) => mutationToolResult(() => {
+    async ({ taskId, ...input }) => mutationToolResult("complete_task", () => {
       const { task, workspace } = requireVisibleTask(taskId);
-      requireTokenScope(workspace.identity, "documents:write");
-      requireAgentWorkspacePermission(
-        workspacePrincipal(workspace.identity),
-        "tasks.update",
-      );
+      requireTokenPermission(workspace.identity, "documents:write", "tasks.update");
       const parsed = completeDocumentTaskSchema.parse(input);
       if (parsed.resultDocumentId) {
         requireTokenDocumentAccess(
@@ -3596,7 +3610,7 @@ export function createNyxdocMcpServer(
         ),
         grantsAccess: false,
       };
-    }),
+    }, { requestId: input.requestId, documentId: input.resultDocumentId ?? undefined }),
   );
 
   server.registerTool(
@@ -3616,9 +3630,7 @@ export function createNyxdocMcpServer(
     },
     async ({ workspaceId, assignmentType, status, offset, limit }) => {
       const workspaceIdentity = workspaceIdentityForId(workspaceId);
-      const agentPrincipal = workspacePrincipal(workspaceIdentity);
-      requireTokenScope(workspaceIdentity, "documents:read");
-      requireAgentWorkspacePermission(agentPrincipal, "assignments.read");
+      requireTokenPermission(workspaceIdentity, "documents:read", "assignments.read");
       const requestedStatus = status ?? "active";
       const start = Math.max(0, Math.trunc(offset ?? 0));
       const pageSize = Math.max(1, Math.min(200, Math.trunc(limit ?? 50)));
@@ -3649,7 +3661,8 @@ export function createNyxdocMcpServer(
       inputSchema: {
         workspaceId: z.string().uuid().optional(),
         documentId: z.string().uuid().optional(),
-        agentId: z.string().trim().min(1).max(160).optional(),
+        // Assignment filters use the workspace-local WorkspaceAgentGrantId.
+        agentId: workspaceAgentGrantIdSchema.optional(),
         status: z.enum(["active", "completed", "cancelled"]).optional(),
       },
       annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
@@ -3657,8 +3670,7 @@ export function createNyxdocMcpServer(
     async ({ workspaceId, documentId, agentId, status }) => {
       const workspaceIdentity = workspaceIdentityForSelectors(workspaceId, [documentId]);
       const agentPrincipal = workspacePrincipal(workspaceIdentity);
-      requireTokenScope(workspaceIdentity, "documents:read");
-      requireAgentWorkspacePermission(agentPrincipal, "assignments.read");
+      requireTokenPermission(workspaceIdentity, "documents:read", "assignments.read");
       if (documentId) requireTokenDocumentAccess(database, workspaceIdentity, documentId);
       const mayManageAssignments = agentPrincipalAllows(agentPrincipal, "assignments.manage");
       if (
@@ -3697,13 +3709,11 @@ export function createNyxdocMcpServer(
       inputSchema: createAssignmentSchema.shape,
       annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
     },
-    async (input) => mutationToolResult(() => {
+    async (input) => mutationToolResult("assign_document", () => {
       const parsed = createAssignmentSchema.parse(input);
       const workspaceIdentity = workspaceIdentityForDocument(parsed.documentId);
-      const agentPrincipal = workspacePrincipal(workspaceIdentity);
       const collaborationActor = collaborationActorFor(workspaceIdentity);
-      requireTokenScope(workspaceIdentity, "documents:write");
-      requireAgentWorkspacePermission(agentPrincipal, "assignments.manage");
+      requireTokenPermission(workspaceIdentity, "documents:write", "assignments.manage");
       requireTokenDocumentAccess(database, workspaceIdentity, parsed.documentId);
       return {
         workspaceId: workspaceIdentity.workspaceId,
@@ -3715,7 +3725,7 @@ export function createNyxdocMcpServer(
         )),
         grantsAccess: false,
       };
-    }),
+    }, { documentId: input.documentId }),
   );
 
   server.registerTool(
@@ -3730,12 +3740,10 @@ export function createNyxdocMcpServer(
       },
       annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
     },
-    async ({ assignmentId, ...input }) => mutationToolResult(() => {
+    async ({ assignmentId, ...input }) => mutationToolResult("update_assignment", () => {
       const workspaceIdentity = workspaceIdentityForResource("assignment", assignmentId);
-      const agentPrincipal = workspacePrincipal(workspaceIdentity);
       const collaborationActor = collaborationActorFor(workspaceIdentity);
-      requireTokenScope(workspaceIdentity, "documents:write");
-      requireAgentWorkspacePermission(agentPrincipal, "assignments.manage");
+      requireTokenPermission(workspaceIdentity, "documents:write", "assignments.manage");
       const parsed = updateAssignmentSchema.parse(input);
       const current = listAssignments(database, workspaceIdentity.workspaceId)
         .find((assignment) => assignment.id === assignmentId);
@@ -3763,14 +3771,17 @@ export function createNyxdocMcpServer(
       inputSchema: agentPresenceSchema.shape,
       annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
     },
-    async (input) => mutationToolResult(() => {
+    async (input) => mutationToolResult("set_presence", () => {
       const parsed = agentPresenceSchema.parse(input);
       const workspaceIdentity = workspaceIdentityForDocument(parsed.documentId);
-      requireTokenScope(
+      requireTokenPermission(
         workspaceIdentity,
         parsed.state === "editing" || parsed.state === "drafting"
           ? "documents:write"
           : "documents:read",
+        parsed.state === "editing" || parsed.state === "drafting"
+          ? "documents.update"
+          : "documents.read",
       );
       requireTokenDocumentAccess(database, workspaceIdentity, parsed.documentId);
       return {
@@ -3784,7 +3795,7 @@ export function createNyxdocMcpServer(
         }),
         heartbeatWithinSeconds: 30,
       };
-    }),
+    }, { documentId: input.documentId }),
   );
 
   server.registerTool(
@@ -3798,12 +3809,12 @@ export function createNyxdocMcpServer(
       },
       annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
     },
-    async ({ sessionId, workspaceId }) => mutationToolResult(() => {
+    async ({ sessionId, workspaceId }) => mutationToolResult("end_presence", () => {
       const workspaces = workspaceId
         ? [{ identity: workspaceIdentityForId(workspaceId) }]
         : readCredentialWorkspaces();
       for (const workspace of workspaces) {
-        requireTokenScope(workspace.identity, "documents:read");
+        requireTokenPermission(workspace.identity, "documents:read", "documents.read");
         if (endAgentPresence(
           workspace.identity.workspaceId,
           workspace.identity.agentId,
@@ -3817,7 +3828,7 @@ export function createNyxdocMcpServer(
         }
       }
       return { ended: false, workspaceId: workspaceId ?? null, sessionId };
-    }),
+    }, { workspaceId }),
   );
 
   server.registerTool(
@@ -3834,7 +3845,7 @@ export function createNyxdocMcpServer(
     },
     async ({ documentId, limit, beforeRevision }) => {
       const workspaceIdentity = workspaceIdentityForDocument(documentId);
-      requireTokenScope(workspaceIdentity, "documents:read");
+      requireTokenPermission(workspaceIdentity, "documents:read", "revisions.read");
       requireTokenDocumentAccess(database, workspaceIdentity, documentId);
       return toolResult(projectedReadPayload("list_revisions", {
         workspaceId: workspaceIdentity.workspaceId,
@@ -3863,7 +3874,7 @@ export function createNyxdocMcpServer(
     },
     async ({ documentId, revisionNumber }) => {
       const workspaceIdentity = workspaceIdentityForDocument(documentId);
-      requireTokenScope(workspaceIdentity, "documents:read");
+      requireTokenPermission(workspaceIdentity, "documents:read", "revisions.read");
       requireTokenDocumentAccess(database, workspaceIdentity, documentId);
       return toolResult(projectedReadPayload("get_revision", {
         workspaceId: workspaceIdentity.workspaceId,
@@ -3892,7 +3903,7 @@ export function createNyxdocMcpServer(
     },
     async ({ documentId, fromRevision, toRevision }) => {
       const workspaceIdentity = workspaceIdentityForDocument(documentId);
-      requireTokenScope(workspaceIdentity, "documents:read");
+      requireTokenPermission(workspaceIdentity, "documents:read", "revisions.read");
       requireTokenDocumentAccess(database, workspaceIdentity, documentId);
       return toolResult(projectedReadPayload("diff_revisions", {
         workspaceId: workspaceIdentity.workspaceId,
@@ -3913,10 +3924,13 @@ export function createNyxdocMcpServer(
     {
       title: "Restore a Nyxdoc document revision",
       description:
-        "Load an immutable historical snapshot into the shared draft. This does not create or change a canonical revision; call commit_document explicitly after review.",
+        "Load an immutable historical snapshot into the shared draft. Read get_working_document immediately before this destructive operation and pass its generation, draftVersion, and baseRevisionNumber as the CAS guard. This does not create or change a canonical revision; call commit_document explicitly after review.",
       inputSchema: {
         documentId: z.string().uuid(),
         revisionNumber: z.number().int().positive(),
+        expectedGeneration: z.number().int().positive(),
+        expectedDraftVersion: z.number().int().nonnegative(),
+        expectedBaseRevision: z.number().int().positive(),
         requestId: requestIdSchema,
         responseMode: mcpResponseModeSchema.describe(
           "Response detail. summary is the default; use full only when the restored draft AST is needed immediately.",
@@ -3924,9 +3938,17 @@ export function createNyxdocMcpServer(
       },
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
     },
-    async ({ documentId, revisionNumber, requestId, responseMode }) => mutationToolResult(async () => {
+    async ({
+      documentId,
+      revisionNumber,
+      expectedGeneration,
+      expectedDraftVersion,
+      expectedBaseRevision,
+      requestId,
+      responseMode,
+    }) => mutationToolResult("restore_revision", async () => {
       const workspaceIdentity = workspaceIdentityForDocument(documentId);
-      requireTokenScope(workspaceIdentity, "revisions:restore");
+      requireTokenPermission(workspaceIdentity, "revisions:restore", "revisions.restore");
       requireTokenDocumentAccess(database, workspaceIdentity, documentId);
       const revision = getDocumentRevisionSnapshotByNumber(
         database,
@@ -3938,6 +3960,9 @@ export function createNyxdocMcpServer(
         workspaceId: workspaceIdentity.workspaceId,
         documentId,
         revisionId: revision.id,
+        expectedGeneration,
+        expectedDraftVersion,
+        expectedBaseRevision,
         actor,
         requestId,
       });
@@ -3945,7 +3970,7 @@ export function createNyxdocMcpServer(
         workspaceId: workspaceIdentity.workspaceId,
         ...(result as unknown as Record<string, unknown>),
       };
-    }, { operation: "restore_revision", responseMode }),
+    }, { responseMode, requestId, documentId }),
   );
 
   return server;

@@ -1,4 +1,6 @@
 import { randomUUID } from "node:crypto";
+import { assertWorkspaceAgentGrantCanAccessDocument } from "@/lib/agents/workspace-grant-boundary";
+import type { WorkspaceAgentGrantId } from "@/lib/agents/identifiers";
 import { recordWorkspaceAuditEvent } from "@/lib/authz/permissions";
 import type {
   CollaborationActor,
@@ -29,6 +31,7 @@ type AssignmentRow = {
   document_id: string;
   document_title: string;
   agent_id: string;
+  agent_identity_id: string;
   agent_display_name: string;
   agent_avatar_media_id: string | null;
   assignment_type: DocumentAssignment["assignmentType"];
@@ -72,6 +75,7 @@ function mapAssignment(row: AssignmentRow): DocumentAssignment {
     documentId: row.document_id,
     documentTitle: row.document_title,
     agentId: row.agent_id,
+    agentIdentityId: row.agent_identity_id,
     agentDisplayName: row.agent_display_name,
     agentAvatarMediaId: row.agent_avatar_media_id,
     assignmentType: row.assignment_type,
@@ -121,7 +125,7 @@ export function listWorkspaceAgents(
   options: { includeDisabled?: boolean } = {},
 ): WorkspaceAgentSummary[] {
   const rows = database.prepare(
-    `SELECT membership.id, identity.display_name, identity.avatar_media_id,
+    `SELECT membership.id, membership.agent_identity_id, identity.display_name, identity.avatar_media_id,
             membership.access_profile, membership.capabilities_json, membership.status,
             membership.created_at, membership.updated_at,
             COUNT(CASE WHEN x.status = 'active' THEN 1 END) AS active_assignment_count
@@ -141,6 +145,7 @@ export function listWorkspaceAgents(
               identity.display_name COLLATE NOCASE ASC, membership.id ASC`,
   ).all(workspaceId, options.includeDisabled ? 1 : 0) as Array<{
     id: string;
+    agent_identity_id: string;
     display_name: string;
     avatar_media_id: string | null;
     access_profile: WorkspaceAgentSummary["accessProfile"];
@@ -152,6 +157,7 @@ export function listWorkspaceAgents(
   }>;
   return rows.map((row) => ({
     id: row.id,
+    agentIdentityId: row.agent_identity_id,
     displayName: row.display_name,
     avatarMediaId: row.avatar_media_id,
     accessProfile: row.access_profile,
@@ -355,6 +361,7 @@ export function listAssignmentHistory(
   }
   const rows = database.prepare(
     `SELECT x.id, x.document_id, d.title AS document_title, x.agent_id,
+            a.agent_identity_id,
             a.display_name AS agent_display_name, a.avatar_media_id AS agent_avatar_media_id,
             x.assignment_type, x.status, x.note, x.assigned_by_user_id,
             x.assigned_by_agent_id, x.created_at, x.updated_at
@@ -402,30 +409,24 @@ export function assignDocument(
   actor: CollaborationActor,
   input: {
     documentId: string;
-    agentId: string;
+    /** WorkspaceAgentGrantId (`workspace_agents.id`), not AgentIdentityId. */
+    agentId: WorkspaceAgentGrantId;
     assignmentType: DocumentAssignment["assignmentType"];
     note?: string | null;
   },
 ) {
   const document = database.prepare(
     `SELECT id FROM documents
-     WHERE id = ? AND workspace_id = ? AND lifecycle_state = 'active'`,
+     WHERE id = ? AND workspace_id = ?
+       AND status = 'active' AND lifecycle_state = 'active'`,
   ).get(input.documentId, workspaceId);
   if (!document) throw new DocumentServiceError("NOT_FOUND", "문서를 찾을 수 없습니다.");
-  const agent = database.prepare(
-    `SELECT membership.id
-     FROM workspace_agents membership
-     JOIN agents identity
-       ON identity.id = membership.agent_identity_id
-      AND identity.status = 'active'
-      AND identity.deleted_at IS NULL
-      AND identity.purged_at IS NULL
-     WHERE membership.id = ?
-       AND membership.workspace_id = ?
-       AND membership.status = 'active'
-       AND membership.revoked_at IS NULL`,
-  ).get(input.agentId, workspaceId);
-  if (!agent) throw new DocumentServiceError("NOT_FOUND", "활성 에이전트를 찾을 수 없습니다.");
+  assertWorkspaceAgentGrantCanAccessDocument(
+    database,
+    workspaceId,
+    input.agentId,
+    input.documentId,
+  );
   const existing = database.prepare(
     `SELECT id FROM agent_document_assignments
      WHERE workspace_id = ? AND document_id = ? AND agent_id = ?
@@ -489,13 +490,22 @@ export function updateAssignment(
 ) {
   const current = listAssignments(database, workspaceId).find((item) => item.id === assignmentId);
   if (!current) throw new DocumentServiceError("NOT_FOUND", "담당 지정을 찾을 수 없습니다.");
+  const nextStatus = input.status ?? current.status;
+  if (nextStatus === "active") {
+    assertWorkspaceAgentGrantCanAccessDocument(
+      database,
+      workspaceId,
+      current.agentId,
+      current.documentId,
+    );
+  }
   const now = new Date().toISOString();
   const owner = actorColumns(actor);
   database.transaction(() => {
     database.prepare(
       `UPDATE agent_document_assignments SET status = ?, note = ?, updated_at = ?
        WHERE id = ? AND workspace_id = ?`,
-    ).run(input.status ?? current.status, input.note === undefined ? current.note : input.note?.trim() || null, now, assignmentId, workspaceId);
+    ).run(nextStatus, input.note === undefined ? current.note : input.note?.trim() || null, now, assignmentId, workspaceId);
     recordWorkspaceAuditEvent(database, {
       workspaceId,
       action: "assignment.updated",

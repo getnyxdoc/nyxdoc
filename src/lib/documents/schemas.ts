@@ -75,6 +75,16 @@ const workingDocumentReplacementFields = {
   content: nyxdocDocumentV2Schema.optional(),
 };
 
+const documentDraftVersionCasFields = {
+  expectedGeneration: z.number().int().positive(),
+  expectedDraftVersion: z.number().int().nonnegative(),
+};
+
+const documentDraftCasFields = {
+  ...documentDraftVersionCasFields,
+  expectedBaseRevision: z.number().int().positive(),
+};
+
 export const updateWorkingDocumentSchema = z.object({
   requestId: requestIdSchema,
   expectedDraftVersion: z.number().int().nonnegative(),
@@ -100,6 +110,12 @@ export const commitWorkingDocumentSchema = z.object({
 
 export const restoreWorkingRevisionSchema = z.object({
   requestId: requestIdSchema,
+  ...documentDraftCasFields,
+}).strict();
+
+export const discardWorkingDocumentSchema = z.object({
+  documentId: z.string().uuid(),
+  ...documentDraftCasFields,
 }).strict();
 
 export const archiveDocumentSchema = z.object({
@@ -108,7 +124,8 @@ export const archiveDocumentSchema = z.object({
 
 export const restoreDocumentRevisionSchema = z.object({
   baseRevision: z.number().int().positive(),
-});
+  ...documentDraftVersionCasFields,
+}).strict();
 
 const patchNodeIdSchema = z.string().min(1).max(160).optional();
 const patchTextBlockSchema = z.object({

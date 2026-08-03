@@ -142,6 +142,12 @@ export type DocumentMutationResult = {
   normalization?: BlockIdNormalization;
 };
 
+export type DocumentDraftCas = {
+  expectedGeneration: number;
+  expectedDraftVersion: number;
+  expectedBaseRevision: number;
+};
+
 export type TrashBatchSummary = {
   id: string;
   rootDocumentId: string;

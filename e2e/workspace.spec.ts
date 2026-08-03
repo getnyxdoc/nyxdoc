@@ -170,7 +170,11 @@ test("previews an old revision without mutation and loads it only into the share
   await expect(preview).toBeHidden();
   await expect(historyPanel).toBeVisible();
   expect(restoreWrites).toBe(1);
-  expect(restoreBody).toEqual({ baseRevision: 2 });
+  expect(restoreBody).toEqual({
+    baseRevision: 2,
+    expectedDraftVersion: 0,
+    expectedGeneration: 1,
+  });
   await expect(page.getByText("리비전 2", { exact: true })).toBeVisible();
 
   await historyPanel.getByRole("button", { name: "변경 기록 닫기" }).click();

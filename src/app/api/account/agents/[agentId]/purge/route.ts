@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { requireVerifiedSession } from "@/data/session";
+import { agentIdentityIdSchema } from "@/lib/agents/identifiers";
 import {
   purgeAccountAgent,
   validateAccountAgentPurge,
@@ -23,7 +24,8 @@ export async function DELETE(
   try {
     assertSameOrigin(request);
     const session = await requireVerifiedSession();
-    const { agentId } = await context.params;
+    const { agentId: rawAgentId } = await context.params;
+    const agentId = agentIdentityIdSchema.parse(rawAgentId);
     const body = purgeSchema.parse(await request.json());
     validateAccountAgentPurge(sqlite, {
       userId: session.user.id,

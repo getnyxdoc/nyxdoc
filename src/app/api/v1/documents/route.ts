@@ -6,7 +6,7 @@ import { sqlite } from "@/lib/db/client";
 import { apiErrorResponse } from "@/lib/http/errors";
 import { authenticateRequestApiToken } from "@/lib/tokens/request";
 import {
-  requireTokenScope,
+  requireTokenPermission,
   resolveTokenCreateParent,
   resolveTokenReadRoot,
   tokenDocumentActor,
@@ -32,7 +32,7 @@ const listQuerySchema = z.object({
 export async function GET(request: Request) {
   try {
     const identity = authenticateRequestApiToken(sqlite, request);
-    requireTokenScope(identity, "documents:read");
+    requireTokenPermission(identity, "documents:read", "documents.read");
     const url = new URL(request.url);
     const query = listQuerySchema.parse(Object.fromEntries(url.searchParams));
     return Response.json(queryDocuments(sqlite, identity.workspaceId, {
@@ -48,7 +48,7 @@ export async function GET(request: Request) {
 export async function POST(request: Request) {
   try {
     const identity = authenticateRequestApiToken(sqlite, request);
-    requireTokenScope(identity, "documents:write");
+    requireTokenPermission(identity, "documents:write", "documents.create");
     const body = agentCreateDocumentSchema.parse(await request.json());
     const parentDocumentId = resolveTokenCreateParent(sqlite, identity, body.parentDocumentId);
     const result = createDocument(

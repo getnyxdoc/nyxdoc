@@ -11,7 +11,7 @@ import { authenticateRequestApiToken } from "@/lib/tokens/request";
 import {
   requireTokenDocumentAccess,
   requireTokenParentAccess,
-  requireTokenScope,
+  requireTokenPermission,
   tokenDocumentActor,
 } from "@/lib/tokens/service";
 
@@ -24,7 +24,7 @@ export async function GET(
 ) {
   try {
     const identity = authenticateRequestApiToken(sqlite, request);
-    requireTokenScope(identity, "documents:read");
+    requireTokenPermission(identity, "documents:read", "documents.read");
     const { documentId } = await context.params;
     requireTokenDocumentAccess(sqlite, identity, documentId);
     return Response.json({ document: getDocument(sqlite, identity.workspaceId, documentId) });
@@ -39,7 +39,7 @@ export async function PUT(
 ) {
   try {
     const identity = authenticateRequestApiToken(sqlite, request);
-    requireTokenScope(identity, "documents:write");
+    requireTokenPermission(identity, "documents:write", "documents.update");
     const { documentId } = await context.params;
     requireTokenDocumentAccess(sqlite, identity, documentId);
     const body = updateWorkingDocumentSchema.parse(await request.json());
@@ -71,7 +71,7 @@ export async function PATCH(
 ) {
   try {
     const identity = authenticateRequestApiToken(sqlite, request);
-    requireTokenScope(identity, "documents:write");
+    requireTokenPermission(identity, "documents:write", "documents.update");
     const { documentId } = await context.params;
     requireTokenDocumentAccess(sqlite, identity, documentId);
     const body = patchWorkingDocumentSchema.parse(await request.json());

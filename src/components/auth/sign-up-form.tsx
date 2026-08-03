@@ -2,10 +2,20 @@
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { FormEvent, useState } from "react";
+import { FormEvent, useState, useSyncExternalStore } from "react";
 import { ArrowRight } from "lucide-react";
 import { useI18n } from "@/lib/i18n/client";
 import styles from "./auth.module.css";
+
+const subscribeToHydration = () => () => undefined;
+
+function useHydrated() {
+  return useSyncExternalStore(
+    subscribeToHydration,
+    () => true,
+    () => false,
+  );
+}
 
 export function SignUpForm({
   allowedEmailDomains,
@@ -29,6 +39,7 @@ export function SignUpForm({
   const { t } = useI18n();
   const router = useRouter();
   const [error, setError] = useState("");
+  const hydrated = useHydrated();
   const [pending, setPending] = useState(false);
 
   async function submit(event: FormEvent<HTMLFormElement>) {
@@ -115,7 +126,11 @@ export function SignUpForm({
             {t("auth.registrationClosed")}
           </div>
         )}
-        <button className={styles.submit} disabled={pending || registrationBlocked}>
+        <button
+          className={styles.submit}
+          type="submit"
+          disabled={!hydrated || pending || registrationBlocked}
+        >
           {pending
             ? t("auth.preparingWorkspace")
             : setup

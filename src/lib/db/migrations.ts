@@ -2635,6 +2635,52 @@ export const APP_MIGRATIONS: readonly AppMigration[] = [
       BEGIN SELECT RAISE(ABORT, 'media upload ticket binding is no longer active'); END;
     `,
   },
+  {
+    id: "0041_document_tree_grants_fail_closed",
+    safety: "schema",
+    sql: `
+      CREATE TRIGGER workspace_agent_document_tree_root_insert
+      BEFORE INSERT ON workspace_agents
+      WHEN NEW.scope_mode = 'document_tree'
+        AND NEW.root_document_id IS NULL
+        AND NEW.status = 'active'
+        AND NEW.revoked_at IS NULL
+      BEGIN
+        SELECT RAISE(ABORT, 'active document-tree grant requires a root document');
+      END;
+
+      CREATE TRIGGER workspace_agent_document_tree_root_update
+      BEFORE UPDATE OF scope_mode, root_document_id, status, revoked_at ON workspace_agents
+      WHEN NEW.scope_mode = 'document_tree'
+        AND NEW.root_document_id IS NULL
+        AND NEW.status = 'active'
+        AND NEW.revoked_at IS NULL
+      BEGIN
+        SELECT RAISE(ABORT, 'active document-tree grant requires a root document');
+      END;
+
+      CREATE TRIGGER document_tree_grant_root_delete
+      BEFORE DELETE ON documents
+      WHEN EXISTS (
+        SELECT 1 FROM workspace_agents
+        WHERE root_document_id = OLD.id
+          AND scope_mode = 'document_tree'
+          AND status = 'active'
+          AND revoked_at IS NULL
+      )
+      BEGIN
+        UPDATE workspace_agents
+        SET status = 'disabled',
+            revoked_at = COALESCE(revoked_at, strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+            updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
+            policy_version = policy_version + 1
+        WHERE root_document_id = OLD.id
+          AND scope_mode = 'document_tree'
+          AND status = 'active'
+          AND revoked_at IS NULL;
+      END;
+    `,
+  },
 ];
 
 export type AppMigrationPlan = {

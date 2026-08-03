@@ -6,6 +6,10 @@ const nextConfig: NextConfig = {
   // them an isolated build directory so they can run while a developer keeps
   // the normal `.next` dev server open.
   distDir: process.env.NYXDOC_NEXT_DIST_DIR || ".next",
+  // Local qualification may bind the browser to the loopback address while
+  // Next reports localhost as its development origin. Keep both loopback
+  // spellings on the same trusted development boundary.
+  allowedDevOrigins: ["127.0.0.1"],
   typescript: {
     tsconfigPath: process.env.NYXDOC_TSCONFIG_PATH || "tsconfig.json",
   },

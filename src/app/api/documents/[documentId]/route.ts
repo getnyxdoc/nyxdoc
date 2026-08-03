@@ -6,8 +6,7 @@ import {
 import { ensureCollaborationState } from "@/lib/collaboration/drafts";
 import {
   archiveWorkingTree,
-  commitWorkingDocument,
-  replaceWorkingDocumentThroughGateway,
+  replaceAndCommitWorkingDocumentThroughGateway,
 } from "@/lib/collaboration/gateway";
 import { sqlite } from "@/lib/db/client";
 import { humanDocumentActor } from "@/lib/documents/actors";
@@ -58,7 +57,7 @@ export async function PUT(
     }
     const state = ensureCollaborationState(sqlite, workspace.id, documentId);
     const actor = { ...humanDocumentActor(session.user), source: "api" as const };
-    const replaced = await replaceWorkingDocumentThroughGateway({
+    const result = await replaceAndCommitWorkingDocumentThroughGateway({
       roomName: state.roomName,
       actor,
       requestId: body.requestId,
@@ -71,12 +70,6 @@ export async function PUT(
         tags: body.tags,
         content: body.content,
       },
-    });
-    const result = await commitWorkingDocument({
-      roomName: state.roomName,
-      actor,
-      expectedDraftVersion: replaced.workingDocument.draftVersion,
-      requestId: body.requestId,
       summary: body.summary,
     });
     return Response.json(result);

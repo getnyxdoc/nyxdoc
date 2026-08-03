@@ -1,4 +1,5 @@
 import type { AgentAccessProfile, WorkspacePermission } from "@/lib/authz/permissions";
+import type { AgentIdentityId, WorkspaceAgentGrantId } from "@/lib/agents/identifiers";
 import type { DocumentListEntry, DocumentWorkflowStatus } from "@/lib/documents/types";
 
 export const ASSIGNMENT_TYPES = ["owner", "contributor", "reviewer"] as const;
@@ -9,10 +10,15 @@ export type AssignmentStatus = (typeof ASSIGNMENT_STATUSES)[number];
 
 export type CollaborationActor =
   | { type: "human"; userId: string; label: string }
-  | { type: "agent"; agentId: string; label: string };
+  // agentId is the WorkspaceAgentGrantId because collaboration ownership
+  // columns reference workspace_agents.id.
+  | { type: "agent"; agentId: WorkspaceAgentGrantId; label: string };
 
 export type WorkspaceAgentSummary = {
-  id: string;
+  /** WorkspaceAgentGrantId (`workspace_agents.id`), used as an assignment target. */
+  id: WorkspaceAgentGrantId;
+  /** Global AgentIdentityId (`agents.id`) shared across workspace grants. */
+  agentIdentityId: AgentIdentityId;
   displayName: string;
   avatarMediaId: string | null;
   accessProfile: AgentAccessProfile;
@@ -33,7 +39,8 @@ export type SavedViewQuery = {
   updatedAfter?: string;
   updatedBefore?: string;
   updatedWithinDays?: number;
-  assignedAgentId?: string;
+  /** WorkspaceAgentGrantId; saved-view filters never accept a global identity ID. */
+  assignedAgentId?: WorkspaceAgentGrantId;
   assignmentType?: AssignmentType;
   unassigned?: boolean;
   sort?: "tree" | "updated_desc";
@@ -54,7 +61,10 @@ export type DocumentAssignment = {
   id: string;
   documentId: string;
   documentTitle: string;
-  agentId: string;
+  /** WorkspaceAgentGrantId (`workspace_agents.id`), not AgentIdentityId. */
+  agentId: WorkspaceAgentGrantId;
+  /** Global AgentIdentityId (`agents.id`) for this workspace grant. */
+  agentIdentityId: AgentIdentityId;
   agentDisplayName: string;
   agentAvatarMediaId: string | null;
   assignmentType: AssignmentType;

@@ -20,6 +20,7 @@ function agent(
 ): WorkspaceAgentSummary {
   return {
     id,
+    agentIdentityId: `identity-${id}`,
     displayName,
     avatarMediaId: null,
     accessProfile,

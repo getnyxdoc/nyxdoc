@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { requireVerifiedSession } from "@/data/session";
+import { agentIdentityIdSchema } from "@/lib/agents/identifiers";
 import { revokeAgentCredential, updateAgentCredential } from "@/lib/agents/service";
 import { sqlite } from "@/lib/db/client";
 import { apiErrorResponse } from "@/lib/http/errors";
@@ -22,7 +23,8 @@ export async function PATCH(request: Request, context: { params: Promise<{ agent
   try {
     assertSameOrigin(request);
     const session = await requireVerifiedSession();
-    const { agentId, credentialId } = await context.params;
+    const { agentId: rawAgentId, credentialId } = await context.params;
+    const agentId = agentIdentityIdSchema.parse(rawAgentId);
     const body = updateSchema.parse(await request.json());
     return Response.json({
       credential: updateAgentCredential(sqlite, {
@@ -41,7 +43,8 @@ export async function DELETE(request: Request, context: { params: Promise<{ agen
   try {
     assertSameOrigin(request);
     const session = await requireVerifiedSession();
-    const { agentId, credentialId } = await context.params;
+    const { agentId: rawAgentId, credentialId } = await context.params;
+    const agentId = agentIdentityIdSchema.parse(rawAgentId);
     revokeAgentCredential(sqlite, { userId: session.user.id, agentId, credentialId });
     return new Response(null, { status: 204 });
   } catch (error) {

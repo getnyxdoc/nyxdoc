@@ -50,6 +50,7 @@ export type ApiTokenIdentity = {
   prefix: string;
   scopes: ApiTokenScope[];
   lastEventCursor: number;
+  scopeMode: "workspace" | "document_tree";
   rootDocumentId: string | null;
   ipAllowlist: string[];
 };
@@ -600,6 +601,7 @@ function authenticateCredentialRow(
   const membership = database.prepare(
     `SELECT membership.id, membership.access_profile,
             membership.capabilities_json, membership.root_document_id,
+            membership.scope_mode,
             binding.id AS binding_id
      FROM workspace_agents membership
      JOIN agent_credential_grant_bindings binding
@@ -620,6 +622,7 @@ function authenticateCredentialRow(
       AND personal_agent_member.user_id = agent_owner.owner_user_id
      WHERE membership.workspace_id = ? AND membership.agent_identity_id = ?
        AND membership.status = 'active' AND membership.revoked_at IS NULL
+       AND (membership.scope_mode = 'workspace' OR membership.root_document_id IS NOT NULL)
        AND workspace.lifecycle_state = 'active'
        AND (ownership.owner_type = 'personal' OR organization.lifecycle_state = 'active')
        AND (
@@ -640,6 +643,7 @@ function authenticateCredentialRow(
     id: string;
     access_profile: AgentAccessProfile;
     capabilities_json: string;
+    scope_mode: "workspace" | "document_tree";
     root_document_id: string | null;
     binding_id: string;
   } | undefined;
@@ -686,6 +690,7 @@ function authenticateCredentialRow(
     prefix: row.token_prefix,
     scopes,
     lastEventCursor: Number(state?.last_event_cursor ?? 0),
+    scopeMode: membership.scope_mode,
     rootDocumentId: membership.root_document_id,
     ipAllowlist,
   };
@@ -736,7 +741,8 @@ export function listApiTokenWorkspaceIdentities(
   const rows = database.prepare(
     `SELECT membership.id, membership.workspace_id,
             membership.access_profile, membership.capabilities_json,
-            membership.root_document_id, binding.id AS binding_id,
+            membership.root_document_id, membership.scope_mode,
+            binding.id AS binding_id,
             workspace.name AS workspace_name, workspace.slug AS workspace_slug,
             COALESCE(state.last_event_cursor, 0) AS last_event_cursor
      FROM workspace_agents membership
@@ -760,6 +766,7 @@ export function listApiTokenWorkspaceIdentities(
        ON state.credential_id = ? AND state.workspace_id = membership.workspace_id
      WHERE membership.agent_identity_id = ?
        AND membership.status = 'active' AND membership.revoked_at IS NULL
+       AND (membership.scope_mode = 'workspace' OR membership.root_document_id IS NOT NULL)
        AND workspace.lifecycle_state = 'active'
        AND (ownership.owner_type = 'personal' OR organization.lifecycle_state = 'active')
        AND (
@@ -783,6 +790,7 @@ export function listApiTokenWorkspaceIdentities(
     access_profile: AgentAccessProfile;
     capabilities_json: string;
     binding_id: string;
+    scope_mode: "workspace" | "document_tree";
     root_document_id: string | null;
     workspace_name: string;
     workspace_slug: string;
@@ -797,6 +805,7 @@ export function listApiTokenWorkspaceIdentities(
         accessProfile: row.access_profile,
         capabilities: parseStringList(row.capabilities_json, WORKSPACE_PERMISSIONS),
         bindingId: row.binding_id,
+        scopeMode: row.scope_mode,
         rootDocumentId: row.root_document_id,
         lastEventCursor: Number(row.last_event_cursor),
       },
@@ -809,12 +818,32 @@ export function listApiTokenWorkspaceIdentities(
 }
 
 export function requireTokenScope(identity: ApiTokenIdentity, scope: ApiTokenScope) {
+  return requireTokenPermission(identity, scope, TOKEN_SCOPE_PERMISSIONS[scope]);
+}
+
+/**
+ * Enforce both halves of an agent operation:
+ *
+ * - the credential scope is the coarse, revocable ceiling carried by the key;
+ * - the workspace grant capability is the exact action allowed in this workspace.
+ *
+ * Callers performing a concrete operation must use this function instead of
+ * treating a broad read/write scope as permission for every action in that
+ * category.
+ */
+export function requireTokenPermission(
+  identity: ApiTokenIdentity,
+  scope: ApiTokenScope,
+  permission: WorkspacePermission,
+) {
   if (!identity.scopes.includes(scope)) {
     throw new ApiTokenError("FORBIDDEN", `이 연결에는 ${scope} 권한이 없습니다.`);
   }
-  const permission = TOKEN_SCOPE_PERMISSIONS[scope];
   if (!agentPrincipalAllows(identity, permission)) {
-    throw new ApiTokenError("FORBIDDEN", `이 에이전트의 워크스페이스 grant에는 ${scope}에 필요한 capability가 없습니다.`);
+    throw new ApiTokenError(
+      "FORBIDDEN",
+      `이 에이전트의 워크스페이스 grant에는 ${permission} capability가 없습니다.`,
+    );
   }
 }
 
@@ -839,7 +868,11 @@ export function tokenCanAccessDocument(
   documentId: string,
   includeArchived = false,
 ) {
-  if (!identity.rootDocumentId) return true;
+  if (identity.scopeMode === "workspace") return true;
+  // A document-tree grant without a live root is invalid. This must fail
+  // closed: deletion or corruption of the root may never widen the grant to
+  // the whole workspace.
+  if (!identity.rootDocumentId) return false;
   return Boolean(database.prepare(
     `WITH RECURSIVE ancestors(id, parent_document_id) AS (
        SELECT id, parent_document_id

@@ -6,6 +6,7 @@ import { getDocument } from "@/lib/documents/service";
 import type {
   DocumentActor,
   DocumentDetail,
+  DocumentDraftCas,
   DocumentMetadata,
   DocumentRevisionSnapshot,
 } from "@/lib/documents/types";
@@ -608,9 +609,28 @@ export function resetCollaborationState(
   options: {
     markDirty?: boolean;
     actor?: DraftActor;
-  } = {},
+    cas: DocumentDraftCas;
+  },
 ) {
   const current = ensureCollaborationState(database, workspaceId, documentId);
+  if (
+    current.generation !== options.cas.expectedGeneration
+    || current.draftVersion !== options.cas.expectedDraftVersion
+    || current.baseRevisionNumber !== options.cas.expectedBaseRevision
+  ) {
+    throw new DocumentServiceError(
+      "DRAFT_VERSION_CONFLICT",
+      "공유 초안이 이미 변경되거나 다른 세대로 교체되었습니다. 최신 작업본을 다시 읽어주세요.",
+      {
+        expectedGeneration: options.cas.expectedGeneration,
+        currentGeneration: current.generation,
+        expectedDraftVersion: options.cas.expectedDraftVersion,
+        currentDraftVersion: current.draftVersion,
+        expectedBaseRevision: options.cas.expectedBaseRevision,
+        currentBaseRevision: current.baseRevisionNumber,
+      },
+    );
+  }
   const metadata = "metadata" in source
     ? source.metadata
     : {
@@ -642,14 +662,15 @@ export function resetCollaborationState(
   const committedState = options.markDirty ? canonicalState : draftState;
   const draftVersion = options.markDirty ? 1 : 0;
   database.transaction(() => {
-    database.prepare(
+    const reset = database.prepare(
       `UPDATE document_collaboration_states
        SET generation = ?, yjs_state = ?, committed_yjs_state = ?,
            base_revision_id = ?, base_revision_number = ?,
            draft_version = ?, committed_draft_version = 0, seeded_at = ?, updated_at = ?,
            committed_at = ?, last_actor_type = ?, last_actor_principal_id = ?,
            last_actor_label = ?, last_actor_avatar_media_id = ?
-       WHERE document_id = ? AND workspace_id = ?`,
+       WHERE document_id = ? AND workspace_id = ?
+         AND generation = ? AND draft_version = ? AND base_revision_number = ?`,
     ).run(
       generation,
       draftState,
@@ -666,7 +687,21 @@ export function resetCollaborationState(
       options.actor?.avatarMediaId ?? null,
       documentId,
       workspaceId,
+      options.cas.expectedGeneration,
+      options.cas.expectedDraftVersion,
+      options.cas.expectedBaseRevision,
     );
+    if (reset.changes !== 1) {
+      throw new DocumentServiceError(
+        "DRAFT_VERSION_CONFLICT",
+        "공유 초안이 이미 변경되거나 다른 세대로 교체되었습니다. 최신 작업본을 다시 읽어주세요.",
+        {
+          expectedGeneration: options.cas.expectedGeneration,
+          expectedDraftVersion: options.cas.expectedDraftVersion,
+          expectedBaseRevision: options.cas.expectedBaseRevision,
+        },
+      );
+    }
     database.prepare("DELETE FROM document_draft_contributors WHERE document_id = ?")
       .run(documentId);
     if (options.markDirty && options.actor) {

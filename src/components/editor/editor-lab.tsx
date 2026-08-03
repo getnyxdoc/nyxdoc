@@ -2967,31 +2967,43 @@ export function NyxdocRichEditor({
 
   useEffect(() => {
     if (!collaborationPlugin || !collaboration) return;
-    let disposed = false;
-    collaboration.onStatusChange?.("connecting");
-    void editor.getApi(YjsPlugin).yjs.init({
-      id: collaboration.roomName,
-      autoConnect: collaboration.autoConnect,
-      // The collaboration service is the only authority that seeds a room.
-      // Passing canonical content here can create the same Slate nodes under
-      // different Yjs client IDs when IndexedDB syncs before Hocuspocus, which
-      // then merges into a duplicated document. `null` explicitly disables
-      // the Plate client-side seed path.
-      value: collaboration.initialValue ?? null,
-      onReady: () => {
-        if (disposed) return;
-        collaboration.onReady?.();
-      },
-    }).catch((error: unknown) => {
-      if (disposed) return;
-      collaboration.onStatusChange?.(
-        "error",
-        error instanceof Error ? error.message : copy.collaborativeDraftFailed,
-      );
-    });
+    let active = true;
+    let initialized = false;
+    // React development Strict Mode intentionally replays effects as
+    // setup -> cleanup -> setup. Starting Plate/Yjs synchronously in the
+    // first setup leaves the replayed setup with a provider that has already
+    // been destroyed. Defer startup by one task so the probe setup can be
+    // cancelled without ever creating a WebSocket or IndexedDB provider.
+    const startTimer = setTimeout(() => {
+      if (!active) return;
+      initialized = true;
+      collaboration.onStatusChange?.("connecting");
+      void editor.getApi(YjsPlugin).yjs.init({
+        id: collaboration.roomName,
+        autoConnect: collaboration.autoConnect,
+        // The collaboration service is the only authority that seeds a room.
+        // Passing canonical content here can create the same Slate nodes under
+        // different Yjs client IDs when IndexedDB syncs before Hocuspocus, which
+        // then merges into a duplicated document. `null` explicitly disables
+        // the Plate client-side seed path.
+        value: collaboration.initialValue ?? null,
+        onReady: () => {
+          if (!active) return;
+          collaboration.onReady?.();
+        },
+      }).catch((error: unknown) => {
+        if (!active) return;
+        collaboration.onStatusChange?.(
+          "error",
+          error instanceof Error ? error.message : copy.collaborativeDraftFailed,
+        );
+      });
+    }, 0);
+
     return () => {
-      disposed = true;
-      editor.getApi(YjsPlugin).yjs.destroy();
+      active = false;
+      clearTimeout(startTimer);
+      if (initialized) editor.getApi(YjsPlugin).yjs.destroy();
     };
   }, [collaboration, collaborationPlugin, copy.collaborativeDraftFailed, editor]);
 
@@ -3456,6 +3468,11 @@ export function NyxdocRichEditor({
               });
             }}
             onKeyDownCapture={readOnly ? undefined : (event) => {
+              if (!event.nativeEvent.isComposing) {
+                const selection = syncEditorSelectionFromDOM(editor);
+                const bookmark = stableCaretBookmark(editor, selection);
+                if (bookmark) stableCaretRef.current = bookmark;
+              }
               markLocalEditEvent();
               recordCaretTrace({
                 kind: "keydown",

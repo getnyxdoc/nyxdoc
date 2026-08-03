@@ -4,7 +4,7 @@ import { apiErrorResponse } from "@/lib/http/errors";
 import { authenticateRequestApiToken } from "@/lib/tokens/request";
 import {
   requireTokenDocumentAccess,
-  requireTokenScope,
+  requireTokenPermission,
   tokenCanAccessDocument,
 } from "@/lib/tokens/service";
 
@@ -17,7 +17,7 @@ export async function GET(
 ) {
   try {
     const identity = authenticateRequestApiToken(sqlite, request);
-    requireTokenScope(identity, "documents:read");
+    requireTokenPermission(identity, "documents:read", "documents.read");
     const { documentId } = await context.params;
     requireTokenDocumentAccess(sqlite, identity, documentId);
     const backlinks = getDocumentBacklinks(sqlite, identity.workspaceId, documentId)

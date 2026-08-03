@@ -1,10 +1,7 @@
 import { z } from "zod";
+import { workspaceAgentGrantIdSchema } from "@/lib/agents/identifiers";
 import { ASSIGNMENT_STATUSES, ASSIGNMENT_TYPES } from "@/lib/collaboration/types";
 import { DOCUMENT_WORKFLOW_STATUSES } from "@/lib/documents/types";
-
-// Migrated credentials intentionally keep a stable `legacy-agent-*` identity.
-// Agent IDs are opaque workspace-local identifiers, not necessarily UUIDs.
-export const workspaceAgentIdSchema = z.string().trim().min(1).max(160);
 
 export const savedViewQuerySchema = z.object({
   parentDocumentId: z.string().uuid().nullable().optional(),
@@ -16,7 +13,8 @@ export const savedViewQuerySchema = z.object({
   updatedAfter: z.iso.datetime().optional(),
   updatedBefore: z.iso.datetime().optional(),
   updatedWithinDays: z.number().int().min(1).max(3650).optional(),
-  assignedAgentId: workspaceAgentIdSchema.optional(),
+  // This wire field is a WorkspaceAgentGrantId, not a global AgentIdentityId.
+  assignedAgentId: workspaceAgentGrantIdSchema.optional(),
   assignmentType: z.enum(ASSIGNMENT_TYPES).optional(),
   unassigned: z.boolean().optional(),
   sort: z.enum(["tree", "updated_desc"]).optional(),
@@ -54,13 +52,15 @@ export const updateSavedViewSchema = z.object({
 
 export const assignmentQuerySchema = z.object({
   documentId: z.string().uuid().optional(),
-  agentId: workspaceAgentIdSchema.optional(),
+  // This wire field is a WorkspaceAgentGrantId, not a global AgentIdentityId.
+  agentId: workspaceAgentGrantIdSchema.optional(),
   status: z.enum(ASSIGNMENT_STATUSES).optional(),
 }).strict();
 
 export const createAssignmentSchema = z.object({
   documentId: z.string().uuid(),
-  agentId: workspaceAgentIdSchema,
+  // This wire field is a WorkspaceAgentGrantId, not a global AgentIdentityId.
+  agentId: workspaceAgentGrantIdSchema,
   assignmentType: z.enum(ASSIGNMENT_TYPES),
   note: z.string().trim().max(500).nullable().optional(),
 }).strict();

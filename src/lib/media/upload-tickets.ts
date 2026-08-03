@@ -1,10 +1,6 @@
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import path from "node:path";
-import {
-  agentPrincipalAllows,
-  WORKSPACE_PERMISSIONS,
-  type WorkspacePermission,
-} from "@/lib/authz/permissions";
+import { WORKSPACE_PERMISSIONS, type WorkspacePermission } from "@/lib/authz/permissions";
 import type { NyxDatabase } from "@/lib/db/client";
 import { bindMediaAssetToDocument } from "@/lib/media/bindings";
 import {
@@ -16,7 +12,7 @@ import {
 } from "@/lib/media/service";
 import {
   requireTokenDocumentAccess,
-  requireTokenScope,
+  requireTokenPermission,
   type ApiTokenIdentity,
   type ApiTokenScope,
 } from "@/lib/tokens/service";
@@ -71,19 +67,6 @@ function parseStringList<T extends string>(raw: string, allowed?: readonly T[]) 
   }
 }
 
-function workspacePrincipal(identity: ApiTokenIdentity) {
-  return {
-    type: "agent" as const,
-    workspaceId: identity.workspaceId,
-    membershipId: identity.agentId,
-    agentId: identity.globalAgentId,
-    accessProfile: identity.accessProfile,
-    capabilities: identity.capabilities,
-    displayName: identity.name,
-    avatarMediaId: identity.avatarMediaId,
-  };
-}
-
 function requireDocumentBoundary(
   database: NyxDatabase,
   identity: ApiTokenIdentity,
@@ -115,8 +98,9 @@ export function createAgentMediaUploadTicket(
   },
   options: { now?: Date; ttlSeconds?: number } = {},
 ) {
-  requireTokenScope(identity, "documents:write");
-  if (!agentPrincipalAllows(workspacePrincipal(identity), "media.upload")) {
+  try {
+    requireTokenPermission(identity, "documents:write", "media.upload");
+  } catch {
     throw new MediaServiceError("UNAUTHORIZED", "이 에이전트에는 이미지 업로드 권한이 없습니다.");
   }
   if (input.documentId) requireDocumentBoundary(database, identity, input.documentId);
@@ -208,11 +192,16 @@ function readTicket(database: NyxDatabase, ticketId: string) {
 function requireCurrentTicketAccess(database: NyxDatabase, ticket: UploadTicketRow, now: string) {
   const current = database.prepare(
     `SELECT credential.scopes_json, credential.created_by_user_id,
+            credential.agent_id AS global_agent_id, credential.token_prefix,
             credential.expires_at AS credential_expires_at,
             credential.revoked_at, agent.status AS agent_status,
+            agent.display_name, agent.avatar_media_id,
             membership.status AS membership_status,
             membership.revoked_at AS membership_revoked_at,
-            membership.access_profile, membership.capabilities_json,
+            membership.access_profile, membership.capabilities_json, membership.root_document_id,
+            membership.scope_mode,
+            binding.id AS binding_id,
+            COALESCE(state.last_event_cursor, 0) AS last_event_cursor,
             workspace.lifecycle_state,
             ownership.owner_type, ownership.owner_user_id,
             ownership.organization_id, agent_owner.owner_type AS agent_owner_type,
@@ -231,6 +220,9 @@ function requireCurrentTicketAccess(database: NyxDatabase, ticket: UploadTicketR
       AND binding.grant_id = membership.id
       AND binding.status = 'active'
       AND binding.revoked_at IS NULL
+     LEFT JOIN agent_credential_workspace_state state
+       ON state.credential_id = credential.id
+      AND state.workspace_id = membership.workspace_id
      JOIN workspaces workspace ON workspace.id = membership.workspace_id
      JOIN workspace_ownership ownership ON ownership.workspace_id = workspace.id
      JOIN agent_ownership agent_owner ON agent_owner.agent_id = credential.agent_id
@@ -244,13 +236,20 @@ function requireCurrentTicketAccess(database: NyxDatabase, ticket: UploadTicketR
       AND organization_member.user_id = agent_owner.owner_user_id
      WHERE credential.id = ?`,
   ).get(ticket.workspace_agent_id, ticket.workspace_id, ticket.credential_id) as {
+    avatar_media_id: string | null;
     agent_organization_id: string | null;
     agent_owner_type: "personal" | "organization";
     agent_owner_user_id: string | null;
     agent_status: string;
     approval_id: string | null;
+    access_profile: ApiTokenIdentity["accessProfile"];
+    binding_id: string;
+    capabilities_json: string;
     credential_expires_at: string | null;
     created_by_user_id: string;
+    display_name: string;
+    global_agent_id: string;
+    last_event_cursor: number;
     lifecycle_state: string;
     membership_status: string;
     membership_revoked_at: string | null;
@@ -259,9 +258,11 @@ function requireCurrentTicketAccess(database: NyxDatabase, ticket: UploadTicketR
     organization_member_id: string | null;
     owner_type: "personal" | "organization";
     owner_user_id: string | null;
-    capabilities_json: string;
     revoked_at: string | null;
+    root_document_id: string | null;
+    scope_mode: ApiTokenIdentity["scopeMode"];
     scopes_json: string;
+    token_prefix: string;
   } | undefined;
 
   const namespaceAllowed = current?.owner_type === "personal"
@@ -289,14 +290,30 @@ function requireCurrentTicketAccess(database: NyxDatabase, ticket: UploadTicketR
     current.capabilities_json,
     WORKSPACE_PERMISSIONS,
   );
-  if (
-    !scopes.includes("documents:write")
-    || !agentPrincipalAllows({ capabilities }, "documents.update")
-    || !agentPrincipalAllows({ capabilities }, "media.upload")
-  ) {
+  const identity: ApiTokenIdentity = {
+    id: ticket.credential_id,
+    globalAgentId: current.global_agent_id,
+    agentId: ticket.workspace_agent_id,
+    workspaceId: ticket.workspace_id,
+    userId: current.created_by_user_id,
+    name: current.display_name,
+    avatarMediaId: current.avatar_media_id,
+    accessProfile: current.access_profile,
+    capabilities,
+    bindingId: current.binding_id,
+    prefix: current.token_prefix,
+    scopes,
+    lastEventCursor: Number(current.last_event_cursor),
+    rootDocumentId: current.root_document_id,
+    scopeMode: current.scope_mode,
+    ipAllowlist: [],
+  };
+  try {
+    requireTokenPermission(identity, "documents:write", "media.upload");
+  } catch {
     throw new MediaServiceError("UNAUTHORIZED", "이미지 업로드 권한이 더 이상 유효하지 않습니다.");
   }
-  return current;
+  return identity;
 }
 
 export async function consumeAgentMediaUploadTicket(
@@ -328,17 +345,13 @@ export async function consumeAgentMediaUploadTicket(
   if (ticket.expires_at <= nowIso) {
     throw new MediaServiceError("EXPIRED", "이미지 업로드 권한이 만료되었습니다.");
   }
-  const currentAccess = requireCurrentTicketAccess(database, ticket, nowIso);
+  const currentIdentity = requireCurrentTicketAccess(database, ticket, nowIso);
   if (ticket.document_id) {
-    const document = database.prepare(
-      "SELECT workspace_id, status FROM documents WHERE id = ?",
-    ).get(ticket.document_id) as { workspace_id: string; status: string } | undefined;
-    if (
-      !document
-      || document.workspace_id !== ticket.workspace_id
-      || document.status !== "active"
-    ) {
-      throw new MediaServiceError("NOT_FOUND", "이미지를 연결할 문서를 찾을 수 없습니다.");
+    try {
+      requireDocumentBoundary(database, currentIdentity, ticket.document_id);
+    } catch (error) {
+      if (error instanceof MediaServiceError) throw error;
+      throw new MediaServiceError("UNAUTHORIZED", "이미지를 연결할 문서 범위가 더 이상 허용되지 않습니다.");
     }
   }
 
@@ -358,7 +371,7 @@ export async function consumeAgentMediaUploadTicket(
     expectedMimeType: ticket.expected_mime_type ?? undefined,
     expectedSha256: ticket.expected_sha256 ?? undefined,
     tokenId: ticket.credential_id,
-    userId: currentAccess.created_by_user_id,
+    userId: currentIdentity.userId,
     workspaceId: ticket.workspace_id,
   }, options.mediaRoot);
   if (ticket.document_id) {

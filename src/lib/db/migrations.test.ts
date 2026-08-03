@@ -137,6 +137,7 @@ describe("application migration safety", () => {
       "0038_navigation_preference_versions",
       "0039_agent_access_grants_and_bindings",
       "0040_media_upload_ticket_binding_guards",
+      "0041_document_tree_grants_fail_closed",
     ]);
     expect(after).toEqual(before);
     expect(database.prepare("SELECT COUNT(*) AS count FROM documents").get()).toEqual({ count: 1 });
@@ -336,6 +337,53 @@ describe("application migration safety", () => {
       { credential_id: "credential-all", grant_id: "grant-3" },
       { credential_id: "credential-one", grant_id: "grant-1" },
     ]);
+  });
+
+  it("fails closed for an invalid historical document-tree grant without mutating stored data", () => {
+    const database = openDatabase(":memory:");
+    databases.push(database);
+    createUserTable(database);
+    applyThrough(database, "0040_media_upload_ticket_binding_guards");
+    database.prepare(
+      "INSERT INTO user (id, name, email, emailVerified, createdAt, updatedAt) VALUES ('u1', 'Owner', 'owner@example.com', 1, 1, 1)",
+    ).run();
+    const workspace = ensurePersonalWorkspace(database, {
+      id: "u1",
+      name: "Owner",
+      email: "owner@example.com",
+    });
+    const rootDocumentId = (database.prepare(
+      "SELECT id FROM documents WHERE workspace_id = ? ORDER BY created_at ASC LIMIT 1",
+    ).get(workspace.id) as { id: string }).id;
+    const created = createWorkspaceToken(database, {
+      workspaceId: workspace.id,
+      userId: "u1",
+      name: "Legacy scoped agent",
+      rootDocumentId,
+    });
+
+    database.prepare("DELETE FROM documents WHERE id = ?").run(rootDocumentId);
+    expect(database.prepare(
+      "SELECT status, scope_mode, root_document_id, revoked_at FROM workspace_agents WHERE id = ?",
+    ).get(created.summary.agentId)).toEqual({
+      status: "active",
+      scope_mode: "document_tree",
+      root_document_id: null,
+      revoked_at: null,
+    });
+
+    expect(runAppMigrations(database, { sourceRevision: "document-tree-fail-closed-test" }).appliedIds)
+      .toEqual(["0041_document_tree_grants_fail_closed"]);
+    expect(database.prepare(
+      "SELECT status, scope_mode, root_document_id, revoked_at FROM workspace_agents WHERE id = ?",
+    ).get(created.summary.agentId)).toEqual({
+      status: "active",
+      scope_mode: "document_tree",
+      root_document_id: null,
+      revoked_at: null,
+    });
+    expect(() => authenticateApiToken(database, `Bearer ${created.token}`))
+      .toThrowError(expect.objectContaining({ code: "FORBIDDEN" }));
   });
 
   it("fails closed with the credential id when an active legacy allowlist is invalid JSON", () => {

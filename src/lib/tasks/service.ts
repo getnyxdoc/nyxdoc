@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import type { WorkspaceAgentGrantId } from "@/lib/agents/identifiers";
 import { recordWorkspaceAuditEvent } from "@/lib/authz/permissions";
 import type { NyxDatabase } from "@/lib/db/client";
 import {
@@ -32,7 +33,7 @@ type TaskRow = {
   progress: number;
   target_document_id: string | null;
   target_document_title: string | null;
-  assigned_agent_id: string | null;
+  assigned_agent_id: WorkspaceAgentGrantId | null;
   assigned_agent_display_name: string | null;
   assigned_agent_avatar_media_id: string | null;
   requires_review: number;
@@ -216,7 +217,7 @@ function requireActiveDocument(
 function requireActiveAgent(
   database: NyxDatabase,
   workspaceId: string,
-  agentId: string | null | undefined,
+  agentId: WorkspaceAgentGrantId | null | undefined,
 ) {
   if (!agentId) return null;
   const row = database.prepare(
@@ -543,10 +544,10 @@ export function listDocumentTasks(
   query: {
     status?: DocumentTaskStatus;
     priority?: DocumentTaskPriority;
-    assignedAgentId?: string | null;
+    assignedAgentId?: WorkspaceAgentGrantId | null;
     targetDocumentId?: string | null;
     openOnly?: boolean;
-    availableToAgentId?: string;
+    availableToAgentId?: WorkspaceAgentGrantId;
     offset?: number;
     limit?: number;
   } = {},
@@ -678,7 +679,7 @@ export function createDocumentTask(
     attachments?: DocumentTaskAttachmentInput[];
     priority?: DocumentTaskPriority;
     targetDocumentId?: string | null;
-    assignedAgentId?: string | null;
+    assignedAgentId?: WorkspaceAgentGrantId | null;
     requiresReview?: boolean;
     requestId?: string;
   },
@@ -781,7 +782,7 @@ export function updateDocumentTask(
     attachments?: DocumentTaskAttachmentInput[];
     priority?: DocumentTaskPriority;
     targetDocumentId?: string | null;
-    assignedAgentId?: string | null;
+    assignedAgentId?: WorkspaceAgentGrantId | null;
     requiresReview?: boolean;
     status?: DocumentTaskStatus;
     progress?: number;

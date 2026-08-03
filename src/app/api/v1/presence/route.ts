@@ -10,7 +10,7 @@ import { apiErrorResponse } from "@/lib/http/errors";
 import { authenticateRequestApiToken } from "@/lib/tokens/request";
 import {
   requireTokenDocumentAccess,
-  requireTokenScope,
+  requireTokenPermission,
   tokenCanAccessDocument,
 } from "@/lib/tokens/service";
 
@@ -20,7 +20,7 @@ export const dynamic = "force-dynamic";
 export async function GET(request: Request) {
   try {
     const identity = authenticateRequestApiToken(sqlite, request);
-    requireTokenScope(identity, "documents:read");
+    requireTokenPermission(identity, "documents:read", "documents.read");
     return Response.json({
       presence: listWorkspacePresence(identity.workspaceId)
         .filter((entry) => tokenCanAccessDocument(sqlite, identity, entry.documentId)),
@@ -35,9 +35,10 @@ export async function POST(request: Request) {
   try {
     const identity = authenticateRequestApiToken(sqlite, request);
     const body = agentPresenceSchema.parse(await request.json());
-    requireTokenScope(
+    requireTokenPermission(
       identity,
       body.state === "editing" || body.state === "drafting" ? "documents:write" : "documents:read",
+      body.state === "editing" || body.state === "drafting" ? "documents.update" : "documents.read",
     );
     requireTokenDocumentAccess(sqlite, identity, body.documentId);
     const presence = setAgentPresence({
@@ -56,7 +57,7 @@ export async function POST(request: Request) {
 export async function DELETE(request: Request) {
   try {
     const identity = authenticateRequestApiToken(sqlite, request);
-    requireTokenScope(identity, "documents:read");
+    requireTokenPermission(identity, "documents:read", "documents.read");
     const sessionId = z.string().uuid().parse(new URL(request.url).searchParams.get("sessionId"));
     const ended = endAgentPresence(identity.workspaceId, identity.agentId, sessionId);
     return Response.json({ ended });

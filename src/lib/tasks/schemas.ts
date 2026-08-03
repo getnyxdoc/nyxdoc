@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { workspaceAgentGrantIdSchema } from "@/lib/agents/identifiers";
 import {
   DOCUMENT_TASK_ATTACHMENT_FIELDS,
   DOCUMENT_TASK_PRIORITIES,
@@ -14,7 +15,8 @@ const taskAttachments = z.array(z.object({
 export const documentTaskQuerySchema = z.object({
   status: z.enum(DOCUMENT_TASK_STATUSES).optional(),
   priority: z.enum(DOCUMENT_TASK_PRIORITIES).optional(),
-  assignedAgentId: z.string().trim().min(1).max(160).nullable().optional(),
+  // A task assignee is a workspace-local WorkspaceAgentGrantId.
+  assignedAgentId: workspaceAgentGrantIdSchema.nullable().optional(),
   targetDocumentId: z.string().uuid().nullable().optional(),
   openOnly: z.boolean().optional(),
   offset: z.number().int().min(0).max(100_000).optional(),
@@ -28,7 +30,7 @@ export const createDocumentTaskSchema = z.object({
   attachments: taskAttachments.default([]),
   priority: z.enum(DOCUMENT_TASK_PRIORITIES).default("normal"),
   targetDocumentId: z.string().uuid().nullable().default(null),
-  assignedAgentId: z.string().trim().min(1).max(160).nullable().default(null),
+  assignedAgentId: workspaceAgentGrantIdSchema.nullable().default(null),
   requiresReview: z.boolean().default(true),
   requestId: z.string().trim().min(8).max(128).optional(),
 }).strict();
@@ -41,7 +43,7 @@ export const updateDocumentTaskSchema = z.object({
   attachments: taskAttachments.optional(),
   priority: z.enum(DOCUMENT_TASK_PRIORITIES).optional(),
   targetDocumentId: z.string().uuid().nullable().optional(),
-  assignedAgentId: z.string().trim().min(1).max(160).nullable().optional(),
+  assignedAgentId: workspaceAgentGrantIdSchema.nullable().optional(),
   requiresReview: z.boolean().optional(),
   status: z.enum(DOCUMENT_TASK_STATUSES).optional(),
   progress: z.number().int().min(0).max(100).optional(),

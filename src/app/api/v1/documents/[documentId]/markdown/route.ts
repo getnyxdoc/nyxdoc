@@ -10,7 +10,7 @@ import { authenticateRequestApiToken } from "@/lib/tokens/request";
 import {
   requireTokenDocumentAccess,
   requireTokenParentAccess,
-  requireTokenScope,
+  requireTokenPermission,
   tokenDocumentActor,
 } from "@/lib/tokens/service";
 
@@ -34,7 +34,7 @@ export async function PUT(
 ) {
   try {
     const identity = authenticateRequestApiToken(sqlite, request);
-    requireTokenScope(identity, "documents:write");
+    requireTokenPermission(identity, "documents:write", "documents.update");
     const { documentId } = await context.params;
     requireTokenDocumentAccess(sqlite, identity, documentId);
     const body = updateMarkdownSchema.parse(await request.json());

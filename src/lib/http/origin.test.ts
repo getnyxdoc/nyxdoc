@@ -23,4 +23,16 @@ describe("same-origin mutation guard", () => {
       ),
     ).toThrow(OriginError);
   });
+
+  it("accepts a runtime site origin supplied by the caller", () => {
+    expect(() =>
+      assertSameOrigin(
+        new Request("https://runtime.example/api/auth/sign-up/email", {
+          method: "POST",
+          headers: { origin: "https://runtime.example", "sec-fetch-site": "same-origin" },
+        }),
+        ["https://runtime.example"],
+      ),
+    ).not.toThrow();
+  });
 });

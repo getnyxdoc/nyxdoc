@@ -3,7 +3,7 @@ import { listDocumentRevisions } from "@/lib/documents/service";
 import { DocumentServiceError } from "@/lib/documents/types";
 import { apiErrorResponse } from "@/lib/http/errors";
 import { authenticateRequestApiToken } from "@/lib/tokens/request";
-import { requireTokenDocumentAccess, requireTokenScope } from "@/lib/tokens/service";
+import { requireTokenDocumentAccess, requireTokenPermission } from "@/lib/tokens/service";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -14,7 +14,7 @@ export async function GET(
 ) {
   try {
     const identity = authenticateRequestApiToken(sqlite, request);
-    requireTokenScope(identity, "documents:read");
+    requireTokenPermission(identity, "documents:read", "revisions.read");
     const { documentId } = await context.params;
     requireTokenDocumentAccess(sqlite, identity, documentId);
     const url = new URL(request.url);

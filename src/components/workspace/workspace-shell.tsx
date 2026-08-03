@@ -1099,7 +1099,12 @@ export function WorkspaceShell({ view }: { view: WorkspaceView }) {
       response = await workspaceRequest("/api/collaboration/discard", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ documentId: view.activeDocument.id }),
+        body: JSON.stringify({
+          documentId: view.activeDocument.id,
+          expectedGeneration: view.collaboration.generation,
+          expectedDraftVersion: collaborativeDraftVersion,
+          expectedBaseRevision: view.activeDocument.revisionNumber,
+        }),
       });
     } catch {
       setDiscardPending(false);
@@ -1124,11 +1129,14 @@ export function WorkspaceShell({ view }: { view: WorkspaceView }) {
   }, [
     bugReports,
     collaborativeDirty,
+    collaborativeDraftVersion,
     copy.discardConfirm,
     copy.discardFailed,
     discardPending,
     router,
     view.activeDocument.id,
+    view.activeDocument.revisionNumber,
+    view.collaboration.generation,
     view.permissions.canEditDocuments,
     workspaceRequest,
   ]);
@@ -1313,7 +1321,11 @@ export function WorkspaceShell({ view }: { view: WorkspaceView }) {
       {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ baseRevision: view.activeDocument.revisionNumber }),
+        body: JSON.stringify({
+          baseRevision: view.activeDocument.revisionNumber,
+          expectedGeneration: view.collaboration.generation,
+          expectedDraftVersion: collaborativeDraftVersion,
+        }),
       },
     );
     const body = await responseBody(response);

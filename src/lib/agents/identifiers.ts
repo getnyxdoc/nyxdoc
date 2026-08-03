@@ -1,11 +1,31 @@
 import { z } from "zod";
 
 /**
- * Agent identity IDs are opaque internal identifiers.
+ * The global identity stored in `agents.id`.
  *
- * New identities use UUIDs, while identities migrated from the workspace-era
- * model intentionally retain values such as `legacy-agent-<uuid>`. API
- * boundaries must therefore validate their size, not reinterpret them as
- * UUID-only values.
+ * It identifies the same agent across every workspace. It is deliberately an
+ * opaque stable ID: migrated identities can retain values such as
+ * `legacy-agent-<uuid>` instead of being rewritten as UUIDs.
  */
-export const agentIdentityIdSchema = z.string().trim().min(1).max(128);
+export type AgentIdentityId = string;
+
+/**
+ * The workspace-local access grant stored in `workspace_agents.id`.
+ *
+ * A grant belongs to exactly one workspace and is the ID used by document
+ * assignments. It is not interchangeable with an AgentIdentityId, even when
+ * a legacy migration happened to give both records the same string value.
+ */
+export type WorkspaceAgentGrantId = string;
+
+function opaqueStableIdSchema(maxLength: number) {
+  return z.string().trim().min(1).max(maxLength);
+}
+
+export const agentIdentityIdSchema = opaqueStableIdSchema(128).describe(
+  "Global AgentIdentityId (agents.id). Opaque stable ID; UUID and legacy-agent-* values are valid.",
+);
+
+export const workspaceAgentGrantIdSchema = opaqueStableIdSchema(160).describe(
+  "WorkspaceAgentGrantId (workspace_agents.id). Opaque workspace-local grant ID used for assignments; UUID and legacy-agent-* values are valid.",
+);

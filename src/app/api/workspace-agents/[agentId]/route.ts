@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { requireWorkspaceSession } from "@/data/workspace-context";
+import { agentIdentityIdSchema } from "@/lib/agents/identifiers";
 import { updateAgentWorkspaceMembership } from "@/lib/agents/service";
 import { AGENT_ACCESS_PROFILES, WORKSPACE_PERMISSIONS } from "@/lib/authz/permissions";
 import { sqlite } from "@/lib/db/client";
@@ -35,7 +36,8 @@ export async function PATCH(request: Request, context: { params: Promise<{ agent
   try {
     assertSameOrigin(request);
     const { session, workspace } = await requireWorkspaceSession(request);
-    const { agentId } = await context.params;
+    const { agentId: rawAgentId } = await context.params;
+    const agentId = agentIdentityIdSchema.parse(rawAgentId);
     const body = updateSchema.parse(await request.json());
     return Response.json({
       membership: updateAgentWorkspaceMembership(sqlite, {

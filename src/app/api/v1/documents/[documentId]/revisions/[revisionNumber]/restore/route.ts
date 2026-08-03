@@ -7,7 +7,7 @@ import { apiErrorResponse } from "@/lib/http/errors";
 import { authenticateRequestApiToken } from "@/lib/tokens/request";
 import {
   requireTokenDocumentAccess,
-  requireTokenScope,
+  requireTokenPermission,
   tokenDocumentActor,
 } from "@/lib/tokens/service";
 
@@ -20,7 +20,7 @@ export async function POST(
 ) {
   try {
     const identity = authenticateRequestApiToken(sqlite, request);
-    requireTokenScope(identity, "revisions:restore");
+    requireTokenPermission(identity, "revisions:restore", "revisions.restore");
     const { documentId, revisionNumber: value } = await context.params;
     requireTokenDocumentAccess(sqlite, identity, documentId);
     const revisionNumber = Number(value);
@@ -38,6 +38,9 @@ export async function POST(
       workspaceId: identity.workspaceId,
       documentId,
       revisionId: revision.id,
+      expectedGeneration: body.expectedGeneration,
+      expectedDraftVersion: body.expectedDraftVersion,
+      expectedBaseRevision: body.expectedBaseRevision,
       actor: tokenDocumentActor(identity, "api"),
       requestId: body.requestId,
     });

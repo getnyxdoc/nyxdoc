@@ -2,7 +2,8 @@ import "server-only";
 
 import { requireWorkspaceSession } from "@/data/workspace-context";
 import {
-  requireAgentWorkspacePermission,
+  getHumanDocumentPrincipal,
+  humanDocumentPrincipalAllows,
   requireHumanDocumentPermission,
   requireHumanWorkspacePermission,
 } from "@/lib/authz/permissions";
@@ -13,10 +14,11 @@ import {
   ApiTokenError,
   authenticateApiToken,
   requireTokenDocumentAccess,
-  requireTokenScope,
+  requireTokenPermission,
+  tokenCanAccessDocument,
   type ApiTokenScope,
 } from "@/lib/tokens/service";
-import { documentHasMediaBinding } from "@/lib/media/bindings";
+import { resolveAuthorizedMediaDocumentBinding } from "@/lib/media/bindings";
 
 export async function requireMediaRequestIdentity(
   request: Request,
@@ -43,19 +45,11 @@ export async function requireMediaRequestIdentity(
       workspaceId: options.workspaceId ?? document?.workspace_id ?? requestedWorkspace,
       clientIp: requestClientIp(request),
     });
-    requireTokenScope(identity, scope);
-    if (scope === "documents:write") {
-      requireAgentWorkspacePermission({
-        type: "agent",
-        workspaceId: identity.workspaceId,
-        membershipId: identity.agentId,
-        agentId: identity.globalAgentId,
-        accessProfile: identity.accessProfile,
-        capabilities: identity.capabilities,
-        displayName: identity.name,
-        avatarMediaId: identity.avatarMediaId,
-      }, "media.upload");
-    }
+    requireTokenPermission(
+      identity,
+      scope,
+      scope === "documents:read" ? "documents.read" : "media.upload",
+    );
     if (options.documentId) {
       if (document?.workspace_id !== identity.workspaceId) {
         throw new ApiTokenError("NOT_FOUND", "문서를 찾을 수 없습니다.");
@@ -64,6 +58,16 @@ export async function requireMediaRequestIdentity(
     }
     if (options.workspaceId && identity.workspaceId !== options.workspaceId) {
       throw new ApiTokenError("FORBIDDEN", "다른 워크스페이스의 이미지에는 접근할 수 없습니다.");
+    }
+    if (scope === "documents:read" && options.mediaId) {
+      const binding = resolveAuthorizedMediaDocumentBinding(sqlite, {
+        workspaceId: identity.workspaceId,
+        mediaId: options.mediaId,
+        canReadDocument: (documentId) => tokenCanAccessDocument(sqlite, identity, documentId),
+      });
+      if (!binding) {
+        throw new ApiTokenError("NOT_FOUND", "이미지를 찾을 수 없습니다.");
+      }
     }
     return {
       tokenId: identity.id,
@@ -74,27 +78,31 @@ export async function requireMediaRequestIdentity(
 
   if (options.mutating) assertSameOrigin(request);
   const { session, workspace } = await requireWorkspaceSession(request, options.workspaceId);
-  if (options.documentId) {
-    const principal = requireHumanDocumentPermission(
+  if (scope === "documents:read" && options.mediaId) {
+    const binding = resolveAuthorizedMediaDocumentBinding(sqlite, {
+      workspaceId: workspace.id,
+      mediaId: options.mediaId,
+      canReadDocument: (documentId) => {
+        const principal = getHumanDocumentPrincipal(
+          sqlite,
+          workspace.id,
+          documentId,
+          session.user.id,
+        );
+        return Boolean(principal && humanDocumentPrincipalAllows(principal, "documents.read"));
+      },
+    });
+    if (!binding) {
+      throw new ApiTokenError("NOT_FOUND", "이미지를 찾을 수 없습니다.");
+    }
+  } else if (options.documentId) {
+    requireHumanDocumentPermission(
       sqlite,
       workspace.id,
       options.documentId,
       session.user.id,
       scope === "documents:read" ? "documents.read" : "media.upload",
     );
-    if (
-      principal.source === "document_grant"
-      && scope === "documents:read"
-      && options.mediaId
-      && !documentHasMediaBinding(
-        sqlite,
-        workspace.id,
-        options.documentId,
-        options.mediaId,
-      )
-    ) {
-      throw new ApiTokenError("FORBIDDEN", "이 문서에 포함되지 않은 이미지에는 접근할 수 없습니다.");
-    }
   } else {
     requireHumanWorkspacePermission(
       sqlite,

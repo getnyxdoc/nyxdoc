@@ -24,6 +24,7 @@ import type {
   ArchiveWorkingTreeResponse,
   CommitWorkingDocumentRequest,
   CommitWorkingDocumentResponse,
+  DraftMutationState,
   PatchWorkingDocumentRequest,
   ReadWorkingDocumentRequest,
   ReplaceAndCommitWorkingDocumentRequest,
@@ -69,6 +70,33 @@ function assertExpectedDraftVersion(
         expectedDraftVersion: expected,
         currentDraftVersion: working.draftVersion,
         baseRevision: working.baseRevisionNumber,
+      },
+    );
+  }
+}
+
+function assertDestructiveCas(
+  working: WorkingDocument,
+  request: Pick<
+    ResetWorkingDocumentRequest,
+    "expectedGeneration" | "expectedDraftVersion" | "expectedBaseRevision"
+  >,
+) {
+  if (
+    working.generation !== request.expectedGeneration
+    || working.draftVersion !== request.expectedDraftVersion
+    || working.baseRevisionNumber !== request.expectedBaseRevision
+  ) {
+    throw new DocumentServiceError(
+      "DRAFT_VERSION_CONFLICT",
+      "공유 초안이 이미 변경되거나 다른 세대로 교체되었습니다. 최신 작업본을 다시 읽어주세요.",
+      {
+        expectedGeneration: request.expectedGeneration,
+        currentGeneration: working.generation,
+        expectedDraftVersion: request.expectedDraftVersion,
+        currentDraftVersion: working.draftVersion,
+        expectedBaseRevision: request.expectedBaseRevision,
+        currentBaseRevision: working.baseRevisionNumber,
       },
     );
   }
@@ -150,6 +178,35 @@ function broadcastDraftStatus(
   }));
 }
 
+function draftVersionState(working: WorkingDocument) {
+  return {
+    generation: working.generation,
+    draftVersion: working.draftVersion,
+    committedDraftVersion: working.committedDraftVersion,
+    baseRevisionNumber: working.baseRevisionNumber,
+    hasUncommittedChanges: working.hasUncommittedChanges,
+  } satisfies DraftMutationState["current"];
+}
+
+function observeDraftMutation<T extends { workingDocument: WorkingDocument }>(
+  receipt: T,
+  current: WorkingDocument,
+  replayed: boolean,
+): T & { mutationState: DraftMutationState } {
+  return {
+    ...receipt,
+    // Compatibility readers must always observe the current working state.
+    // The original mutation state remains available in the compact receipt.
+    workingDocument: current,
+    mutationState: {
+      source: "working",
+      replayed,
+      receipt: draftVersionState(receipt.workingDocument),
+      current: draftVersionState(current),
+    },
+  };
+}
+
 export function createStoredCollaborationDocumentProvider(
   database: NyxDatabase,
 ): CollaborationDocumentProvider {
@@ -206,6 +263,8 @@ export function createCollaborationCommands(input: {
     summary?: string;
     idempotency: CollaborationIdempotency | null;
     normalizationRemaps?: readonly TopLevelBlockIdRemap[];
+    existingTransaction?: boolean;
+    broadcast?: boolean;
   }): CommitWorkingDocumentResponse {
     const { document, actor, summary, idempotency } = input;
     let working = input.working;
@@ -225,7 +284,7 @@ export function createCollaborationCommands(input: {
       ...(input.normalizationRemaps ?? []),
       ...normalized.repairs,
     ]);
-    const response = database.transaction(() => {
+    const commit = () => {
       const canonical = assertCanonicalBase(working);
       const result = updateDocument(
         database,
@@ -273,7 +332,19 @@ export function createCollaborationCommands(input: {
       };
       recordCollaborationRequest(database, idempotency, value);
       return value;
-    }).immediate();
+    };
+    const response = input.existingTransaction
+      ? commit()
+      : database.transaction(commit).immediate();
+    if (input.broadcast !== false) broadcastCanonicalCommit(document, response, actor);
+    return response;
+  }
+
+  function broadcastCanonicalCommit(
+    document: Y.Doc,
+    response: CommitWorkingDocumentResponse,
+    actor: CommitWorkingDocumentRequest["actor"],
+  ) {
     provider.broadcast?.(document, JSON.stringify({
       type: "canonical-committed",
       documentId: response.document.id,
@@ -281,7 +352,6 @@ export function createCollaborationCommands(input: {
       draftVersion: response.workingDocument.draftVersion,
       actor: { type: actor.type, label: actor.label },
     }));
-    return response;
   }
 
   async function readWorking(
@@ -306,7 +376,14 @@ export function createCollaborationCommands(input: {
       payload: request,
     });
     const replayed = replayCollaborationRequest<WorkingDocumentResponse>(database, idempotency);
-    if (replayed) return replayed;
+    if (replayed) {
+      return provider.withDocument(request.roomName, (document) =>
+        observeDraftMutation(
+          replayed,
+          workingDocumentFromYDoc(database, request.roomName, document),
+          true,
+        ));
+    }
 
     const response = await provider.withDocument(request.roomName, (document) => {
       const mutation = database.transaction(() => {
@@ -340,7 +417,7 @@ export function createCollaborationCommands(input: {
       return mutation;
     });
     recordCollaborationRequest(database, idempotency, response);
-    return response;
+    return observeDraftMutation(response, response.workingDocument, false);
   }
 
   async function replaceAndCommitWorking(
@@ -359,10 +436,35 @@ export function createCollaborationCommands(input: {
       },
     });
     const replayed = replayCollaborationRequest<CommitWorkingDocumentResponse>(database, idempotency);
-    if (replayed) return replayed;
+    if (replayed) {
+      return provider.withDocument(request.roomName, (document) =>
+        observeDraftMutation(
+          replayed,
+          workingDocumentFromYDoc(database, request.roomName, document),
+          true,
+        ));
+    }
 
-    return provider.withDocument(request.roomName, (document) => {
-      const mutation = database.transaction(() => {
+    const response = await provider.withDocument(request.roomName, (document) => {
+      // Persist edits already accepted by the collaboration room independently
+      // of this replace-and-commit attempt. A later canonical-write failure
+      // must roll back only the candidate replacement, not prior user edits.
+      persistCollaborationYDoc(database, request.roomName, document);
+      const observed = workingDocumentFromYDoc(database, request.roomName, document);
+      assertExpectedDraftVersion(observed, request.expectedDraftVersion);
+      assertCanonicalBase(observed);
+      requireDraftMoveAuthorization(
+        observed,
+        request.replacement.parentDocumentId,
+        request.actor,
+      );
+      const candidate = collaborationYDocFromState(Y.encodeStateAsUpdate(document));
+      let committedDocument: Y.Doc | null = null;
+      const response = database.transaction(() => {
+        // Recheck after entering the SQLite write transaction. The replacement
+        // itself is applied to an isolated candidate document so a failed
+        // canonical write cannot leak a partially replaced draft into either
+        // SQLite or the in-memory collaboration room.
         const before = workingDocumentFromYDoc(database, request.roomName, document);
         assertExpectedDraftVersion(before, request.expectedDraftVersion);
         assertCanonicalBase(before);
@@ -374,27 +476,39 @@ export function createCollaborationCommands(input: {
         const normalized = request.replacement.content
           ? normalizeTopLevelBlockIds(database, state.documentId, request.replacement.content)
           : null;
-        replaceWorkingDocument(document, {
+        replaceWorkingDocument(candidate, {
           ...request.replacement,
           ...(normalized ? { content: normalized.content } : {}),
         }, {
           context: { actor: request.actor, recordedByEndpoint: true },
         });
-        persistCollaborationUpdate(database, request.roomName, document, request.actor);
-        return {
-          working: workingDocumentFromYDoc(database, request.roomName, document),
+        persistCollaborationUpdate(database, request.roomName, candidate, request.actor);
+        const committed = commitLoadedDocument({
+          document: candidate,
+          working: workingDocumentFromYDoc(database, request.roomName, candidate),
+          actor: request.actor,
+          summary: request.summary,
+          idempotency,
           normalizationRemaps: normalized?.repairs,
-        };
+          existingTransaction: true,
+          broadcast: false,
+        });
+        committedDocument = candidate;
+        return committed;
       }).immediate();
-      return commitLoadedDocument({
-        document,
-        working: mutation.working,
-        actor: request.actor,
-        summary: request.summary,
-        idempotency,
-        normalizationRemaps: mutation.normalizationRemaps,
+      if (!committedDocument) {
+        throw new DocumentServiceError(
+          "COLLABORATION_UNAVAILABLE",
+          "원자적 문서 저장 결과를 공유 초안에 반영하지 못했습니다.",
+        );
+      }
+      Y.applyUpdate(document, Y.encodeStateAsUpdate(committedDocument), {
+        context: { actor: request.actor, recordedByEndpoint: true },
       });
+      broadcastCanonicalCommit(document, response, request.actor);
+      return response;
     });
+    return observeDraftMutation(response, response.workingDocument, false);
   }
 
   async function patchWorking(
@@ -410,7 +524,14 @@ export function createCollaborationCommands(input: {
       payload: request,
     });
     const replayed = replayCollaborationRequest<WorkingDocumentResponse>(database, idempotency);
-    if (replayed) return replayed;
+    if (replayed) {
+      return provider.withDocument(request.roomName, (document) =>
+        observeDraftMutation(
+          replayed,
+          workingDocumentFromYDoc(database, request.roomName, document),
+          true,
+        ));
+    }
 
     const response = await provider.withDocument(request.roomName, async (document) => {
       const before = workingDocumentFromYDoc(database, request.roomName, document);
@@ -434,7 +555,7 @@ export function createCollaborationCommands(input: {
       };
     });
     recordCollaborationRequest(database, idempotency, response);
-    return response;
+    return observeDraftMutation(response, response.workingDocument, false);
   }
 
   async function commitWorking(
@@ -450,9 +571,16 @@ export function createCollaborationCommands(input: {
       payload: request,
     });
     const replayed = replayCollaborationRequest<CommitWorkingDocumentResponse>(database, idempotency);
-    if (replayed) return replayed;
+    if (replayed) {
+      return provider.withDocument(request.roomName, (document) =>
+        observeDraftMutation(
+          replayed,
+          workingDocumentFromYDoc(database, request.roomName, document),
+          true,
+        ));
+    }
 
-    return provider.withDocument(request.roomName, (document) => {
+    const response = await provider.withDocument(request.roomName, (document) => {
       const before = workingDocumentFromYDoc(database, request.roomName, document);
       assertCommitSynchronizationFence(
         document,
@@ -480,6 +608,7 @@ export function createCollaborationCommands(input: {
         idempotency,
       });
     });
+    return observeDraftMutation(response, response.workingDocument, false);
   }
 
   async function resetWorking(
@@ -495,26 +624,53 @@ export function createCollaborationCommands(input: {
       payload: request,
     });
     const replayed = replayCollaborationRequest<ResetWorkingDocumentResponse>(database, idempotency);
-    if (replayed) return replayed;
-    const source = request.revisionId
-      ? getDocumentRevisionSnapshot(database, request.workspaceId, request.documentId, request.revisionId)
-      : getDocument(database, request.workspaceId, request.documentId);
-    const roomName = resetCollaborationState(
-      database,
-      request.workspaceId,
-      request.documentId,
-      source,
-      request.revisionId
-        ? { markDirty: true, actor: { ...request.actor, source: "rollback" } }
-        : { markDirty: false },
-    );
+    if (replayed) {
+      return provider.withDocument(currentState.roomName, (document) =>
+        observeDraftMutation(
+          replayed,
+          workingDocumentFromYDoc(database, currentState.roomName, document),
+          true,
+        ));
+    }
+    const response = await provider.withDocument(currentState.roomName, (document) => {
+      // Accepted live-room updates are independent of this destructive
+      // operation and must remain persisted even when the caller's CAS is stale.
+      persistCollaborationYDoc(database, currentState.roomName, document);
+      const working = workingDocumentFromYDoc(database, currentState.roomName, document);
+      assertDestructiveCas(working, request);
+      return database.transaction(() => {
+        const locked = workingDocumentFromYDoc(database, currentState.roomName, document);
+        assertDestructiveCas(locked, request);
+        const source = request.revisionId
+          ? getDocumentRevisionSnapshot(database, request.workspaceId, request.documentId, request.revisionId)
+          : getDocument(database, request.workspaceId, request.documentId);
+        const roomName = resetCollaborationState(
+          database,
+          request.workspaceId,
+          request.documentId,
+          source,
+          request.revisionId
+            ? {
+                markDirty: true,
+                actor: { ...request.actor, source: "rollback" },
+                cas: request,
+              }
+            : { markDirty: false, cas: request },
+        );
+        const value = {
+          roomName,
+          workingDocument: workingDocumentFromStoredState(
+            database,
+            request.workspaceId,
+            request.documentId,
+          ),
+        };
+        recordCollaborationRequest(database, idempotency, value);
+        return value;
+      }).immediate();
+    });
     await provider.closeConnections(currentState.roomName);
-    const response = {
-      roomName,
-      workingDocument: workingDocumentFromStoredState(database, request.workspaceId, request.documentId),
-    };
-    recordCollaborationRequest(database, idempotency, response);
-    return response;
+    return observeDraftMutation(response, response.workingDocument, false);
   }
 
   async function archiveWorkingTree(

@@ -3,6 +3,9 @@ import {
   agentCreateDocumentSchema,
   agentUpdateDocumentSchema,
   createDocumentSchema,
+  discardWorkingDocumentSchema,
+  restoreDocumentRevisionSchema,
+  restoreWorkingRevisionSchema,
   updateDocumentSchema,
 } from "@/lib/documents/schemas";
 
@@ -46,5 +49,37 @@ describe("canonical document API schemas", () => {
       baseRevision: 1,
       content,
     }).success).toBe(true);
+  });
+
+  it("requires an explicit draft CAS for destructive discard and restore requests", () => {
+    const cas = {
+      expectedGeneration: 3,
+      expectedDraftVersion: 7,
+      expectedBaseRevision: 5,
+    };
+    expect(discardWorkingDocumentSchema.safeParse({
+      documentId: "7dcc9c33-5e68-41e4-af95-5933df3718d7",
+    }).success).toBe(false);
+    expect(discardWorkingDocumentSchema.parse({
+      documentId: "7dcc9c33-5e68-41e4-af95-5933df3718d7",
+      ...cas,
+    })).toMatchObject(cas);
+    expect(restoreWorkingRevisionSchema.safeParse({
+      requestId: "restore-without-cas-001",
+    }).success).toBe(false);
+    expect(restoreWorkingRevisionSchema.parse({
+      requestId: "restore-with-cas-001",
+      ...cas,
+    })).toMatchObject(cas);
+    expect(restoreDocumentRevisionSchema.safeParse({ baseRevision: 5 }).success).toBe(false);
+    expect(restoreDocumentRevisionSchema.parse({
+      baseRevision: 5,
+      expectedGeneration: cas.expectedGeneration,
+      expectedDraftVersion: cas.expectedDraftVersion,
+    })).toMatchObject({
+      baseRevision: 5,
+      expectedGeneration: cas.expectedGeneration,
+      expectedDraftVersion: cas.expectedDraftVersion,
+    });
   });
 });

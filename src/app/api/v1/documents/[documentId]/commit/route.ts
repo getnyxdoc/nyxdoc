@@ -6,7 +6,7 @@ import { apiErrorResponse } from "@/lib/http/errors";
 import { authenticateRequestApiToken } from "@/lib/tokens/request";
 import {
   requireTokenDocumentAccess,
-  requireTokenScope,
+  requireTokenPermission,
   tokenDocumentActor,
 } from "@/lib/tokens/service";
 
@@ -19,7 +19,7 @@ export async function POST(
 ) {
   try {
     const identity = authenticateRequestApiToken(sqlite, request);
-    requireTokenScope(identity, "documents:commit");
+    requireTokenPermission(identity, "documents:commit", "documents.commit");
     const { documentId } = await context.params;
     requireTokenDocumentAccess(sqlite, identity, documentId);
     const body = commitWorkingDocumentSchema.parse(await request.json());

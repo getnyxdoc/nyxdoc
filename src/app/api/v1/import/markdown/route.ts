@@ -7,7 +7,7 @@ import { DOCUMENT_WORKFLOW_STATUSES } from "@/lib/documents/types";
 import { apiErrorResponse } from "@/lib/http/errors";
 import { authenticateRequestApiToken } from "@/lib/tokens/request";
 import {
-  requireTokenScope,
+  requireTokenPermission,
   resolveTokenCreateParent,
   tokenDocumentActor,
 } from "@/lib/tokens/service";
@@ -29,7 +29,7 @@ const importSchema = z.object({
 export async function POST(request: Request) {
   try {
     const identity = authenticateRequestApiToken(sqlite, request);
-    requireTokenScope(identity, "documents:write");
+    requireTokenPermission(identity, "documents:write", "documents.create");
     const body = importSchema.parse(await request.json());
     const conversion = markdownToNyxdocWithReport(body.markdown, {
       idSeed: `${identity.id}:${body.requestId}`,

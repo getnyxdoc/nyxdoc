@@ -213,6 +213,12 @@ describe("Nyxdoc MCP server", () => {
             mutationDefault: "summary",
             fullAstIsOptIn: true,
             schemasIncludedByDefault: false,
+            mutationReceipt: {
+              version: "1",
+              requiredOnSuccess: true,
+              actorIdentity: ["type", "principalId", "source"],
+              idempotencyIdentity: "requestId-when-accepted-by-tool",
+            },
           },
           schemaDiscovery: { tool: "get_schema" },
           recommendedWorkflow: {
@@ -412,6 +418,21 @@ describe("Nyxdoc MCP server", () => {
         resultVersion: "1",
         operation: "create_document",
         responseMode: "summary",
+        receipt: {
+          version: "1",
+          operation: "create_document",
+          workspaceId: workspace.id,
+          documentId: structured.document.id,
+          revisionId: expect.any(String),
+          revisionNumber: 1,
+          actor: {
+            type: "agent",
+            principalId: identity.globalAgentId,
+            source: "mcp",
+          },
+          requestId: createArguments.requestId,
+          idempotency: { requestId: createArguments.requestId },
+        },
         blockCount: 4,
         contentDigest: expect.stringMatching(/^[0-9a-f]{64}$/),
         response: { mode: "summary", omittedFields: expect.arrayContaining(["document.content.blocks"]) },
@@ -443,6 +464,15 @@ describe("Nyxdoc MCP server", () => {
         arguments: createTaskArguments,
       });
       expect(createTaskResult.structuredContent).toMatchObject({
+        resultVersion: "1",
+        operation: "create_task",
+        receipt: {
+          operation: "create_task",
+          workspaceId: workspace.id,
+          documentId: structured.document.id,
+          actor: { principalId: identity.globalAgentId, source: "mcp" },
+          requestId: createTaskArguments.requestId,
+        },
         task: {
           title: createTaskArguments.title,
           status: "ready",
@@ -586,6 +616,14 @@ describe("Nyxdoc MCP server", () => {
         },
       });
       expect(assignmentResult.structuredContent).toMatchObject({
+        resultVersion: "1",
+        operation: "assign_document",
+        receipt: {
+          operation: "assign_document",
+          workspaceId: workspace.id,
+          documentId: structured.document.id,
+          actor: { principalId: identity.globalAgentId, source: "mcp" },
+        },
         assignment: {
           documentId: structured.document.id,
           agentId: identity.agentId,
@@ -597,6 +635,8 @@ describe("Nyxdoc MCP server", () => {
         },
         grantsAccess: false,
       });
+      expect((assignmentResult.structuredContent as { receipt: Record<string, unknown> }).receipt)
+        .not.toHaveProperty("requestId");
 
       const workspaceContext = await client.callTool({
         name: "get_workspace_context",
@@ -806,10 +846,20 @@ describe("Nyxdoc MCP server", () => {
       });
       expect(richUpdate.isError).not.toBe(true);
       expect(richUpdate.structuredContent).toMatchObject({
+        receipt: {
+          operation: "update_document",
+          workspaceId: workspace.id,
+          documentId: structured.document.id,
+          draftVersion: 1,
+          baseRevisionNumber: 1,
+          actor: { principalId: identity.globalAgentId, source: "mcp" },
+          requestId: "mcp-update-scenario-001",
+        },
         draftVersion: 1,
         baseRevisionNumber: 1,
         hasUncommittedChanges: true,
       });
+      expect(richUpdate.structuredContent).not.toHaveProperty("receipt.revisionNumber");
       expect((richUpdate.structuredContent as {
         workingDocument: {
           draftVersion: number;
@@ -850,7 +900,18 @@ describe("Nyxdoc MCP server", () => {
         workingDocument: { draftVersion: number; baseRevisionNumber: number };
       }).workingDocument).toMatchObject({ draftVersion: 2, baseRevisionNumber: 1 });
       const patchReplay = await client.callTool({ name: "patch_document", arguments: patchArguments });
-      expect(patchReplay.structuredContent).toEqual(patchResult.structuredContent);
+      expect(patchReplay.structuredContent).toMatchObject({
+        replayed: true,
+        draftVersion: 2,
+        receiptDraftVersion: 2,
+        currentDraftVersion: 2,
+        receipt: {
+          replayed: true,
+          draftVersion: 2,
+          receiptDraftVersion: 2,
+          currentDraftVersion: 2,
+        },
+      });
       const stalePatch = await client.callTool({
         name: "patch_document",
         arguments: {
@@ -884,6 +945,17 @@ describe("Nyxdoc MCP server", () => {
         resultVersion: "1",
         operation: "commit_document",
         responseMode: "summary",
+        receipt: {
+          operation: "commit_document",
+          workspaceId: workspace.id,
+          documentId: structured.document.id,
+          revisionId: expect.any(String),
+          revisionNumber: 2,
+          draftVersion: 2,
+          actor: { principalId: identity.globalAgentId, source: "mcp" },
+          requestId: commitArguments.requestId,
+          idempotency: { requestId: commitArguments.requestId },
+        },
         draftVersion: 2,
         baseRevisionNumber: 2,
         hasUncommittedChanges: false,
@@ -905,7 +977,19 @@ describe("Nyxdoc MCP server", () => {
         },
       });
       const commitReplay = await client.callTool({ name: "commit_document", arguments: commitArguments });
-      expect(commitReplay.structuredContent).toEqual(commitResult.structuredContent);
+      expect(commitReplay.structuredContent).toMatchObject({
+        replayed: true,
+        draftVersion: 2,
+        receiptDraftVersion: 2,
+        currentDraftVersion: 2,
+        document: { revisionNumber: 2 },
+        receipt: {
+          replayed: true,
+          revisionNumber: 2,
+          draftVersion: 2,
+          currentDraftVersion: 2,
+        },
+      });
 
       const searchResult = await client.callTool({
         name: "search_documents",
@@ -982,9 +1066,23 @@ describe("Nyxdoc MCP server", () => {
         diff: { documentId: structured.document.id, fromRevision: 1, toRevision: 2 },
       });
 
+      const beforeRestoreResult = await client.callTool({
+        name: "get_working_document",
+        arguments: { documentId: structured.document.id },
+      });
+      const beforeRestore = (beforeRestoreResult.structuredContent as {
+        workingDocument: {
+          generation: number;
+          draftVersion: number;
+          baseRevisionNumber: number;
+        };
+      }).workingDocument;
       const restoreArguments = {
         documentId: structured.document.id,
         revisionNumber: 1,
+        expectedGeneration: beforeRestore.generation,
+        expectedDraftVersion: beforeRestore.draftVersion,
+        expectedBaseRevision: beforeRestore.baseRevisionNumber,
         requestId: "mcp-restore-scenario-001",
       };
       const restoreResult = await client.callTool({ name: "restore_revision", arguments: restoreArguments });
@@ -1005,7 +1103,18 @@ describe("Nyxdoc MCP server", () => {
         },
       });
       const restoreReplay = await client.callTool({ name: "restore_revision", arguments: restoreArguments });
-      expect(restoreReplay.structuredContent).toEqual(restoreResult.structuredContent);
+      expect(restoreReplay.structuredContent).toMatchObject({
+        replayed: true,
+        draftVersion: 1,
+        receiptDraftVersion: 1,
+        currentDraftVersion: 1,
+        workingDocument: { draftVersion: 1 },
+        receipt: {
+          replayed: true,
+          draftVersion: 1,
+          currentDraftVersion: 1,
+        },
+      });
       expect((await client.callTool({
         name: "get_document",
         arguments: { documentId: structured.document.id },
@@ -1411,7 +1520,25 @@ describe("Nyxdoc MCP server", () => {
           responseMode: "full",
         },
       });
-      expect(replayedUpdate.structuredContent).toEqual(updated.structuredContent);
+      expect(replayedUpdate.structuredContent).toMatchObject({
+        replayed: true,
+        draftVersion: 1,
+        receiptDraftVersion: 1,
+        currentDraftVersion: 1,
+        normalization: {
+          remaps: [{ effectiveId }],
+        },
+        receipt: {
+          replayed: true,
+          draftVersion: 1,
+          receiptDraftVersion: 1,
+          currentDraftVersion: 1,
+          idempotency: {
+            requestId: "threads-regression-update-001",
+            replayed: true,
+          },
+        },
+      });
 
       const patched = await client.callTool({
         name: "patch_document",
@@ -1438,6 +1565,38 @@ describe("Nyxdoc MCP server", () => {
         id: effectiveId,
         children: [{ text: "후속 patch가 실제 ID를 사용했습니다" }],
       });
+
+      const staleReplay = await client.callTool({
+        name: "update_document",
+        arguments: {
+          documentId,
+          expectedDraftVersion: 0,
+          requestId: "threads-regression-update-001",
+          content: { schemaVersion: 2, blocks },
+          responseMode: "full",
+        },
+      });
+      expect(staleReplay.structuredContent).toMatchObject({
+        replayed: true,
+        draftVersion: 2,
+        receiptDraftVersion: 1,
+        currentDraftVersion: 2,
+        workingDocument: {
+          draftVersion: 2,
+        },
+        normalization: {
+          remaps: [{ effectiveId }],
+        },
+        receipt: {
+          replayed: true,
+          draftVersion: 1,
+          receiptDraftVersion: 1,
+          currentDraftVersion: 2,
+        },
+      });
+      expect((staleReplay.structuredContent as {
+        workingDocument: { content: { blocks: Array<{ id: string }> } };
+      }).workingDocument.content.blocks[0]).toMatchObject({ id: effectiveId });
 
       const beforeCommit = await client.callTool({
         name: "get_document",
@@ -2195,6 +2354,64 @@ describe("Nyxdoc MCP server", () => {
     }
   });
 
+  it("enforces exact action capabilities instead of treating read and write scopes as blanket grants", async () => {
+    const database = createTestDatabase();
+    databases.push(database);
+    const { user, workspace } = createTestUser(database, { name: "Exact action owner" });
+    const token = createWorkspaceToken(database, {
+      workspaceId: workspace.id,
+      userId: user.id,
+      name: "Update-only agent",
+      role: "editor",
+      scopes: ["documents:read", "documents:write"],
+    });
+    database.prepare(
+      `UPDATE workspace_agents
+       SET access_profile = 'custom', capabilities_json = ?
+       WHERE id = ? AND workspace_id = ?`,
+    ).run(
+      JSON.stringify(["documents.read", "documents.update"]),
+      token.summary.agentId,
+      workspace.id,
+    );
+    const identity = authenticateApiToken(database, `Bearer ${token.token}`);
+    const server = createNyxdocMcpServer(database, identity);
+    const client = new Client({ name: "exact-action-test", version: "1.0.0" });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await server.connect(serverTransport);
+    await client.connect(clientTransport);
+
+    try {
+      expect((await client.callTool({ name: "list_documents", arguments: {} })).isError)
+        .not.toBe(true);
+      const documentId = (database.prepare(
+        "SELECT id FROM documents WHERE workspace_id = ? ORDER BY created_at LIMIT 1",
+      ).get(workspace.id) as { id: string }).id;
+
+      for (const request of [
+        {
+          name: "create_document",
+          arguments: {
+            requestId: "exact-action-create-denied",
+            title: "Must not be created",
+            content: {
+              schemaVersion: 2,
+              blocks: [{ id: "denied-create", type: "p", children: [{ text: "Denied" }] }],
+            },
+          },
+        },
+        { name: "export_document", arguments: { documentId } },
+        { name: "list_revisions", arguments: { documentId } },
+      ]) {
+        const result = await client.callTool(request);
+        expect(result.isError).toBe(true);
+      }
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  });
+
   it("routes document tools across allowed workspaces without changing the connection default", async () => {
     const database = createTestDatabase();
     databases.push(database);
@@ -2397,7 +2614,7 @@ describe("Nyxdoc MCP server", () => {
       expect(unassigned.isError).toBe(true);
 
       database.prepare(
-        "UPDATE workspace_agents SET root_document_id = ? WHERE id = ?",
+        "UPDATE workspace_agents SET scope_mode = 'document_tree', root_document_id = ? WHERE id = ?",
       ).run(secondaryCreated.document.id, secondaryMembershipId);
       expect((await client.callTool({
         name: "get_document",

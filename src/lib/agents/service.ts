@@ -11,6 +11,7 @@ import {
   type AgentWorkspaceRole,
   type WorkspacePermission,
 } from "@/lib/authz/permissions";
+import { cancelAssignmentsOutsideWorkspaceAgentGrantBoundary } from "@/lib/agents/workspace-grant-boundary";
 import type { NyxDatabase } from "@/lib/db/client";
 import {
   API_TOKEN_SCOPES,
@@ -23,6 +24,7 @@ import {
   recordOrganizationAuditEvent,
   requireOrganizationPermission,
 } from "@/lib/organizations/service";
+import type { AgentIdentityId, WorkspaceAgentGrantId } from "@/lib/agents/identifiers";
 
 export type AgentCredentialBindingSummary = {
   id: string;
@@ -51,8 +53,10 @@ export type AgentCredentialSummary = {
 };
 
 export type AgentWorkspaceMembershipSummary = {
-  membershipId: string;
-  agentId: string;
+  /** WorkspaceAgentGrantId (`workspace_agents.id`) scoped to this workspace. */
+  membershipId: WorkspaceAgentGrantId;
+  /** Global AgentIdentityId (`agents.id`) shared across workspace grants. */
+  agentId: AgentIdentityId;
   workspaceId: string;
   workspaceName: string;
   accessProfile: AgentAccessProfile;
@@ -264,7 +268,8 @@ function requireMutableAgent(
 function recordGlobalAgentAudit(
   database: NyxDatabase,
   input: {
-    agentId: string;
+    /** Global AgentIdentityId (`agents.id`), not a WorkspaceAgentGrantId. */
+    agentId: AgentIdentityId;
     userId?: string | null;
     actorType?: "human" | "system";
     actorLabel?: string;
@@ -1315,7 +1320,8 @@ export function assignAgentToWorkspace(
   input: {
     userId: string;
     workspaceId: string;
-    agentId: string;
+    /** Global AgentIdentityId (`agents.id`), not a WorkspaceAgentGrantId. */
+    agentId: AgentIdentityId;
     accessProfile?: AgentAccessProfile;
     capabilities?: WorkspacePermission[];
     rootDocumentId?: string | null;
@@ -1420,6 +1426,21 @@ export function assignAgentToWorkspace(
         scopeMode,
       );
     }
+    // A reactivated grant may have historical active assignments created
+    // before its current root-document boundary was configured.
+    cancelAssignmentsOutsideWorkspaceAgentGrantBoundary(database, {
+      grant: {
+        id: membershipId,
+        agentIdentityId: input.agentId,
+        workspaceId: input.workspaceId,
+        status: "active",
+        scopeMode,
+        rootDocumentId,
+      },
+      actor: { type: "human", userId: input.userId, label: "사용자" },
+      reason: "grant_scope_changed",
+      now,
+    });
     recordWorkspaceAuditEvent(database, {
       workspaceId: input.workspaceId,
       action: existing ? "agent.membership_reactivated" : "agent.assigned",
@@ -1451,7 +1472,8 @@ export function updateAgentWorkspaceMembership(
   input: {
     userId: string;
     workspaceId: string;
-    agentId: string;
+    /** Global AgentIdentityId (`agents.id`), not a WorkspaceAgentGrantId. */
+    agentId: AgentIdentityId;
     accessProfile?: AgentAccessProfile;
     capabilities?: WorkspacePermission[];
     rootDocumentId: string | null;
@@ -1509,6 +1531,19 @@ export function updateAgentWorkspaceMembership(
       now,
       current.id,
     );
+    cancelAssignmentsOutsideWorkspaceAgentGrantBoundary(database, {
+      grant: {
+        id: current.id,
+        agentIdentityId: input.agentId,
+        workspaceId: input.workspaceId,
+        status,
+        scopeMode,
+        rootDocumentId,
+      },
+      actor: { type: "human", userId: input.userId, label: "사용자" },
+      reason: status === "disabled" ? "grant_disabled" : "grant_scope_changed",
+      now,
+    });
     recordWorkspaceAuditEvent(database, {
       workspaceId: input.workspaceId,
       action: status === "disabled" ? "agent.unassigned" : "agent.permissions_updated",

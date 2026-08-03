@@ -4,7 +4,7 @@ import { DocumentServiceError } from "@/lib/documents/types";
 import { apiErrorResponse } from "@/lib/http/errors";
 import { authenticateRequestApiToken } from "@/lib/tokens/request";
 import {
-  requireTokenScope,
+  requireTokenPermission,
   setTokenCursor,
   tokenCanAccessDocument,
 } from "@/lib/tokens/service";
@@ -15,7 +15,7 @@ export const dynamic = "force-dynamic";
 export async function GET(request: Request) {
   try {
     const identity = authenticateRequestApiToken(sqlite, request);
-    requireTokenScope(identity, "changes:read");
+    requireTokenPermission(identity, "changes:read", "changes.read");
     const url = new URL(request.url);
     const sinceValue = url.searchParams.get("since");
     const limitValue = url.searchParams.get("limit");

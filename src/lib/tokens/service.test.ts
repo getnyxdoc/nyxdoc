@@ -6,6 +6,7 @@ import {
   ApiTokenError,
   authenticateApiToken,
   createWorkspaceToken,
+  requireTokenPermission,
   requireTokenScope,
   requireTokenDocumentAccess,
   resolveTokenCreateParent,
@@ -84,6 +85,48 @@ describe("workspace API tokens", () => {
     expect(() => requireTokenScope(identity, "documents:read")).not.toThrow();
     expect(() => requireTokenScope(identity, "documents:write"))
       .toThrowError(expect.objectContaining({ code: "FORBIDDEN" }));
+  });
+
+  it("requires the exact workspace capability in addition to the credential scope", () => {
+    const database = createTestDatabase();
+    databases.push(database);
+    const { user, workspace } = createTestUser(database);
+    const created = createWorkspaceToken(database, {
+      workspaceId: workspace.id,
+      userId: user.id,
+      name: "Exact-action agent",
+      scopes: ["documents:read", "documents:write"],
+    });
+    updateAgentWorkspaceMembership(database, {
+      workspaceId: workspace.id,
+      userId: user.id,
+      agentId: created.summary.agentId,
+      accessProfile: "custom",
+      capabilities: ["documents.read", "documents.update"],
+      rootDocumentId: null,
+    });
+
+    const identity = authenticateApiToken(database, `Bearer ${created.token}`);
+    expect(() => requireTokenPermission(
+      identity,
+      "documents:write",
+      "documents.update",
+    )).not.toThrow();
+    expect(() => requireTokenPermission(
+      identity,
+      "documents:write",
+      "documents.create",
+    )).toThrowError(expect.objectContaining({ code: "FORBIDDEN" }));
+    expect(() => requireTokenPermission(
+      identity,
+      "documents:read",
+      "revisions.read",
+    )).toThrowError(expect.objectContaining({ code: "FORBIDDEN" }));
+    expect(() => requireTokenPermission(
+      identity,
+      "documents:read",
+      "exports.create",
+    )).toThrowError(expect.objectContaining({ code: "FORBIDDEN" }));
   });
 
   it("rejects an otherwise valid credential when its workspace is trashed", () => {
@@ -233,5 +276,52 @@ describe("workspace API tokens", () => {
     database.prepare("UPDATE documents SET status = 'archived' WHERE id = ?").run(childDocumentId);
     expect(tokenCanAccessDocument(database, identity, childDocumentId)).toBe(false);
     expect(tokenCanAccessDocument(database, identity, childDocumentId, true)).toBe(true);
+  });
+
+  it("fails closed and disables a document-tree grant when its root is purged", () => {
+    const database = createTestDatabase();
+    databases.push(database);
+    const { user, workspace } = createTestUser(database);
+    const rootDocumentId = (database.prepare(
+      "SELECT id FROM documents WHERE workspace_id = ? ORDER BY created_at ASC LIMIT 1",
+    ).get(workspace.id) as { id: string }).id;
+    const outsideDocumentId = createDocument(database, workspace.id, {
+      type: "human",
+      userId: user.id,
+      label: user.name,
+      source: "web",
+    }, {
+      title: "Outside document",
+      content: {
+        schemaVersion: 2,
+        blocks: [{ id: randomUUID(), type: "p", children: [{ text: "Outside" }] }],
+      },
+    }).document.id;
+    const created = createWorkspaceToken(database, {
+      workspaceId: workspace.id,
+      userId: user.id,
+      name: "Purged-root agent",
+      rootDocumentId,
+    });
+    const identity = authenticateApiToken(database, `Bearer ${created.token}`);
+    expect(identity).toMatchObject({
+      scopeMode: "document_tree",
+      rootDocumentId,
+    });
+
+    database.prepare("DELETE FROM documents WHERE id = ?").run(rootDocumentId);
+
+    expect(tokenCanAccessDocument(database, identity, outsideDocumentId)).toBe(false);
+    expect(database.prepare(
+      `SELECT status, scope_mode, root_document_id, revoked_at
+       FROM workspace_agents WHERE id = ?`,
+    ).get(created.summary.agentId)).toMatchObject({
+      status: "disabled",
+      scope_mode: "document_tree",
+      root_document_id: null,
+      revoked_at: expect.any(String),
+    });
+    expect(() => authenticateApiToken(database, `Bearer ${created.token}`))
+      .toThrowError(expect.objectContaining({ code: "FORBIDDEN" }));
   });
 });
