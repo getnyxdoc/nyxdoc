@@ -2,6 +2,13 @@
 
 All notable user-facing changes are recorded here.
 
+## 0.25.3 - 2026-08-04
+
+- Made GHCR digest verification tolerate temporary registry visibility errors
+  without weakening the exact-digest release gate.
+- Made upgrade qualification select the newest previously published container
+  image, skipping Git tags whose release never reached image promotion.
+
 ## 0.25.2 - 2026-08-04
 
 - Centralized human and agent authorization at shared service boundaries so

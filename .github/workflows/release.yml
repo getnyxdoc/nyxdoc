@@ -77,7 +77,15 @@ jobs:
           case "$DIGEST" in sha256:*) ;; *) exit 1;; esac
           tag="ghcr.io/getnyxdoc/nyxdoc:candidate-${RUN_ID}-${RUN_ATTEMPT}"
           image="ghcr.io/getnyxdoc/nyxdoc@${DIGEST}"
-          observed="$(docker buildx imagetools inspect "$image" | awk '$1 == "Digest:" { print $2; exit }')"
+          observed=""
+          for attempt in $(seq 1 12); do
+            if inspection="$(docker buildx imagetools inspect "$tag" 2>&1)"; then
+              observed="$(printf '%s\n' "$inspection" | awk '$1 == "Digest:" { print $2; exit }')"
+              [ "$observed" = "$DIGEST" ] && break
+            fi
+            printf 'candidate digest not visible yet (attempt %s/12)\n' "$attempt" >&2
+            sleep 10
+          done
           test "$observed" = "$DIGEST"
           {
             echo "image=$image"
@@ -113,7 +121,14 @@ jobs:
           CURRENT_TAG: ${{ github.ref_name }}
         run: |
           set -Eeuo pipefail
-          baseline="$(git tag --list 'v[0-9]*' --sort=-v:refname | grep -Fxv "$CURRENT_TAG" | head -n 1 || true)"
+          baseline=""
+          for candidate in $(git tag --list 'v[0-9]*' --sort=-v:refname | grep -Fxv "$CURRENT_TAG"); do
+            version="${candidate#v}"
+            if docker buildx imagetools inspect "ghcr.io/getnyxdoc/nyxdoc:${version}" >/dev/null 2>&1; then
+              baseline="$candidate"
+              break
+            fi
+          done
           test -n "$baseline"
           version="${baseline#v}"
           {
@@ -193,7 +208,15 @@ jobs:
           set -Eeuo pipefail
           for tag in $TARGET_TAGS; do
             docker buildx imagetools create --prefer-index=false -t "$tag" "$CANDIDATE_IMAGE"
-            observed="$(docker buildx imagetools inspect "$tag" | awk '$1 == "Digest:" { print $2; exit }')"
+            observed=""
+            for attempt in $(seq 1 12); do
+              if inspection="$(docker buildx imagetools inspect "$tag" 2>&1)"; then
+                observed="$(printf '%s\n' "$inspection" | awk '$1 == "Digest:" { print $2; exit }')"
+                [ "$observed" = "$CANDIDATE_DIGEST" ] && break
+              fi
+              printf 'promoted digest not visible yet for %s (attempt %s/12)\n' "$tag" "$attempt" >&2
+              sleep 10
+            done
             test "$observed" = "$CANDIDATE_DIGEST"
           done
 

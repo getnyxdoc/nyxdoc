@@ -158,7 +158,7 @@ See [docs/agent-contract.md](docs/agent-contract.md) for the full contract and
 
 ## Project status
 
-Version `0.25.2` is an early 0.x release used with real documents. Data
+Version `0.25.3` is an early 0.x release used with real documents. Data
 migrations are forward-only and rehearsed against verified backups, but APIs
 and UI details may still evolve before 1.0.
 
