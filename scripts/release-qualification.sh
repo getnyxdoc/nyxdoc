@@ -166,8 +166,7 @@ wait_for_services() {
   local label="$1"
   local http_port="$2"
   local collaboration_port="$3"
-  local attempt
-  for attempt in $(seq 1 60); do
+  for _ in $(seq 1 60); do
     if curl --fail --silent --show-error --max-time 5 "http://127.0.0.1:${http_port}/api/health" >/dev/null \
       && curl --fail --silent --show-error --max-time 5 "http://127.0.0.1:${collaboration_port}/health" >/dev/null; then
       return 0
