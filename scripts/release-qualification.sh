@@ -115,7 +115,7 @@ inspect_manifest_digest() {
   return 1
 }
 
-manifest_digest="$(inspect_manifest_digest "$candidate_image" "$candidate_digest")" \
+inspect_manifest_digest "$candidate_image" "$candidate_digest" >/dev/null \
   || fail "registry manifest digest provenance is missing or differs from the candidate digest"
 
 pull_succeeded=false
