@@ -2,6 +2,12 @@
 
 All notable user-facing changes are recorded here.
 
+## 0.25.6 - 2026-08-04
+
+- Fixed fresh-install release qualification to treat an empty optional
+  existing-account email as unset and exercise first-owner sign-up with a
+  generated address.
+
 ## 0.25.5 - 2026-08-04
 
 - Fixed the isolated release harness to consume its project-directory argument

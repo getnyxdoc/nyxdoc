@@ -18,7 +18,10 @@ test("qualifies real sign-up, session, collaboration, commit, and reload boundar
 
   const runId = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
   const marker = `release-collaboration-${runId}`;
-  const existingEmail = process.env.PLAYWRIGHT_EXISTING_EMAIL?.trim();
+  // GitHub Actions passes optional workflow inputs as empty strings. Treat an
+  // empty existing-account email as "not configured" so fresh-install
+  // qualification exercises first-owner sign-up with a generated address.
+  const existingEmail = process.env.PLAYWRIGHT_EXISTING_EMAIL?.trim() || undefined;
   const password = process.env.PLAYWRIGHT_EXISTING_PASSWORD
     ?? "Release-qualification-password-123!";
 

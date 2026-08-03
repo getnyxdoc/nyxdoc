@@ -1,6 +1,6 @@
 {
   "name": "nyxdoc",
-  "version": "0.25.5",
+  "version": "0.25.6",
   "description": "An agent-native document system for people and their external agents.",
   "private": true,
   "license": "MIT",
