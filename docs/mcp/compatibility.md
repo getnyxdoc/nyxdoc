@@ -27,7 +27,7 @@ Nyxdoc의 정식 원격 도구 표면은 `/mcp`의 stateless Streamable HTTP다.
 ## 연결 방식
 
 OAuth 클라이언트는 보호 리소스 메타데이터와 인증 서버 메타데이터를 발견하고 PKCE S256을
-사용해야 한다. Nyxdoc 0.25.1은 동적 클라이언트 등록(DCR)을 제공한다. Client ID Metadata
+사용해야 한다. Nyxdoc 0.25.2는 동적 클라이언트 등록(DCR)을 제공한다. Client ID Metadata
 Document(CIMD)는 아직 제공하지 않으며, CIMD만 허용하는 클라이언트는 별도 등록이 필요하다.
 
 기존 자동화나 로컬 에이전트는 계속 `Authorization: Bearer <NYXDOC_TOKEN>`을 사용할 수

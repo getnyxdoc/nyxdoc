@@ -2,6 +2,25 @@
 
 All notable user-facing changes are recorded here.
 
+## 0.25.2 - 2026-08-04
+
+- Centralized human and agent authorization at shared service boundaries so
+  REST, MCP, collaboration, media, task, and workspace routes no longer make
+  independent trust decisions.
+- Made document-tree grants fail closed, preserved credential and media
+  bindings across mutations, and added database constraints for invalid active
+  grant roots.
+- Consolidated draft, canonical revision, and MCP response projections so
+  writes report one authoritative document state and stable identifiers.
+- Hardened origin, OAuth, token rotation, revision restore, trash, and
+  collaboration boundaries with regression tests for both current and
+  preserved legacy agent identities.
+- Added real HTTP and browser vertical tests plus fresh-install and historical
+  database upgrade rehearsals without first-party route mocks.
+- Changed public releases to build one immutable multi-architecture image,
+  qualify its exact digest, and promote that same digest only after all release
+  evidence passes.
+
 ## 0.25.1 - 2026-08-03
 
 - Fixed workspace assignment and OAuth consent for agent identities preserved
