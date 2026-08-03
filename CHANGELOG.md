@@ -2,6 +2,13 @@
 
 All notable user-facing changes are recorded here.
 
+## 0.25.5 - 2026-08-04
+
+- Fixed the isolated release harness to consume its project-directory argument
+  before forwarding Docker Compose subcommands.
+- Made disposable runner cleanup best-effort when container-owned backup
+  evidence remains after an intentionally failed qualification run.
+
 ## 0.25.4 - 2026-08-04
 
 - Made release qualification wait for an immutable candidate digest and image

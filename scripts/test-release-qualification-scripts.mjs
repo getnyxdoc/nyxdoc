@@ -71,6 +71,11 @@ async function main() {
     assert.match(mismatchedDigest.stderr, /candidate digest/);
 
     const shell = await readFile(qualification, "utf8");
+    assert.match(
+      shell,
+      /compose_for\(\) \{\s+local directory="\$1"\s+shift\s+docker compose/,
+      "compose_for must consume its directory argument before forwarding Compose arguments",
+    );
     for (const requiredFragment of [
       "--candidate-image",
       "docker buildx imagetools inspect",

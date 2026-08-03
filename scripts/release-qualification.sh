@@ -151,6 +151,7 @@ candidate_schema=""
 
 compose_for() {
   local directory="$1"
+  shift
   docker compose --project-directory "$directory" \
     --env-file "$directory/.env.production" \
     -f "$directory/compose.yaml" "$@"
@@ -330,7 +331,7 @@ cleanup() {
   cleanup_directory "$upgrade_dir"
   git -C "$root" worktree remove --force "$fresh_dir" >/dev/null 2>&1 || true
   git -C "$root" worktree remove --force "$upgrade_dir" >/dev/null 2>&1 || true
-  rm -rf "$temporary"
+  rm -rf "$temporary" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
 
