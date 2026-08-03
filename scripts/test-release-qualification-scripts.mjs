@@ -74,6 +74,9 @@ async function main() {
     for (const requiredFragment of [
       "--candidate-image",
       "docker buildx imagetools inspect",
+      "candidate digest not visible yet",
+      "candidate image pull not ready yet",
+      "qualification.log",
       "npm run test:mcp-http",
       "scripts/update.sh",
       "integrity_check",

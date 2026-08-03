@@ -2,6 +2,13 @@
 
 All notable user-facing changes are recorded here.
 
+## 0.25.4 - 2026-08-04
+
+- Made release qualification wait for an immutable candidate digest and image
+  pull to become visible before starting isolated upgrade and browser checks.
+- Always create qualification evidence before registry access so an early
+  release-gate failure remains diagnosable without weakening promotion rules.
+
 ## 0.25.3 - 2026-08-04
 
 - Made GHCR digest verification tolerate temporary registry visibility errors

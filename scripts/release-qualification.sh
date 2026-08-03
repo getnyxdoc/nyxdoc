@@ -42,6 +42,9 @@ done
 
 fail() {
   printf '[nyxdoc] release qualification failed: %s\n' "$*" >&2
+  if [ -n "${qualification_log:-}" ]; then
+    printf '[nyxdoc] release qualification failed: %s\n' "$*" >>"$qualification_log"
+  fi
   exit 1
 }
 
@@ -54,6 +57,11 @@ require_argument --candidate-revision "$candidate_revision"
 require_argument --baseline-ref "$baseline_ref"
 require_argument --baseline-image "$baseline_image"
 require_argument --receipt "$receipt_path"
+
+qualification_artifact_dir="$(dirname -- "$receipt_path")"
+mkdir -p "$qualification_artifact_dir"
+qualification_log="$qualification_artifact_dir/qualification.log"
+printf '[nyxdoc] release qualification started for %s\n' "$candidate_image" >"$qualification_log"
 
 case "$candidate_image" in
   *@sha256:*) ;;
@@ -85,10 +93,44 @@ if [ "$(git -C "$root" rev-parse "${candidate_revision}^{commit}")" != "$candida
   fail "candidate revision did not resolve exactly"
 fi
 
-manifest_digest="$({ docker buildx imagetools inspect "$candidate_image"; } | awk '$1 == "Digest:" { print $2; exit }')"
-[ "$manifest_digest" = "$candidate_digest" ] \
+inspect_manifest_digest() {
+  local reference="$1"
+  local expected="$2"
+  local inspection=""
+  local observed=""
+  local attempt
+
+  for attempt in $(seq 1 12); do
+    if inspection="$(docker buildx imagetools inspect "$reference" 2>&1)"; then
+      observed="$(printf '%s\n' "$inspection" | awk '$1 == "Digest:" { print $2; exit }')"
+      if [ "$observed" = "$expected" ]; then
+        printf '%s\n' "$observed"
+        return 0
+      fi
+    fi
+    printf '[nyxdoc] candidate digest not visible yet (attempt %s/12, observed %s)\n' \
+      "$attempt" "${observed:-none}" | tee -a "$qualification_log" >&2
+    sleep 10
+  done
+  return 1
+}
+
+manifest_digest="$(inspect_manifest_digest "$candidate_image" "$candidate_digest")" \
   || fail "registry manifest digest provenance is missing or differs from the candidate digest"
-docker pull "$candidate_image" >/dev/null
+
+pull_succeeded=false
+for attempt in $(seq 1 12); do
+  if pull_output="$(docker pull "$candidate_image" 2>&1)"; then
+    printf '%s\n' "$pull_output" >>"$qualification_log"
+    pull_succeeded=true
+    break
+  fi
+  printf '[nyxdoc] candidate image pull not ready yet (attempt %s/12)\n' "$attempt" \
+    | tee -a "$qualification_log" >&2
+  printf '%s\n' "$pull_output" >>"$qualification_log"
+  sleep 10
+done
+$pull_succeeded || fail "candidate image could not be pulled after registry propagation retries"
 
 temporary="$(mktemp -d "${TMPDIR:-/tmp}/nyxdoc-release-qualification.XXXXXX")"
 run_id="$(date +%s)-$RANDOM"
