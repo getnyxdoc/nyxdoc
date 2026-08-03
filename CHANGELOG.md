@@ -13,6 +13,8 @@ All notable user-facing changes are recorded here.
   workspace-access update contract.
 - Route release-candidate media smoke requests through the internal gateway
   while preserving the public upload URL path, query, and authorization.
+- Validate idempotent MCP retries through their explicit replay receipt instead
+  of requiring byte-identical first-run and replay envelopes.
 
 ## 0.25.6 - 2026-08-04
 

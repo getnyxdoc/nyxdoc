@@ -279,14 +279,28 @@ async function main() {
     assert.equal(patched.isError, undefined);
     const patchedContent = patched.structuredContent as {
       responseMode: string;
+      contentDigest: string;
+      replayed: boolean;
       workingDocument: { draftVersion: number; hasUncommittedChanges: boolean };
+      receipt: { requestId: string; replayed: boolean; idempotency: { replayed: boolean } };
     };
     assert.equal(patchedContent.responseMode, "summary");
+    assert.equal(patchedContent.replayed, false);
     assert.equal(patchedContent.workingDocument.draftVersion, 1);
     assert.equal(patchedContent.workingDocument.hasUncommittedChanges, true);
     assert(!JSON.stringify(patchedContent).includes('"blocks"'));
     const patchReplay = await client.callTool({ name: "patch_document", arguments: patchArguments });
-    assert.deepEqual(patchReplay.structuredContent, patched.structuredContent);
+    assert.equal(patchReplay.isError, undefined);
+    const patchReplayContent = patchReplay.structuredContent as typeof patchedContent;
+    assert.equal(patchReplayContent.replayed, true);
+    assert.equal(patchReplayContent.contentDigest, patchedContent.contentDigest);
+    assert.equal(
+      patchReplayContent.workingDocument.draftVersion,
+      patchedContent.workingDocument.draftVersion,
+    );
+    assert.equal(patchReplayContent.receipt.requestId, patchedContent.receipt.requestId);
+    assert.equal(patchReplayContent.receipt.replayed, true);
+    assert.equal(patchReplayContent.receipt.idempotency.replayed, true);
 
     const reusedRequest = await client.callTool({
       name: "patch_document",
