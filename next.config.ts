@@ -2,6 +2,13 @@ import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
   output: "standalone",
+  // Self-contained HTTP integration tests run a real Next.js server. Give
+  // them an isolated build directory so they can run while a developer keeps
+  // the normal `.next` dev server open.
+  distDir: process.env.NYXDOC_NEXT_DIST_DIR || ".next",
+  typescript: {
+    tsconfigPath: process.env.NYXDOC_TSCONFIG_PATH || "tsconfig.json",
+  },
   poweredByHeader: false,
   // Keep one process-wide Yjs constructor on the Node side. The collaboration
   // server and the SSR copy of the editor otherwise resolve different module

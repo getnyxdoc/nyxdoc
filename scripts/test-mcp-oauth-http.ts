@@ -49,6 +49,8 @@ async function main() {
     NYXDOC_DB_PATH: databasePath,
     NYXDOC_MEDIA_ROOT: path.join(root, "media"),
     NYXDOC_BACKUP_ROOT: path.join(root, "backups"),
+    NYXDOC_NEXT_DIST_DIR: ".next-mcp-oauth-http",
+    NYXDOC_TSCONFIG_PATH: "tsconfig.integration.json",
     BETTER_AUTH_URL: baseUrl,
     BETTER_AUTH_SECRET: "nyxdoc-oauth-http-secret-at-least-32-characters",
     NYXDOC_COLLABORATION_SECRET: "nyxdoc-oauth-http-collaboration-secret",
@@ -216,7 +218,7 @@ async function main() {
         accept: true,
         consentCode,
         workspaceIds: [workspace.id],
-        role: "viewer",
+        accessProfile: "reader",
         agent: { mode: "existing", agentId: existingAgent.id },
       }),
     });
@@ -346,7 +348,7 @@ async function main() {
         accept: true,
         consentCode: reauthorizeConsentCode,
         workspaceIds: [workspace.id],
-        role: "viewer",
+        accessProfile: "reader",
         agent: { mode: "new", displayName: "Reauthorized OAuth smoke agent" },
       }),
     });
@@ -522,6 +524,12 @@ async function main() {
       setTimeout(resolve, 3_000).unref();
     });
     await rm(root, {
+      recursive: true,
+      force: true,
+      maxRetries: 12,
+      retryDelay: 250,
+    });
+    await rm(path.join(process.cwd(), ".next-mcp-oauth-http"), {
       recursive: true,
       force: true,
       maxRetries: 12,

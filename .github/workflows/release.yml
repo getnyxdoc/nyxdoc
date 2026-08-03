@@ -19,9 +19,12 @@ jobs:
           node-version: 24
           cache: npm
       - run: npm ci
+      - run: node scripts/check-browser-vertical-no-first-party-mocks.mjs
       - run: npm run typecheck
       - run: npm run lint
       - run: npm test
+      - run: npm run test:agent-connect-http
+      - run: npm run test:mcp-oauth-http
       - run: npm run build
 
   publish-image:

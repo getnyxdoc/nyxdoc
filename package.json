@@ -27,6 +27,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:editor-e2e": "playwright test",
+    "test:agent-connect-http": "tsx scripts/test-agent-connect-http.ts",
     "test:mcp-http": "tsx scripts/test-mcp-http.ts",
     "test:mcp-oauth-http": "tsx scripts/test-mcp-oauth-http.ts",
     "test:codex-e2e": "tsx scripts/test-codex-e2e.ts",

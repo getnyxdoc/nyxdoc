@@ -37,6 +37,20 @@ jobs:
       - run: npx playwright install --with-deps chromium
       - run: npm run test:editor-e2e
 
+  integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: node scripts/check-browser-vertical-no-first-party-mocks.mjs
+      - run: npm ci
+      - run: npm run test:agent-connect-http
+      - run: npm run test:mcp-oauth-http
+
   compose-lifecycle:
     runs-on: ubuntu-latest
     timeout-minutes: 30
