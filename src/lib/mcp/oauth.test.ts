@@ -6,6 +6,7 @@ import {
   createAgentCredential,
 } from "@/lib/agents/service";
 import {
+  completeMcpOAuthConsent,
   getMcpOAuthAuthorizationRequest,
   getMcpOAuthConsentState,
   McpOAuthError,
@@ -22,6 +23,40 @@ afterEach(() => {
 });
 
 describe("MCP OAuth workspace grants", () => {
+  it("does not mutate Nyxdoc authorization when provider consent fails", async () => {
+    const database = createTestDatabase();
+    databases.push(database);
+    const { user, workspace } = createTestUser(database);
+
+    await expect(completeMcpOAuthConsent(database, {
+      provisioning: {
+        userId: user.id,
+        clientId: "failing-provider-client",
+        clientName: "Failing provider",
+        requestedScopes: "documents:read changes:read",
+        workspaceIds: [workspace.id],
+        accessProfile: "reader",
+        agent: { mode: "new", displayName: "Should not exist" },
+      },
+      providerConsent: async () => {
+        throw new Error("provider consent failed");
+      },
+    })).rejects.toThrow("provider consent failed");
+
+    expect(database.prepare(
+      "SELECT COUNT(*) AS count FROM mcp_oauth_grants",
+    ).get()).toEqual({ count: 0 });
+    expect(database.prepare(
+      "SELECT COUNT(*) AS count FROM agents",
+    ).get()).toEqual({ count: 0 });
+    expect(database.prepare(
+      "SELECT COUNT(*) AS count FROM agent_credentials",
+    ).get()).toEqual({ count: 0 });
+    expect(database.prepare(
+      "SELECT COUNT(*) AS count FROM workspace_agents",
+    ).get()).toEqual({ count: 0 });
+  });
+
   it("binds a consent code to its signed-in user, client, and scopes", () => {
     const database = createTestDatabase();
     databases.push(database);
@@ -80,13 +115,13 @@ describe("MCP OAuth workspace grants", () => {
       clientName: "Codex",
       requestedScopes,
       workspaceIds: [first.id],
-      role: "editor",
+      accessProfile: "writer",
       agent: { mode: "new", displayName: "Codex OAuth" },
     });
     expect(firstGrant).toMatchObject({
       clientId: "codex-oauth-client",
       workspaceIds: [first.id],
-      role: "editor",
+      accessProfile: "writer",
       status: "active",
       scopes: [
         "documents:read",
@@ -95,6 +130,7 @@ describe("MCP OAuth workspace grants", () => {
         "changes:read",
       ],
     });
+    expect(firstGrant).not.toHaveProperty("role");
 
     const identity = resolveMcpOAuthIdentity(database, {
       userId: user.id,
@@ -107,7 +143,6 @@ describe("MCP OAuth workspace grants", () => {
       globalAgentId: firstGrant.agentId,
       id: firstGrant.credentialId,
       workspaceId: first.id,
-      role: "editor",
       scopes: firstGrant.scopes,
     });
     expect(() => resolveMcpOAuthIdentity(database, {
@@ -123,7 +158,7 @@ describe("MCP OAuth workspace grants", () => {
       clientName: "Codex",
       requestedScopes,
       workspaceIds: [first.id, second.id],
-      role: "admin",
+      accessProfile: "reader",
       agent: { mode: "existing", agentId: firstGrant.agentId },
     });
     expect(expandedGrant.agentId).toBe(firstGrant.agentId);
@@ -137,7 +172,6 @@ describe("MCP OAuth workspace grants", () => {
     })).toMatchObject({
       globalAgentId: firstGrant.agentId,
       workspaceId: second.id,
-      role: "admin",
       scopes: ["documents:read", "changes:read"],
     });
 
@@ -146,8 +180,20 @@ describe("MCP OAuth workspace grants", () => {
       clientId: firstGrant.clientId,
       requestedScopes,
     });
-    expect(state.selectedWorkspaceIds).toEqual([first.id, second.id]);
-    expect(state.role).toBe("editor");
+    expect(state.selectedWorkspaceIds).toEqual(expect.arrayContaining([first.id, second.id]));
+    expect(state.workspaceAccess).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        workspaceId: first.id,
+        accessProfile: "writer",
+        effectiveCapabilities: expect.arrayContaining(["documents.read", "documents.commit"]),
+      }),
+      expect.objectContaining({
+        workspaceId: second.id,
+        accessProfile: "reader",
+        effectiveCapabilities: expect.arrayContaining(["documents.read"]),
+      }),
+    ]));
+    expect(state).not.toHaveProperty("role");
     expect(state.workspaces.map((candidate) => candidate.id)).toEqual(
       expect.arrayContaining([first.id, second.id]),
     );
@@ -189,7 +235,7 @@ describe("MCP OAuth workspace grants", () => {
       clientName: "Untrusted",
       requestedScopes: "documents:read changes:read",
       workspaceIds: [second.workspace.id],
-      role: "viewer",
+      accessProfile: "reader",
       agent: { mode: "new", displayName: "Untrusted OAuth" },
     })).toThrowError(McpOAuthError);
     expect(database.prepare(
@@ -209,7 +255,7 @@ describe("MCP OAuth workspace grants", () => {
       userId: user.id,
       workspaceId: workspace.id,
       agentId: agent.id,
-      role: "admin",
+      accessProfile: "writer",
     });
     const manualCredential = createAgentCredential(database, {
       userId: user.id,
@@ -226,7 +272,7 @@ describe("MCP OAuth workspace grants", () => {
       clientName: "Existing Agent Client",
       requestedScopes: "documents:read changes:read",
       workspaceIds: [workspace.id],
-      role: "viewer",
+      accessProfile: "reader",
       agent: { mode: "existing", agentId: agent.id },
     });
 
@@ -243,8 +289,71 @@ describe("MCP OAuth workspace grants", () => {
     })).toMatchObject({
       globalAgentId: agent.id,
       id: grant.credentialId,
-      role: "admin",
     });
+  });
+
+  it("re-consent updates only explicit credential bindings and preserves existing workspace grants", () => {
+    const database = createTestDatabase();
+    databases.push(database);
+    const { user, workspace } = createTestUser(database);
+    const second = createWorkspace(database, user, "Second workspace");
+    const firstGrant = provisionMcpOAuthGrant(database, {
+      userId: user.id,
+      clientId: "re-consent-client",
+      clientName: "Re-consent Client",
+      requestedScopes: "documents:read changes:read",
+      workspaceIds: [workspace.id],
+      accessProfile: "writer",
+      agent: { mode: "new", displayName: "Re-consent agent" },
+    });
+    const before = database.prepare(
+      `SELECT role, access_profile, capabilities_json, root_document_id, policy_version
+       FROM workspace_agents
+       WHERE workspace_id = ? AND agent_identity_id = ? AND revoked_at IS NULL`,
+    ).get(workspace.id, firstGrant.agentId);
+
+    provisionMcpOAuthGrant(database, {
+      userId: user.id,
+      clientId: firstGrant.clientId,
+      clientName: "Re-consent Client",
+      requestedScopes: "documents:read documents:write changes:read",
+      workspaceIds: [second.id],
+      accessProfile: "reader",
+      agent: { mode: "existing", agentId: firstGrant.agentId },
+    });
+
+    expect(database.prepare(
+      `SELECT role, access_profile, capabilities_json, root_document_id, policy_version
+       FROM workspace_agents
+       WHERE workspace_id = ? AND agent_identity_id = ? AND revoked_at IS NULL`,
+    ).get(workspace.id, firstGrant.agentId)).toEqual(before);
+    expect(database.prepare(
+      `SELECT access_profile, capabilities_json
+       FROM workspace_agents
+       WHERE workspace_id = ? AND agent_identity_id = ? AND revoked_at IS NULL`,
+    ).get(second.id, firstGrant.agentId)).toEqual({
+      access_profile: "reader",
+      capabilities_json: expect.stringContaining("documents.read"),
+    });
+    expect(database.prepare(
+      `SELECT membership.workspace_id
+       FROM agent_credential_grant_bindings binding
+       JOIN workspace_agents membership ON membership.id = binding.grant_id
+       WHERE binding.credential_id = ?
+         AND binding.status = 'active' AND binding.revoked_at IS NULL
+       ORDER BY membership.workspace_id`,
+    ).all(firstGrant.credentialId)).toEqual([{ workspace_id: second.id }]);
+    expect(getMcpOAuthConsentState(database, {
+      userId: user.id,
+      clientId: firstGrant.clientId,
+      requestedScopes: "documents:read documents:write changes:read",
+    }).workspaceAccess).toEqual([
+      expect.objectContaining({
+        workspaceId: second.id,
+        accessProfile: "reader",
+        effectiveCapabilities: expect.arrayContaining(["documents.read"]),
+      }),
+    ]);
   });
 
   it("revokes prior OAuth tokens and credentials when the selected agent changes", () => {
@@ -271,7 +380,7 @@ describe("MCP OAuth workspace grants", () => {
       clientName: "Switch Agent Client",
       requestedScopes: "documents:read changes:read",
       workspaceIds: [workspace.id],
-      role: "viewer",
+      accessProfile: "reader",
       agent: { mode: "new", displayName: "First OAuth agent" },
     });
     const now = new Date().toISOString();
@@ -303,7 +412,7 @@ describe("MCP OAuth workspace grants", () => {
       clientName: "Switch Agent Client",
       requestedScopes: "documents:read changes:read",
       workspaceIds: [workspace.id],
-      role: "editor",
+      accessProfile: "writer",
       agent: { mode: "existing", agentId: replacement.id },
     });
 
@@ -335,8 +444,24 @@ describe("MCP OAuth workspace grants", () => {
       clientName: "Foreign Agent Client",
       requestedScopes: "documents:read changes:read",
       workspaceIds: [first.workspace.id],
-      role: "viewer",
+      accessProfile: "reader",
       agent: { mode: "existing", agentId: foreignAgent.id },
+    })).toThrowError(McpOAuthError);
+  });
+
+  it("rejects access profiles outside the public OAuth contract", () => {
+    const database = createTestDatabase();
+    databases.push(database);
+    const { user, workspace } = createTestUser(database);
+
+    expect(() => provisionMcpOAuthGrant(database, {
+      userId: user.id,
+      clientId: "invalid-profile-client",
+      clientName: "Invalid Profile Client",
+      requestedScopes: "documents:read changes:read",
+      workspaceIds: [workspace.id],
+      accessProfile: "custom" as never,
+      agent: { mode: "new", displayName: "Invalid OAuth agent" },
     })).toThrowError(McpOAuthError);
   });
 });

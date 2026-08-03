@@ -131,6 +131,32 @@ describe("document command service", () => {
     })).toThrowError(expect.objectContaining({ code: "IDEMPOTENCY_CONFLICT" }));
   });
 
+  it("rejects direct agent document writes after the credential grant binding is revoked", () => {
+    const { database, user, workspace } = fixture();
+    const token = createWorkspaceToken(database, {
+      workspaceId: workspace.id,
+      userId: user.id,
+      name: "Unbound writer",
+    });
+    database.prepare(
+      `UPDATE agent_credential_grant_bindings
+       SET status = 'revoked', revoked_at = ?
+       WHERE credential_id = ?`,
+    ).run("2026-08-03T00:00:00.000Z", token.summary.id);
+
+    expect(() => createDocument(database, workspace.id, {
+      type: "agent",
+      userId: user.id,
+      tokenId: token.summary.id,
+      label: "Unbound writer",
+      source: "mcp",
+    }, {
+      requestId: "unbound-document-write-001",
+      title: "Should not be created",
+      content: textContent([{ text: "Denied" }]),
+    })).toThrowError(expect.objectContaining({ code: "FORBIDDEN" }));
+  });
+
   it("applies ordered block patches as one revision, replays retries, and reports conflicting blocks", () => {
     const { database, user, workspace } = fixture();
     const token = createWorkspaceToken(database, {
@@ -350,13 +376,18 @@ describe("document command service", () => {
 
   it("creates agent and human revisions with one ordered event each", () => {
     const { database, user, workspace } = fixture();
+    const token = createWorkspaceToken(database, {
+      workspaceId: workspace.id,
+      userId: user.id,
+      name: "Codex",
+    });
     const created = createDocument(
       database,
       workspace.id,
       {
         type: "agent",
         userId: user.id,
-        tokenId: "token-for-test",
+        tokenId: token.summary.id,
         principalId: "agent-for-test",
         avatarMediaId: "avatar-for-test",
         label: "Codex",
@@ -412,7 +443,7 @@ describe("document command service", () => {
         )
         .get(created.document.revisionId),
     ).toEqual({
-      actor_token_id: "token-for-test",
+      actor_token_id: token.summary.id,
       actor_principal_id: "agent-for-test",
       actor_avatar_media_id: "avatar-for-test",
       actor_label: "Codex",

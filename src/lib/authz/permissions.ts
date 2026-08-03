@@ -43,6 +43,8 @@ export type WorkspacePermission = (typeof WORKSPACE_PERMISSIONS)[number];
 export type HumanWorkspaceRole = "owner" | "admin" | "editor" | "viewer";
 export type HumanDocumentGrantRole = "editor" | "viewer";
 export type AgentWorkspaceRole = "admin" | "editor" | "viewer";
+export const AGENT_ACCESS_PROFILES = ["reader", "drafter", "writer", "custom"] as const;
+export type AgentAccessProfile = (typeof AGENT_ACCESS_PROFILES)[number];
 
 export type HumanWorkspacePrincipal = {
   type: "human";
@@ -68,11 +70,11 @@ export type AgentWorkspacePrincipal = {
   workspaceId: string;
   membershipId: string;
   agentId: string;
-  role: AgentWorkspaceRole;
+  accessProfile: AgentAccessProfile;
+  /** Canonical grant capabilities. Authorization fails closed without these. */
+  capabilities: WorkspacePermission[];
   displayName: string;
   avatarMediaId: string | null;
-  permissionAllow: WorkspacePermission[];
-  permissionDeny: WorkspacePermission[];
 };
 
 export class AuthorizationError extends Error {
@@ -123,6 +125,20 @@ const VIEWER_PERMISSIONS = new Set<WorkspacePermission>([
   "tasks.read",
   "exports.create",
 ]);
+const AGENT_DRAFTER_PERMISSIONS = new Set<WorkspacePermission>([
+  ...VIEWER_PERMISSIONS,
+  "documents.create",
+  "documents.update",
+  "documents.trash_own",
+  "media.upload",
+  "saved_views.manage",
+  "tasks.create",
+  "tasks.update",
+]);
+const AGENT_WRITER_PERMISSIONS = new Set<WorkspacePermission>([
+  ...AGENT_DRAFTER_PERMISSIONS,
+  "documents.commit",
+]);
 const DOCUMENT_GRANT_PERMISSIONS: Record<
   HumanDocumentGrantRole,
   ReadonlySet<WorkspacePermission>
@@ -168,6 +184,12 @@ const AGENT_ROLE_PERMISSIONS: Record<AgentWorkspaceRole, ReadonlySet<WorkspacePe
   admin: AGENT_ADMIN_PERMISSIONS,
   editor: BASE_EDITOR_PERMISSIONS,
   viewer: VIEWER_PERMISSIONS,
+};
+
+const AGENT_PROFILE_PERMISSIONS: Record<Exclude<AgentAccessProfile, "custom">, ReadonlySet<WorkspacePermission>> = {
+  reader: VIEWER_PERMISSIONS,
+  drafter: AGENT_DRAFTER_PERMISSIONS,
+  writer: AGENT_WRITER_PERMISSIONS,
 };
 
 export const AGENT_NON_DELEGABLE_PERMISSIONS = new Set<WorkspacePermission>([
@@ -324,18 +346,24 @@ export function listAgentRolePermissions(role: AgentWorkspaceRole) {
   return WORKSPACE_PERMISSIONS.filter((permission) => AGENT_ROLE_PERMISSIONS[role].has(permission));
 }
 
+export function listAgentProfilePermissions(profile: AgentAccessProfile) {
+  if (profile === "custom") return [];
+  return WORKSPACE_PERMISSIONS.filter((permission) => AGENT_PROFILE_PERMISSIONS[profile].has(permission));
+}
+
+export function legacyRoleForAgentProfile(profile: AgentAccessProfile): AgentWorkspaceRole {
+  return profile === "reader" ? "viewer" : "editor";
+}
+
 export function agentPrincipalAllows(
-  principal: Pick<AgentWorkspacePrincipal, "role" | "permissionAllow" | "permissionDeny">,
+  principal: Pick<AgentWorkspacePrincipal, "capabilities">,
   permission: WorkspacePermission,
 ) {
-  if (principal.permissionDeny.includes(permission)) return false;
-  if (agentRoleAllows(principal.role, permission)) return true;
-  return !AGENT_NON_DELEGABLE_PERMISSIONS.has(permission)
-    && principal.permissionAllow.includes(permission);
+  return principal.capabilities.includes(permission);
 }
 
 export function listAgentPrincipalPermissions(
-  principal: Pick<AgentWorkspacePrincipal, "role" | "permissionAllow" | "permissionDeny">,
+  principal: Pick<AgentWorkspacePrincipal, "capabilities">,
 ) {
   return WORKSPACE_PERMISSIONS.filter((permission) => agentPrincipalAllows(principal, permission));
 }
@@ -378,7 +406,7 @@ export function requireAgentWorkspacePermission(
   permission: WorkspacePermission,
 ) {
   if (!agentPrincipalAllows(principal, permission)) {
-    throw new AuthorizationError("FORBIDDEN", "이 에이전트 역할에는 해당 권한이 없습니다.");
+    throw new AuthorizationError("FORBIDDEN", "이 에이전트의 워크스페이스 grant에는 해당 capability가 없습니다.");
   }
 }
 

@@ -282,5 +282,104 @@ describe("document human sharing", () => {
       new Date().toISOString(),
       new Date().toISOString(),
     )).toThrowError("document recipient must belong to the owning organization");
+
+    database.prepare("UPDATE organizations SET lifecycle_state = 'trashed' WHERE id = ?")
+      .run(organization.id);
+    expect(listDocumentHumanAccess(database, workspace.id, document.id))
+      .not.toEqual(expect.arrayContaining([
+        expect.objectContaining({ userId: teammate.user.id, source: "workspace" }),
+      ]));
+    expect(listDocumentShareCandidates(database, {
+      workspaceId: workspace.id,
+      documentId: document.id,
+      currentUserId: owner.user.id,
+      query: "member",
+    })).toEqual([{
+      userId: teammate.user.id,
+      name: teammate.user.name,
+      email: teammate.user.email,
+    }]);
+  });
+
+  it("ignores cross-organization team grants in inherited access and candidate exclusion", () => {
+    const database = createTestDatabase();
+    databases.push(database);
+    const owner = createTestUser(database, { name: "Owner", email: "owner@example.com" });
+    const teammate = createTestUser(database, { name: "Teammate", email: "teammate@example.com" });
+    const organization = createOrganization(database, {
+      userId: owner.user.id,
+      actorLabel: owner.user.name,
+      name: "Workspace Organization",
+    });
+    const workspace = createWorkspace(database, owner.user, "Organization docs", "en", {
+      organizationId: organization.id,
+    });
+    const organizationInvitation = createOrganizationInvitation(database, {
+      organizationId: organization.id,
+      userId: owner.user.id,
+      actorLabel: owner.user.name,
+      email: teammate.user.email,
+      role: "member",
+    });
+    acceptOrganizationInvitation(database, { token: organizationInvitation.token, user: teammate.user });
+    const otherOrganization = createOrganization(database, {
+      userId: owner.user.id,
+      actorLabel: owner.user.name,
+      name: "Other Organization",
+    });
+    const otherInvitation = createOrganizationInvitation(database, {
+      organizationId: otherOrganization.id,
+      userId: owner.user.id,
+      actorLabel: owner.user.name,
+      email: teammate.user.email,
+      role: "member",
+    });
+    acceptOrganizationInvitation(database, { token: otherInvitation.token, user: teammate.user });
+    const otherTeam = createOrganizationTeam(database, {
+      organizationId: otherOrganization.id,
+      userId: owner.user.id,
+      actorLabel: owner.user.name,
+      name: "Other team",
+    });
+    addOrganizationTeamMember(database, {
+      organizationId: otherOrganization.id,
+      userId: owner.user.id,
+      actorLabel: owner.user.name,
+      teamId: otherTeam.id,
+      targetUserId: teammate.user.id,
+    });
+    database.prepare("DROP TRIGGER workspace_team_grant_boundary_insert").run();
+    database.prepare(
+      `INSERT INTO workspace_team_grants
+       (id, organization_id, workspace_id, team_id, access_role,
+        granted_by_user_id, created_at, updated_at)
+       VALUES (?, ?, ?, ?, 'viewer', ?, ?, ?)`,
+    ).run(
+      randomUUID(),
+      otherOrganization.id,
+      workspace.id,
+      otherTeam.id,
+      owner.user.id,
+      new Date().toISOString(),
+      new Date().toISOString(),
+    );
+    const document = database.prepare(
+      "SELECT id FROM documents WHERE workspace_id = ? ORDER BY created_at LIMIT 1",
+    ).get(workspace.id) as { id: string };
+
+    expect(listDocumentHumanAccess(database, workspace.id, document.id))
+      .not.toEqual(expect.arrayContaining([
+        expect.objectContaining({ userId: teammate.user.id, source: "workspace" }),
+      ]));
+    expect(listDocumentShareCandidates(database, {
+      workspaceId: workspace.id,
+      documentId: document.id,
+      currentUserId: owner.user.id,
+      query: "teammate",
+    })).toEqual([{
+      userId: teammate.user.id,
+      name: teammate.user.name,
+      email: teammate.user.email,
+    }]);
   });
 });

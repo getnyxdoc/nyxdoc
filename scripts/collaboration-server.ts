@@ -61,9 +61,7 @@ type ConnectionContext = {
 type AgentCredentialRow = {
   scopes_json: string;
   root_document_id: string | null;
-  role: "admin" | "editor" | "viewer";
-  permission_allow_json: string;
-  permission_deny_json: string;
+  capabilities_json: string;
 };
 
 function permissionList(value: string) {
@@ -334,15 +332,22 @@ function validateWebSocketClaims(token: string, documentName: string) {
 
   if (claims.actor.type === "agent") {
     const row = sqlite.prepare(
-      `SELECT credential.scopes_json, membership.root_document_id, membership.role,
-              membership.permission_allow_json, membership.permission_deny_json
+      `SELECT credential.scopes_json, membership.root_document_id,
+              membership.capabilities_json
        FROM agent_credentials credential
+       JOIN agents agent ON agent.id = credential.agent_id
        JOIN workspace_agents membership
          ON membership.agent_identity_id = credential.agent_id
         AND membership.workspace_id = ?
+       JOIN agent_credential_grant_bindings binding
+         ON binding.credential_id = credential.id
+        AND binding.grant_id = membership.id
+        AND binding.status = 'active' AND binding.revoked_at IS NULL
        JOIN workspaces workspace ON workspace.id = membership.workspace_id
        WHERE credential.id = ? AND credential.agent_id = ?
          AND credential.revoked_at IS NULL AND membership.status = 'active'
+         AND membership.revoked_at IS NULL
+         AND agent.status = 'active' AND agent.deleted_at IS NULL AND agent.purged_at IS NULL
          AND workspace.lifecycle_state = 'active'
          AND (credential.expires_at IS NULL OR credential.expires_at > ?)`,
     ).get(
@@ -357,11 +362,7 @@ function validateWebSocketClaims(token: string, documentName: string) {
       throw new DocumentServiceError("FORBIDDEN", "에이전트에 문서 읽기 권한이 없습니다.");
     }
     assertAgentDocumentScope(claims.workspaceId, claims.documentId, row.root_document_id);
-    const principal = {
-      role: row.role,
-      permissionAllow: permissionList(row.permission_allow_json),
-      permissionDeny: permissionList(row.permission_deny_json),
-    };
+    const principal = { capabilities: permissionList(row.capabilities_json) };
     const writeAllowed = scopes.includes("documents:write") && agentPrincipalAllows(principal, "documents.update");
     const commitAllowed = scopes.includes("documents:commit") && agentPrincipalAllows(principal, "documents.commit");
     if (claims.permissions.write && !writeAllowed) {

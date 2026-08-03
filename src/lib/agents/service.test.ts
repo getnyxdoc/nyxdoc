@@ -9,6 +9,7 @@ import {
   purgeAccountAgent,
   purgeExpiredAccountAgents,
   restoreAccountAgent,
+  rotateAgentCredential,
   updateAccountAgent,
   updateAgentCredential,
   updateAgentWorkspaceMembership,
@@ -38,7 +39,7 @@ describe("global agents and workspace memberships", () => {
       userId: user.id,
       workspaceId: workspace.id,
       agent: { mode: "new", displayName: "Nyxdoc Builder" },
-      role: "admin",
+      accessProfile: "writer",
       rootDocumentId: null,
       credential: {
         mode: "new",
@@ -51,32 +52,31 @@ describe("global agents and workspace memberships", () => {
       agent: { displayName: "Nyxdoc Builder", status: "active" },
       membership: {
         workspaceId: workspace.id,
-        role: "admin",
+        accessProfile: "writer",
         rootDocumentId: null,
       },
       credential: {
         name: "Nyxdoc Builder key",
         defaultWorkspaceId: workspace.id,
-        workspaceAllowlist: [],
+        workspaceIds: [workspace.id],
       },
-      expandedCredentialWorkspaceAllowlist: false,
     });
     expect(connected.token).toMatch(/^nyx_live_/);
-    expect(connected.credential.scopes).toEqual([
+    expect(connected.credential!.scopes).toEqual([
       "documents:read",
       "documents:write",
       "documents:commit",
       "changes:read",
-      "revisions:restore",
     ]);
     expect(authenticateApiToken(database, `Bearer ${connected.token}`)).toMatchObject({
       globalAgentId: connected.agent.id,
       workspaceId: workspace.id,
-      role: "admin",
+      accessProfile: "writer",
+      capabilities: expect.arrayContaining(["documents.read", "documents.update", "documents.commit"]),
     });
   });
 
-  it("reuses a global credential and expands an explicit workspace allowlist", () => {
+  it("binds an existing credential to a new grant without changing its scopes", () => {
     const database = createTestDatabase();
     databases.push(database);
     const { user, workspace: first } = createTestUser(database);
@@ -86,7 +86,7 @@ describe("global agents and workspace memberships", () => {
       userId: user.id,
       workspaceId: first.id,
       agentId: agent.id,
-      role: "editor",
+      accessProfile: "writer",
     });
     const created = createAgentCredential(database, {
       userId: user.id,
@@ -101,21 +101,71 @@ describe("global agents and workspace memberships", () => {
       userId: user.id,
       workspaceId: second.id,
       agent: { mode: "existing", agentId: agent.id },
-      role: "editor",
+      accessProfile: "writer",
       rootDocumentId: null,
       credential: { mode: "existing", credentialId: created.credential.id },
     });
 
     expect(connected.token).toBeNull();
-    expect(connected.expandedCredentialWorkspaceAllowlist).toBe(true);
-    expect(connected.credential.workspaceAllowlist).toEqual([first.id, second.id]);
+    expect(connected.credential!.workspaceIds).toEqual([first.id, second.id]);
+    expect(connected.credential!.scopes).toEqual(created.credential.scopes);
     expect(authenticateApiToken(database, `Bearer ${created.token}`, {
       workspaceId: second.id,
     })).toMatchObject({
       globalAgentId: agent.id,
       workspaceId: second.id,
-      role: "editor",
+      accessProfile: "writer",
     });
+  });
+
+  it("preserves every active credential binding when rotating a key", () => {
+    const database = createTestDatabase();
+    databases.push(database);
+    const { user, workspace: first } = createTestUser(database);
+    const second = createWorkspace(database, user, "Threads");
+    const agent = createAccountAgent(database, { userId: user.id, displayName: "Shared Agent" });
+    assignAgentToWorkspace(database, {
+      userId: user.id,
+      workspaceId: first.id,
+      agentId: agent.id,
+      accessProfile: "writer",
+    });
+    const created = createAgentCredential(database, {
+      userId: user.id,
+      agentId: agent.id,
+      name: "Shared key",
+      defaultWorkspaceId: first.id,
+      workspaceAllowlist: [first.id],
+    });
+
+    connectAgentToWorkspace(database, {
+      userId: user.id,
+      workspaceId: second.id,
+      agent: { mode: "existing", agentId: agent.id },
+      accessProfile: "writer",
+      rootDocumentId: null,
+      credential: { mode: "existing", credentialId: created.credential.id },
+    });
+
+    // The legacy allowlist remains stale after an existing key is bound to a
+    // second grant. Rotation must use the binding table instead.
+    expect(database.prepare(
+      "SELECT workspace_allowlist_json FROM agent_credentials WHERE id = ?",
+    ).get(created.credential.id)).toEqual({ workspace_allowlist_json: JSON.stringify([first.id]) });
+
+    const rotated = rotateAgentCredential(database, {
+      userId: user.id,
+      agentId: agent.id,
+      credentialId: created.credential.id,
+    });
+
+    expect(rotated.credential.workspaceIds.sort()).toEqual([first.id, second.id].sort());
+    expect(authenticateApiToken(database, `Bearer ${rotated.token}`, {
+      workspaceId: first.id,
+    }).workspaceId).toBe(first.id);
+    expect(authenticateApiToken(database, `Bearer ${rotated.token}`, {
+      workspaceId: second.id,
+    }).workspaceId).toBe(second.id);
   });
 
   it("reuses a legacy write credential as an editor credential", () => {
@@ -128,7 +178,7 @@ describe("global agents and workspace memberships", () => {
       userId: user.id,
       workspaceId: first.id,
       agentId: agent.id,
-      role: "editor",
+      accessProfile: "writer",
     });
     const created = createAgentCredential(database, {
       userId: user.id,
@@ -136,6 +186,7 @@ describe("global agents and workspace memberships", () => {
       name: "Legacy gameroom key",
       scopes: ["documents:read", "documents:write", "documents:commit", "changes:read"],
       defaultWorkspaceId: first.id,
+      workspaceAllowlist: [first.id],
     });
     database.prepare("UPDATE agent_credentials SET scopes_json = ? WHERE id = ?").run(
       JSON.stringify(["documents:read", "documents:write", "changes:read"]),
@@ -149,20 +200,46 @@ describe("global agents and workspace memberships", () => {
       userId: user.id,
       workspaceId: second.id,
       agent: { mode: "existing", agentId: agent.id },
-      role: "editor",
+      accessProfile: "writer",
       rootDocumentId: null,
       credential: { mode: "existing", credentialId: created.credential.id },
     });
 
     expect(connected.token).toBeNull();
-    expect(connected.credential.id).toBe(created.credential.id);
+    expect(connected.credential!.id).toBe(created.credential.id);
     expect(connected.membership).toMatchObject({
       workspaceId: second.id,
-      role: "editor",
+      accessProfile: "writer",
     });
     expect(authenticateApiToken(database, `Bearer ${created.token}`, {
       workspaceId: second.id,
     }).workspaceId).toBe(second.id);
+  });
+
+  it("saves a workspace grant without a credential and leaves the agent unable to connect", () => {
+    const database = createTestDatabase();
+    databases.push(database);
+    const { user, workspace } = createTestUser(database);
+
+    const connected = connectAgentToWorkspace(database, {
+      userId: user.id,
+      workspaceId: workspace.id,
+      agent: { mode: "new", displayName: "Offline Agent" },
+      accessProfile: "drafter",
+      rootDocumentId: null,
+      credential: { mode: "later" },
+    });
+
+    expect(connected).toMatchObject({
+      membership: { accessProfile: "drafter", workspaceId: workspace.id },
+      credential: null,
+      binding: null,
+      token: null,
+    });
+    expect(connected.agent.credentials).toEqual([]);
+    expect(database.prepare(
+      "SELECT COUNT(*) AS count FROM agent_credential_grant_bindings WHERE grant_id = ? AND status = 'active'",
+    ).get(connected.membership.membershipId)).toEqual({ count: 0 });
   });
 
   it("rolls back a newly created identity when a later connection step fails", () => {
@@ -174,7 +251,7 @@ describe("global agents and workspace memberships", () => {
       userId: user.id,
       workspaceId: workspace.id,
       agent: { mode: "new", displayName: "Rolled Back Agent" },
-      role: "editor",
+      accessProfile: "writer",
       rootDocumentId: "00000000-0000-4000-8000-000000000099",
       credential: {
         mode: "new",
@@ -195,13 +272,13 @@ describe("global agents and workspace memberships", () => {
       userId: user.id,
       workspaceId: first.id,
       agentId: agent.id,
-      role: "admin",
+      accessProfile: "writer",
     });
     const secondMembership = assignAgentToWorkspace(database, {
       userId: user.id,
       workspaceId: second.id,
       agentId: agent.id,
-      role: "viewer",
+      accessProfile: "reader",
     });
     const created = createAgentCredential(database, {
       userId: user.id,
@@ -210,6 +287,7 @@ describe("global agents and workspace memberships", () => {
       scopes: ["documents:read", "documents:write", "documents:commit", "changes:read"],
       defaultWorkspaceId: first.id,
       ipAllowlist: ["203.0.113.0/24"],
+      workspaceAllowlist: [first.id, second.id],
     });
     const credentialAudits = database.prepare(
       `SELECT workspace_id, metadata_json FROM workspace_audit_events
@@ -225,7 +303,8 @@ describe("global agents and workspace memberships", () => {
       globalAgentId: agent.id,
       agentId: firstMembership.membershipId,
       workspaceId: first.id,
-      role: "admin",
+      accessProfile: "writer",
+      capabilities: expect.arrayContaining(["documents.update", "documents.commit"]),
     });
     expect(() => requireTokenScope(firstIdentity, "documents:commit")).not.toThrow();
 
@@ -237,7 +316,8 @@ describe("global agents and workspace memberships", () => {
       globalAgentId: agent.id,
       agentId: secondMembership.membershipId,
       workspaceId: second.id,
-      role: "viewer",
+      accessProfile: "reader",
+      capabilities: expect.not.arrayContaining(["documents.update", "documents.commit"]),
     });
     expect(() => requireTokenScope(secondIdentity, "documents:write"))
       .toThrowError(expect.objectContaining({ code: "FORBIDDEN" }));
@@ -256,7 +336,7 @@ describe("global agents and workspace memberships", () => {
       ipAllowlist: ["203.0.113.0/24"],
       expiresAt: null,
     });
-    expect(updatedCredential.workspaceAllowlist).toEqual([second.id]);
+    expect(updatedCredential.workspaceIds).toEqual([second.id]);
     expect(authenticateApiToken(database, `Bearer ${created.token}`, {
       clientIp: "203.0.113.88",
     }).workspaceId).toBe(second.id);
@@ -275,13 +355,14 @@ describe("global agents and workspace memberships", () => {
       userId: user.id,
       workspaceId: workspace.id,
       agentId: agent.id,
-      role: "editor",
+      accessProfile: "writer",
     });
     const created = createAgentCredential(database, {
       userId: user.id,
       agentId: agent.id,
       name: "Nyx key",
       defaultWorkspaceId: workspace.id,
+      workspaceAllowlist: [workspace.id],
     });
 
     updateAccountAgent(database, { userId: user.id, agentId: agent.id, status: "disabled" });
@@ -294,10 +375,9 @@ describe("global agents and workspace memberships", () => {
       userId: user.id,
       workspaceId: workspace.id,
       agentId: agent.id,
-      role: "editor",
+      accessProfile: "custom",
+      capabilities: ["workspace.read", "agents.read", "documents.read", "documents.update", "revisions.read", "changes.read"],
       rootDocumentId: null,
-      permissionAllow: [],
-      permissionDeny: ["documents.commit"],
       status: "active",
     });
     const identity = authenticateApiToken(database, `Bearer ${created.token}`);
@@ -315,13 +395,14 @@ describe("global agents and workspace memberships", () => {
       userId: user.id,
       workspaceId: workspace.id,
       agentId: agent.id,
-      role: "admin",
+      accessProfile: "writer",
     });
     const firstCredential = createAgentCredential(database, {
       userId: user.id,
       agentId: agent.id,
       name: "Gameroom key",
       defaultWorkspaceId: workspace.id,
+      workspaceAllowlist: [workspace.id],
     });
     const deletedAt = "2026-07-17T00:00:00.000Z";
 
@@ -362,10 +443,8 @@ describe("global agents and workspace memberships", () => {
       userId: user.id,
       workspaceId: workspace.id,
       agentId: agent.id,
-      role: "admin",
+      accessProfile: "writer",
       rootDocumentId: null,
-      permissionAllow: [],
-      permissionDeny: [],
       status: "active",
     });
     const replacement = createAgentCredential(database, {
@@ -373,6 +452,7 @@ describe("global agents and workspace memberships", () => {
       agentId: agent.id,
       name: "Replacement key",
       defaultWorkspaceId: workspace.id,
+      workspaceAllowlist: [workspace.id],
     });
     expect(authenticateApiToken(database, `Bearer ${replacement.token}`)).toMatchObject({
       globalAgentId: agent.id,
@@ -419,13 +499,14 @@ describe("global agents and workspace memberships", () => {
       userId: user.id,
       workspaceId: workspace.id,
       agentId: agent.id,
-      role: "editor",
+      accessProfile: "writer",
     });
     createAgentCredential(database, {
       userId: user.id,
       agentId: agent.id,
       name: "Gameroom key",
       defaultWorkspaceId: workspace.id,
+      workspaceAllowlist: [workspace.id],
     });
     deleteAccountAgent(database, {
       userId: user.id,

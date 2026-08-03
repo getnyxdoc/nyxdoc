@@ -534,7 +534,7 @@ function expectCapabilityVersion(value: unknown) {
   const content = value as {
     capabilities?: { protocolVersion?: string };
   };
-  assert.equal(content.capabilities?.protocolVersion, "4.10.0");
+  assert.equal(content.capabilities?.protocolVersion, "5.0.0");
 }
 
 main().catch((error) => {

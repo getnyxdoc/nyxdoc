@@ -3,7 +3,6 @@ import path from "node:path";
 import {
   agentPrincipalAllows,
   WORKSPACE_PERMISSIONS,
-  type AgentWorkspaceRole,
   type WorkspacePermission,
 } from "@/lib/authz/permissions";
 import type { NyxDatabase } from "@/lib/db/client";
@@ -78,11 +77,10 @@ function workspacePrincipal(identity: ApiTokenIdentity) {
     workspaceId: identity.workspaceId,
     membershipId: identity.agentId,
     agentId: identity.globalAgentId,
-    role: identity.role,
+    accessProfile: identity.accessProfile,
+    capabilities: identity.capabilities,
     displayName: identity.name,
     avatarMediaId: identity.avatarMediaId,
-    permissionAllow: identity.permissionAllow,
-    permissionDeny: identity.permissionDeny,
   };
 }
 
@@ -212,8 +210,9 @@ function requireCurrentTicketAccess(database: NyxDatabase, ticket: UploadTicketR
     `SELECT credential.scopes_json, credential.created_by_user_id,
             credential.expires_at AS credential_expires_at,
             credential.revoked_at, agent.status AS agent_status,
-            membership.status AS membership_status, membership.role,
-            membership.permission_allow_json, membership.permission_deny_json,
+            membership.status AS membership_status,
+            membership.revoked_at AS membership_revoked_at,
+            membership.access_profile, membership.capabilities_json,
             workspace.lifecycle_state,
             ownership.owner_type, ownership.owner_user_id,
             ownership.organization_id, agent_owner.owner_type AS agent_owner_type,
@@ -227,6 +226,11 @@ function requireCurrentTicketAccess(database: NyxDatabase, ticket: UploadTicketR
        ON membership.id = ?
       AND membership.workspace_id = ?
       AND membership.agent_identity_id = credential.agent_id
+     JOIN agent_credential_grant_bindings binding
+       ON binding.credential_id = credential.id
+      AND binding.grant_id = membership.id
+      AND binding.status = 'active'
+      AND binding.revoked_at IS NULL
      JOIN workspaces workspace ON workspace.id = membership.workspace_id
      JOIN workspace_ownership ownership ON ownership.workspace_id = workspace.id
      JOIN agent_ownership agent_owner ON agent_owner.agent_id = credential.agent_id
@@ -249,15 +253,14 @@ function requireCurrentTicketAccess(database: NyxDatabase, ticket: UploadTicketR
     created_by_user_id: string;
     lifecycle_state: string;
     membership_status: string;
+    membership_revoked_at: string | null;
     organization_id: string | null;
     organization_lifecycle_state: string | null;
     organization_member_id: string | null;
     owner_type: "personal" | "organization";
     owner_user_id: string | null;
-    permission_allow_json: string;
-    permission_deny_json: string;
+    capabilities_json: string;
     revoked_at: string | null;
-    role: AgentWorkspaceRole;
     scopes_json: string;
   } | undefined;
 
@@ -273,6 +276,7 @@ function requireCurrentTicketAccess(database: NyxDatabase, ticket: UploadTicketR
     || (current.credential_expires_at && current.credential_expires_at <= now)
     || current.agent_status !== "active"
     || current.membership_status !== "active"
+    || current.membership_revoked_at
     || current.lifecycle_state !== "active"
     || (current.owner_type === "organization" && current.organization_lifecycle_state !== "active")
     || !namespaceAllowed
@@ -281,18 +285,14 @@ function requireCurrentTicketAccess(database: NyxDatabase, ticket: UploadTicketR
   }
 
   const scopes = parseStringList<ApiTokenScope>(current.scopes_json);
-  const permissionAllow = parseStringList<WorkspacePermission>(
-    current.permission_allow_json,
-    WORKSPACE_PERMISSIONS,
-  );
-  const permissionDeny = parseStringList<WorkspacePermission>(
-    current.permission_deny_json,
+  const capabilities = parseStringList<WorkspacePermission>(
+    current.capabilities_json,
     WORKSPACE_PERMISSIONS,
   );
   if (
     !scopes.includes("documents:write")
-    || !agentPrincipalAllows({ role: current.role, permissionAllow, permissionDeny }, "documents.update")
-    || !agentPrincipalAllows({ role: current.role, permissionAllow, permissionDeny }, "media.upload")
+    || !agentPrincipalAllows({ capabilities }, "documents.update")
+    || !agentPrincipalAllows({ capabilities }, "media.upload")
   ) {
     throw new MediaServiceError("UNAUTHORIZED", "이미지 업로드 권한이 더 이상 유효하지 않습니다.");
   }

@@ -10,7 +10,9 @@ import {
 import {
   getHumanWorkspacePrincipal,
   humanRoleAllows,
-  type AgentWorkspaceRole,
+  type AgentAccessProfile,
+  type WorkspacePermission,
+  WORKSPACE_PERMISSIONS,
 } from "@/lib/authz/permissions";
 import type { NyxDatabase } from "@/lib/db/client";
 import {
@@ -32,6 +34,8 @@ export const MCP_OAUTH_SCOPES = [
   ...API_TOKEN_SCOPES,
 ] as const;
 export const MCP_OAUTH_DEFAULT_SCOPE = MCP_OAUTH_SCOPES.join(" ");
+export const MCP_OAUTH_ACCESS_PROFILES = ["reader", "drafter", "writer"] as const;
+export type McpOAuthAccessProfile = (typeof MCP_OAUTH_ACCESS_PROFILES)[number];
 
 export class McpOAuthError extends Error {
   constructor(
@@ -59,13 +63,28 @@ type GrantRow = {
 };
 
 type MembershipRow = {
-  role: AgentWorkspaceRole;
   status: "active" | "disabled";
 };
 
 export type McpOAuthAgentSelection =
   | { mode: "new"; displayName: string }
   | { mode: "existing"; agentId: string };
+
+export type ProvisionMcpOAuthGrantInput = {
+  userId: string;
+  clientId: string;
+  clientName: string;
+  requestedScopes: string | readonly string[];
+  workspaceIds: string[];
+  accessProfile: McpOAuthAccessProfile;
+  agent: McpOAuthAgentSelection;
+};
+
+export type McpOAuthWorkspaceAccess = {
+  workspaceId: string;
+  accessProfile: AgentAccessProfile;
+  effectiveCapabilities: WorkspacePermission[];
+};
 
 function parseApiScopes(value: string | readonly string[]) {
   let values: readonly string[];
@@ -85,6 +104,19 @@ function parseApiScopes(value: string | readonly string[]) {
   }
   return Array.from(new Set(values.filter((scope): scope is ApiTokenScope =>
     API_TOKEN_SCOPES.includes(scope as ApiTokenScope))));
+}
+
+function parseWorkspacePermissions(value: string) {
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    return Array.isArray(parsed)
+      ? parsed.filter((permission): permission is WorkspacePermission =>
+        typeof permission === "string"
+        && WORKSPACE_PERMISSIONS.includes(permission as WorkspacePermission))
+      : [];
+  } catch {
+    return [];
+  }
 }
 
 export function getMcpOAuthClient(database: NyxDatabase, clientId: string) {
@@ -158,11 +190,11 @@ function validateApiScopeDependencies(scopes: ApiTokenScope[]) {
   if (scopes.includes("documents:write") && !scopes.includes("documents:read")) {
     throw new McpOAuthError("INVALID_INPUT", "documents:write requires documents:read.");
   }
-  if (scopes.includes("documents:commit") && !scopes.includes("documents:write")) {
-    throw new McpOAuthError("INVALID_INPUT", "documents:commit requires documents:write.");
+  if (scopes.includes("documents:commit") && !scopes.includes("documents:read")) {
+    throw new McpOAuthError("INVALID_INPUT", "documents:commit requires documents:read.");
   }
-  if (scopes.includes("revisions:restore") && !scopes.includes("documents:commit")) {
-    throw new McpOAuthError("INVALID_INPUT", "revisions:restore requires documents:commit.");
+  if (scopes.includes("revisions:restore") && !scopes.includes("documents:read")) {
+    throw new McpOAuthError("INVALID_INPUT", "revisions:restore requires documents:read.");
   }
   return scopes;
 }
@@ -298,35 +330,27 @@ export function getMcpOAuthConsentState(
 ) {
   const grant = grantForClient(database, input.userId, input.clientId);
   const agents = listMcpOAuthConsentAgents(database, input.userId);
-  const allowedWorkspaceIds = grant
+  const workspaceAccess = grant
     ? (database.prepare(
-      `SELECT workspace_allowlist_json
-       FROM agent_credentials
-       WHERE id = ? AND agent_id = ? AND revoked_at IS NULL`,
-    ).get(grant.credential_id, grant.agent_id) as {
-      workspace_allowlist_json: string;
-    } | undefined)
-    : undefined;
-  let selectedWorkspaceIds: string[] = [];
-  try {
-    const parsed = allowedWorkspaceIds
-      ? JSON.parse(allowedWorkspaceIds.workspace_allowlist_json) as unknown
-      : [];
-    if (Array.isArray(parsed)) {
-      selectedWorkspaceIds = parsed.filter((id): id is string => typeof id === "string");
-    }
-  } catch {
-    selectedWorkspaceIds = [];
-  }
-  const existingRole = grant && selectedWorkspaceIds[0]
-    ? database.prepare(
-      `SELECT role
-       FROM workspace_agents
-       WHERE workspace_id = ? AND agent_identity_id = ? AND status = 'active'`,
-    ).get(selectedWorkspaceIds[0], grant.agent_id) as {
-      role: AgentWorkspaceRole;
-    } | undefined
-    : undefined;
+      `SELECT membership.workspace_id, membership.access_profile, membership.capabilities_json
+       FROM agent_credential_grant_bindings binding
+       JOIN workspace_agents membership ON membership.id = binding.grant_id
+       WHERE binding.credential_id = ?
+         AND binding.status = 'active' AND binding.revoked_at IS NULL
+         AND membership.status = 'active' AND membership.revoked_at IS NULL
+       ORDER BY membership.workspace_id`,
+    ).all(grant.credential_id) as Array<{
+      workspace_id: string;
+      access_profile: AgentAccessProfile;
+      capabilities_json: string;
+    }>)
+      .map((row): McpOAuthWorkspaceAccess => ({
+        workspaceId: row.workspace_id,
+        accessProfile: row.access_profile,
+        effectiveCapabilities: parseWorkspacePermissions(row.capabilities_json),
+      }))
+    : [];
+  const selectedWorkspaceIds = workspaceAccess.map((access) => access.workspaceId);
   return {
     grant: grant ? {
       id: grant.id,
@@ -337,8 +361,8 @@ export function getMcpOAuthConsentState(
     requestedScopes: validateApiScopeDependencies(
       parseApiScopes(input.requestedScopes),
     ),
-    role: existingRole?.role ?? "editor",
     selectedWorkspaceIds,
+    workspaceAccess,
     workspaces: listMcpOAuthConsentWorkspaces(database, input.userId),
     agents,
     initialAgent: grant && agents.some((agent) => agent.id === grant.agent_id)
@@ -357,17 +381,9 @@ export function getMcpOAuthConsentState(
   };
 }
 
-export function provisionMcpOAuthGrant(
+function prepareMcpOAuthGrant(
   database: NyxDatabase,
-  input: {
-    userId: string;
-    clientId: string;
-    clientName: string;
-    requestedScopes: string | readonly string[];
-    workspaceIds: string[];
-    role: AgentWorkspaceRole;
-    agent: McpOAuthAgentSelection;
-  },
+  input: ProvisionMcpOAuthGrantInput,
 ) {
   const clientId = input.clientId.trim();
   const clientName = input.clientName.trim().slice(0, 120) || "MCP client";
@@ -377,6 +393,9 @@ export function provisionMcpOAuthGrant(
   }
   if (!workspaceIds.length) {
     throw new McpOAuthError("INVALID_INPUT", "Select at least one workspace.");
+  }
+  if (!MCP_OAUTH_ACCESS_PROFILES.includes(input.accessProfile)) {
+    throw new McpOAuthError("INVALID_INPUT", "The OAuth access profile is invalid.");
   }
   const available = new Set(
     listMcpOAuthConsentWorkspaces(database, input.userId).map((workspace) => workspace.id),
@@ -389,6 +408,12 @@ export function provisionMcpOAuthGrant(
   }
   const scopes = validateApiScopeDependencies(parseApiScopes(input.requestedScopes));
   const agentSelection = input.agent;
+  if (
+    agentSelection.mode === "new"
+    && (!agentSelection.displayName.trim() || agentSelection.displayName.trim().length > 80)
+  ) {
+    throw new McpOAuthError("INVALID_INPUT", "The OAuth agent name is invalid.");
+  }
   const availableAgents = listMcpOAuthConsentAgents(database, input.userId);
   if (
     agentSelection.mode === "existing"
@@ -399,6 +424,78 @@ export function provisionMcpOAuthGrant(
       "The selected agent is not active or cannot be managed by this user.",
     );
   }
+
+  if (agentSelection.mode === "existing") {
+    for (const workspaceId of workspaceIds) {
+      const membership = database.prepare(
+        `SELECT status
+         FROM workspace_agents
+         WHERE workspace_id = ? AND agent_identity_id = ? AND revoked_at IS NULL`,
+      ).get(workspaceId, agentSelection.agentId) as MembershipRow | undefined;
+      if (membership && membership.status !== "active") {
+        throw new McpOAuthError(
+          "FORBIDDEN",
+          "This agent has inactive workspace access. Activate or replace that workspace grant before OAuth consent.",
+        );
+      }
+    }
+  }
+
+  return {
+    clientId,
+    clientName,
+    workspaceIds,
+    scopes,
+    agentSelection,
+  };
+}
+
+export function validateMcpOAuthGrantProvisioning(
+  database: NyxDatabase,
+  input: ProvisionMcpOAuthGrantInput,
+) {
+  const prepared = prepareMcpOAuthGrant(database, input);
+  return {
+    clientId: prepared.clientId,
+    clientName: prepared.clientName,
+    workspaceIds: prepared.workspaceIds,
+    scopes: prepared.scopes,
+    accessProfile: input.accessProfile,
+    agent: prepared.agentSelection,
+  };
+}
+
+export async function completeMcpOAuthConsent<T>(
+  database: NyxDatabase,
+  input: {
+    provisioning: ProvisionMcpOAuthGrantInput | null;
+    providerConsent: () => Promise<T>;
+  },
+) {
+  // Validate every Nyxdoc-side precondition before asking the OAuth provider
+  // to finalize consent. More importantly, do not mutate grants, credentials,
+  // bindings, or existing OAuth tokens until provider consent has succeeded.
+  if (input.provisioning) {
+    validateMcpOAuthGrantProvisioning(database, input.provisioning);
+  }
+  const result = await input.providerConsent();
+  if (input.provisioning) {
+    provisionMcpOAuthGrant(database, input.provisioning);
+  }
+  return result;
+}
+
+export function provisionMcpOAuthGrant(
+  database: NyxDatabase,
+  input: ProvisionMcpOAuthGrantInput,
+) {
+  const {
+    clientId,
+    clientName,
+    workspaceIds,
+    scopes,
+    agentSelection,
+  } = prepareMcpOAuthGrant(database, input);
 
   return database.transaction(() => {
     const existing = grantForClient(database, input.userId, clientId);
@@ -419,19 +516,28 @@ export function provisionMcpOAuthGrant(
 
     for (const workspaceId of workspaceIds) {
       const membership = database.prepare(
-        `SELECT role, status
+        `SELECT status
          FROM workspace_agents
-         WHERE workspace_id = ? AND agent_identity_id = ?`,
+         WHERE workspace_id = ? AND agent_identity_id = ? AND revoked_at IS NULL`,
       ).get(workspaceId, agentId) as MembershipRow | undefined;
-      if (!membership || membership.status !== "active") {
+      if (!membership) {
         assignAgentToWorkspace(database, {
           userId: input.userId,
           workspaceId,
           agentId,
-          role: input.role,
+          accessProfile: input.accessProfile,
         });
         continue;
       }
+      if (membership.status !== "active") {
+        throw new McpOAuthError(
+          "FORBIDDEN",
+          "This agent has inactive workspace access. Activate or replace that workspace grant before OAuth consent.",
+        );
+      }
+      // OAuth consent controls this OAuth credential and its explicit grant
+      // bindings. Existing workspace grants are managed separately and must
+      // never be broadened or narrowed as a side effect of re-consent.
     }
 
     const currentCredential = existing
@@ -516,7 +622,7 @@ export function provisionMcpOAuthGrant(
       credentialId,
       scopes,
       workspaceIds,
-      role: input.role,
+      accessProfile: input.accessProfile,
       status: "active" as const,
     };
   }).immediate();

@@ -69,6 +69,8 @@ type AgentTransferRow = {
 type CredentialTransferRow = {
   id: string;
   root_document_id: string | null;
+  legacy_root_document_id: string | null;
+  legacy_token_id: string | null;
 };
 
 type MediaTransferRow = {
@@ -543,7 +545,17 @@ function prepareWorkspaceTreeTransfer(
     if (input.agentId && agent?.workspace_id === input.targetWorkspaceId) {
       const misplacedCredentials = count(
         database,
-        "SELECT COUNT(*) AS count FROM workspace_api_tokens WHERE agent_id = ? AND workspace_id <> ?",
+        `SELECT COUNT(*) AS count
+         FROM workspace_api_tokens legacy
+         JOIN agent_credential_grant_bindings binding
+           ON binding.credential_id = legacy.id
+          AND binding.grant_id = ?
+          AND binding.status = 'active'
+          AND binding.revoked_at IS NULL
+         JOIN agent_credentials credential
+           ON credential.id = binding.credential_id
+          AND credential.revoked_at IS NULL
+         WHERE legacy.workspace_id <> ?`,
         input.agentId,
         input.targetWorkspaceId,
       );
@@ -645,11 +657,35 @@ function prepareWorkspaceTreeTransfer(
   }
   const credentials = agent
     ? database.prepare(
-      "SELECT id, root_document_id FROM workspace_api_tokens WHERE agent_id = ? AND workspace_id = ?",
-    ).all(agent.id, input.sourceWorkspaceId) as CredentialTransferRow[]
+      `SELECT credential.id,
+              grant.root_document_id,
+              legacy.root_document_id AS legacy_root_document_id,
+              legacy.id AS legacy_token_id
+       FROM agent_credential_grant_bindings binding
+       JOIN agent_credentials credential
+         ON credential.id = binding.credential_id
+        AND credential.revoked_at IS NULL
+       JOIN workspace_agents grant
+         ON grant.id = binding.grant_id
+        AND grant.workspace_id = ?
+        AND grant.status = 'active'
+        AND grant.revoked_at IS NULL
+       LEFT JOIN workspace_api_tokens legacy
+         ON legacy.id = credential.id
+        AND legacy.workspace_id = grant.workspace_id
+        AND legacy.agent_id = grant.id
+       WHERE binding.grant_id = ?
+         AND binding.status = 'active'
+         AND binding.revoked_at IS NULL
+       ORDER BY credential.id`,
+    ).all(input.sourceWorkspaceId, agent.id) as CredentialTransferRow[]
     : [];
   for (const credential of credentials) {
-    if (credential.root_document_id && !documentIdSet.has(credential.root_document_id)) {
+    const rootDocumentIds = new Set([
+      credential.root_document_id,
+      credential.legacy_root_document_id,
+    ].filter((documentId): documentId is string => documentId !== null));
+    if ([...rootDocumentIds].some((documentId) => !documentIdSet.has(documentId))) {
       blockers.push(`연결 키 ${credential.id}의 문서 범위가 이전 트리 밖을 가리킵니다.`);
     }
   }
@@ -859,7 +895,9 @@ export function applyWorkspaceTreeTransfer(
     const now = new Date().toISOString();
     const documentIds = prepared.documents.map((document) => document.id);
     const mediaIds = prepared.media.map((media) => media.id);
-    const credentialIds = prepared.credentials.map((credential) => credential.id);
+    const legacyCredentialIds = prepared.credentials
+      .filter((credential) => credential.legacy_token_id !== null)
+      .map((credential) => credential.id);
 
     if (prepared.agent?.avatar_media_id && mediaIds.includes(prepared.agent.avatar_media_id)) {
       database.prepare("UPDATE workspace_agents SET avatar_media_id = NULL WHERE id = ?")
@@ -914,10 +952,11 @@ export function applyWorkspaceTreeTransfer(
       if (changed.changes !== 1) throw new Error(`Agent ${prepared.agent.id} was not transferred.`);
     }
     for (const credential of prepared.credentials) {
-      const changed = database.prepare(
+      // workspace_api_tokens is retained only as a compatibility projection.
+      // A canonical credential may have an active binding without a legacy row.
+      database.prepare(
         "UPDATE workspace_api_tokens SET workspace_id = ? WHERE id = ? AND workspace_id = ?",
       ).run(input.targetWorkspaceId, credential.id, input.sourceWorkspaceId);
-      if (changed.changes !== 1) throw new Error(`Credential ${credential.id} was not transferred.`);
       const canonical = database.prepare(
         `SELECT default_workspace_id, workspace_allowlist_json
          FROM agent_credentials WHERE id = ?`,
@@ -985,15 +1024,15 @@ export function applyWorkspaceTreeTransfer(
       .run(now, input.sourceWorkspaceId, input.targetWorkspaceId);
     assertDatabaseIntegrity(database);
 
-    if (credentialIds.length) {
+    if (legacyCredentialIds.length) {
       const movedCredentials = count(
         database,
         `SELECT COUNT(*) AS count FROM workspace_api_tokens
-         WHERE workspace_id = ? AND id IN (${placeholders(credentialIds)})`,
+         WHERE workspace_id = ? AND id IN (${placeholders(legacyCredentialIds)})`,
         input.targetWorkspaceId,
-        ...credentialIds,
+        ...legacyCredentialIds,
       );
-      if (movedCredentials !== credentialIds.length) throw new Error("Credential transfer count mismatch.");
+      if (movedCredentials !== legacyCredentialIds.length) throw new Error("Legacy credential transfer count mismatch.");
     }
   }).immediate();
 

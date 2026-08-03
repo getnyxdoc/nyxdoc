@@ -2,8 +2,11 @@ import { createHash, randomBytes, randomUUID } from "node:crypto";
 import {
   WORKSPACE_PERMISSIONS,
   agentPrincipalAllows,
+  listAgentProfilePermissions,
+  listAgentRolePermissions,
   recordWorkspaceAuditEvent,
   requireHumanWorkspacePermission,
+  type AgentAccessProfile,
   type AgentWorkspaceRole,
   type WorkspacePermission,
 } from "@/lib/authz/permissions";
@@ -41,14 +44,13 @@ export type ApiTokenIdentity = {
   userId: string;
   name: string;
   avatarMediaId: string | null;
-  role: AgentWorkspaceRole;
+  accessProfile: AgentAccessProfile;
+  capabilities: WorkspacePermission[];
+  bindingId: string;
   prefix: string;
   scopes: ApiTokenScope[];
   lastEventCursor: number;
   rootDocumentId: string | null;
-  permissionAllow: WorkspacePermission[];
-  permissionDeny: WorkspacePermission[];
-  workspaceAllowlist: string[];
   ipAllowlist: string[];
 };
 
@@ -66,7 +68,8 @@ export type ApiTokenSummary = {
   agentId: string;
   name: string;
   avatarMediaId: string | null;
-  role: AgentWorkspaceRole;
+  accessProfile: AgentAccessProfile;
+  capabilities: WorkspacePermission[];
   prefix: string;
   scopes: ApiTokenScope[];
   lastEventCursor: number;
@@ -140,30 +143,41 @@ function validateCredentialScopes(scopesInput: ApiTokenScope[]) {
   if (scopes.includes("documents:write") && !scopes.includes("documents:read")) {
     throw new ApiTokenError("INVALID_INPUT", "문서 쓰기 권한에는 문서 읽기 권한이 필요합니다.");
   }
-  if (scopes.includes("documents:commit") && !scopes.includes("documents:write")) {
-    throw new ApiTokenError("INVALID_INPUT", "정본 저장 권한에는 문서 쓰기 권한이 필요합니다.");
+  if (scopes.includes("documents:commit") && !scopes.includes("documents:read")) {
+    throw new ApiTokenError("INVALID_INPUT", "정본 저장 권한에는 문서 읽기 권한이 필요합니다.");
   }
   if (
     scopes.includes("revisions:restore")
-    && (!scopes.includes("documents:read") || !scopes.includes("documents:write") || !scopes.includes("documents:commit"))
+    && !scopes.includes("documents:read")
   ) {
-    throw new ApiTokenError("INVALID_INPUT", "리비전 복원 권한에는 문서 읽기, 쓰기, 정본 저장 권한이 필요합니다.");
+    throw new ApiTokenError("INVALID_INPUT", "리비전 복원 권한에는 문서 읽기 권한이 필요합니다.");
   }
   return scopes;
 }
 
 function validateRoleScopes(role: AgentWorkspaceRole, scopes: ApiTokenScope[]) {
-  const unsupported = scopes.find((scope) => !agentPrincipalAllows({
-    role,
-    permissionAllow: [],
-    permissionDeny: [],
-  }, TOKEN_SCOPE_PERMISSIONS[scope]));
+  const rolePermissions = new Set(listAgentRolePermissions(role));
+  const unsupported = scopes.find((scope) => !rolePermissions.has(TOKEN_SCOPE_PERMISSIONS[scope]));
   if (unsupported) {
     throw new ApiTokenError(
       "INVALID_INPUT",
       `${role} 역할에서 사용할 수 없는 연결 권한(${unsupported})이 포함되어 있습니다.`,
     );
   }
+}
+
+function canonicalGrantForLegacyRole(role: AgentWorkspaceRole) {
+  const accessProfile: AgentAccessProfile = role === "viewer"
+    ? "reader"
+    : role === "editor"
+      ? "writer"
+      : "custom";
+  return {
+    accessProfile,
+    capabilities: accessProfile === "custom"
+      ? listAgentRolePermissions(role)
+      : listAgentProfilePermissions(accessProfile),
+  };
 }
 
 function resolveCredentialRoot(
@@ -231,6 +245,7 @@ export function createWorkspaceToken(
   const prefix = `nyx_live_${secret.slice(0, 7)}`;
   const id = randomUUID();
   const agentId = randomUUID();
+  const { accessProfile, capabilities } = canonicalGrantForLegacyRole(role);
   const createdAt = new Date().toISOString();
   database.transaction(() => {
     database.prepare(
@@ -248,9 +263,23 @@ export function createWorkspaceToken(
       `INSERT INTO workspace_agents
        (id, workspace_id, display_name, avatar_media_id, role, status,
         created_by_user_id, created_at, updated_at, agent_identity_id,
-        permission_allow_json, permission_deny_json, root_document_id)
-       VALUES (?, ?, ?, NULL, ?, 'active', ?, ?, ?, ?, '[]', '[]', ?)`,
-    ).run(agentId, input.workspaceId, name, role, input.userId, createdAt, createdAt, agentId, rootDocumentId);
+        permission_allow_json, permission_deny_json, root_document_id,
+        access_profile, capabilities_json, scope_mode, policy_version, revoked_at)
+       VALUES (?, ?, ?, NULL, ?, 'active', ?, ?, ?, ?, '[]', '[]', ?, ?, ?, ?, 1, NULL)`,
+    ).run(
+      agentId,
+      input.workspaceId,
+      name,
+      role,
+      input.userId,
+      createdAt,
+      createdAt,
+      agentId,
+      rootDocumentId,
+      accessProfile,
+      JSON.stringify(capabilities),
+      rootDocumentId ? "document_tree" : "workspace",
+    );
     database.prepare(
       `INSERT INTO agent_credentials
        (id, agent_id, created_by_user_id, name, token_prefix, token_hash,
@@ -288,6 +317,11 @@ export function createWorkspaceToken(
       createdAt,
     );
     database.prepare(
+      `INSERT INTO agent_credential_grant_bindings
+       (id, credential_id, grant_id, status, created_by_user_id, created_at, revoked_at)
+       VALUES (?, ?, ?, 'active', ?, ?, NULL)`,
+    ).run(randomUUID(), id, agentId, input.userId, createdAt);
+    database.prepare(
       `INSERT INTO agent_credential_workspace_state
        (credential_id, workspace_id, last_event_cursor, last_used_at, last_used_ip)
        VALUES (?, ?, 0, NULL, NULL)`,
@@ -312,7 +346,8 @@ export function createWorkspaceToken(
       agentId,
       name,
       avatarMediaId: null,
-      role,
+      accessProfile,
+      capabilities,
       prefix,
       scopes,
       lastEventCursor: 0,
@@ -399,6 +434,7 @@ export function updateWorkspaceAgent(
     ? current.avatar_media_id
     : input.avatarMediaId;
   const role = input.role ?? current.role;
+  const canonicalGrant = input.role ? canonicalGrantForLegacyRole(role) : null;
   const status = input.status ?? current.status;
   const now = new Date().toISOString();
   database.transaction(() => {
@@ -409,9 +445,23 @@ export function updateWorkspaceAgent(
     ).run(displayName, avatarMediaId, now, current.agent_identity_id);
     database.prepare(
       `UPDATE workspace_agents
-       SET display_name = ?, role = ?, status = ?, updated_at = ?
+       SET display_name = ?, role = ?, status = ?,
+           access_profile = COALESCE(?, access_profile),
+           capabilities_json = COALESCE(?, capabilities_json),
+           policy_version = CASE WHEN ? IS NULL THEN policy_version ELSE policy_version + 1 END,
+           updated_at = ?
        WHERE id = ? AND workspace_id = ?`,
-    ).run(displayName, role, status, now, input.agentId, input.workspaceId);
+    ).run(
+      displayName,
+      role,
+      status,
+      canonicalGrant?.accessProfile ?? null,
+      canonicalGrant ? JSON.stringify(canonicalGrant.capabilities) : null,
+      canonicalGrant?.accessProfile ?? null,
+      now,
+      input.agentId,
+      input.workspaceId,
+    );
     recordWorkspaceAuditEvent(database, {
       workspaceId: input.workspaceId,
       action: "agent.updated",
@@ -442,231 +492,6 @@ export function updateWorkspaceAgent(
   });
 }
 
-export function updateWorkspaceConnectionPermissions(
-  database: NyxDatabase,
-  input: {
-    workspaceId: string;
-    userId: string;
-    tokenId: string;
-    role: AgentWorkspaceRole;
-    scopes: ApiTokenScope[];
-    rootDocumentId: string | null;
-  },
-): ApiTokenSummary {
-  requireHumanWorkspacePermission(database, input.workspaceId, input.userId, "agents.manage");
-  requireHumanWorkspacePermission(database, input.workspaceId, input.userId, "credentials.manage");
-  const current = database.prepare(
-    `SELECT credential.id, credential.token_prefix, credential.scopes_json,
-            credential.last_used_at, credential.created_at,
-            membership.id AS agent_id, membership.agent_identity_id,
-            membership.root_document_id,
-            agent.display_name, agent.avatar_media_id, membership.role,
-            COALESCE(state.last_event_cursor, 0) AS last_event_cursor
-     FROM agent_credentials credential
-     JOIN agents agent ON agent.id = credential.agent_id
-     JOIN workspace_agents membership
-       ON membership.agent_identity_id = credential.agent_id
-      AND membership.workspace_id = ?
-     LEFT JOIN agent_credential_workspace_state state
-       ON state.credential_id = credential.id AND state.workspace_id = membership.workspace_id
-     WHERE credential.id = ? AND credential.revoked_at IS NULL`,
-  ).get(input.workspaceId, input.tokenId) as {
-    id: string;
-    token_prefix: string;
-    scopes_json: string;
-    last_event_cursor: number;
-    last_used_at: string | null;
-    created_at: string;
-    root_document_id: string | null;
-    agent_id: string;
-    agent_identity_id: string;
-    display_name: string;
-    avatar_media_id: string | null;
-    role: AgentWorkspaceRole;
-  } | undefined;
-  if (!current) throw new ApiTokenError("NOT_FOUND", "활성 연결을 찾을 수 없습니다.");
-
-  const scopes = validateCredentialScopes(input.scopes);
-  validateRoleScopes(input.role, scopes);
-  const { rootDocumentId, rootDocumentTitle } = resolveCredentialRoot(
-    database,
-    input.workspaceId,
-    input.rootDocumentId,
-  );
-  const previousScopes = parseScopes(current.scopes_json);
-  const now = new Date().toISOString();
-  database.transaction(() => {
-    database.prepare(
-      `UPDATE workspace_agents SET role = ?, root_document_id = ?, updated_at = ?
-       WHERE id = ? AND workspace_id = ?`,
-    ).run(input.role, rootDocumentId, now, current.agent_id, input.workspaceId);
-    database.prepare(
-      `UPDATE agent_credentials SET scopes_json = ?, updated_at = ?
-       WHERE id = ? AND revoked_at IS NULL`,
-    ).run(JSON.stringify(scopes), now, current.id);
-    database.prepare(
-      `UPDATE workspace_api_tokens SET scopes_json = ?, root_document_id = ?
-       WHERE id = ? AND workspace_id = ? AND revoked_at IS NULL`,
-    ).run(JSON.stringify(scopes), rootDocumentId, current.id, input.workspaceId);
-    recordWorkspaceAuditEvent(database, {
-      workspaceId: input.workspaceId,
-      action: "connection.permissions_updated",
-      actorType: "human",
-      actorUserId: input.userId,
-      actorLabel: "사용자",
-      targetType: "credential",
-      targetId: current.id,
-      metadata: {
-        agentId: current.agent_id,
-        before: {
-          role: current.role,
-          scopes: previousScopes,
-          rootDocumentId: current.root_document_id,
-        },
-        after: { role: input.role, scopes, rootDocumentId },
-      },
-      createdAt: now,
-    });
-  })();
-
-  return {
-    id: current.id,
-    agentId: current.agent_id,
-    name: current.display_name,
-    avatarMediaId: current.avatar_media_id,
-    role: input.role,
-    prefix: current.token_prefix,
-    scopes,
-    lastEventCursor: Number(current.last_event_cursor),
-    lastUsedAt: current.last_used_at,
-    createdAt: current.created_at,
-    rootDocumentId,
-    rootDocumentTitle,
-  };
-}
-
-export function rotateWorkspaceAgentCredential(
-  database: NyxDatabase,
-  input: { workspaceId: string; userId: string; agentId: string },
-) {
-  requireHumanWorkspacePermission(database, input.workspaceId, input.userId, "credentials.manage");
-  const agent = loadWorkspaceAgent(database, input.workspaceId, input.agentId);
-  if (!agent) throw new ApiTokenError("NOT_FOUND", "에이전트를 찾을 수 없습니다.");
-  if (agent.deleted_at || agent.purged_at || agent.identity_status !== "active" || agent.status !== "active") {
-    throw new ApiTokenError("INVALID_INPUT", "비활성 에이전트의 연결 키는 회전할 수 없습니다.");
-  }
-  const previous = database.prepare(
-    `SELECT id, name, scopes_json, default_workspace_id,
-            workspace_allowlist_json, ip_allowlist_json, expires_at
-     FROM agent_credentials
-     WHERE agent_id = ? AND revoked_at IS NULL
-     ORDER BY created_at DESC LIMIT 1`,
-  ).get(agent.agent_identity_id) as {
-    id: string;
-    name: string;
-    scopes_json: string;
-    default_workspace_id: string | null;
-    workspace_allowlist_json: string;
-    ip_allowlist_json: string;
-    expires_at: string | null;
-  } | undefined;
-  const scopes = previous ? parseScopes(previous.scopes_json) : DEFAULT_API_TOKEN_SCOPES;
-  const rootDocumentId = (database.prepare(
-    "SELECT root_document_id FROM workspace_agents WHERE id = ? AND workspace_id = ?",
-  ).get(input.agentId, input.workspaceId) as { root_document_id: string | null }).root_document_id;
-  const rootDocumentTitle = rootDocumentId
-    ? (database.prepare("SELECT title FROM documents WHERE id = ? AND workspace_id = ?")
-      .get(rootDocumentId, input.workspaceId) as { title: string } | undefined)?.title ?? null
-    : null;
-  const secret = randomBytes(32).toString("base64url");
-  const token = `nyx_live_${secret}`;
-  const prefix = `nyx_live_${secret.slice(0, 7)}`;
-  const id = randomUUID();
-  const now = new Date().toISOString();
-  database.transaction(() => {
-    database.prepare(
-      `UPDATE agent_credentials SET revoked_at = ?, updated_at = ?
-       WHERE id = ? AND revoked_at IS NULL`,
-    ).run(now, now, previous?.id ?? "");
-    database.prepare(
-      `UPDATE workspace_api_tokens SET revoked_at = ?
-       WHERE id = ? AND workspace_id = ? AND agent_id = ? AND revoked_at IS NULL`,
-    ).run(now, previous?.id ?? "", input.workspaceId, input.agentId);
-    database.prepare(
-      `INSERT INTO agent_credentials
-       (id, agent_id, created_by_user_id, name, token_prefix, token_hash,
-        scopes_json, default_workspace_id, workspace_allowlist_json,
-        ip_allowlist_json, last_used_at, last_used_ip, expires_at, revoked_at,
-        created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, NULL, ?, ?)`,
-    ).run(
-      id,
-      agent.agent_identity_id,
-      input.userId,
-      previous?.name ?? `${agent.display_name} 연결 키`,
-      prefix,
-      hashToken(token),
-      JSON.stringify(scopes),
-      previous?.default_workspace_id ?? input.workspaceId,
-      previous?.workspace_allowlist_json ?? "[]",
-      previous?.ip_allowlist_json ?? "[]",
-      previous?.expires_at ?? null,
-      now,
-      now,
-    );
-    database.prepare(
-      `INSERT INTO workspace_api_tokens
-       (id, workspace_id, created_by_user_id, name, token_prefix, token_hash,
-        scopes_json, last_event_cursor, root_document_id, agent_id, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)`,
-    ).run(
-      id,
-      input.workspaceId,
-      input.userId,
-      `${agent.display_name} 연결 키`,
-      prefix,
-      hashToken(token),
-      JSON.stringify(scopes),
-      rootDocumentId,
-      input.agentId,
-      now,
-    );
-    database.prepare(
-      `INSERT INTO agent_credential_workspace_state
-       (credential_id, workspace_id, last_event_cursor, last_used_at, last_used_ip)
-       VALUES (?, ?, 0, NULL, NULL)`,
-    ).run(id, input.workspaceId);
-    recordWorkspaceAuditEvent(database, {
-      workspaceId: input.workspaceId,
-      action: "credential.rotated",
-      actorType: "human",
-      actorUserId: input.userId,
-      actorLabel: "사용자",
-      targetType: "credential",
-      targetId: id,
-      metadata: { agentId: input.agentId, previousCredentialId: previous?.id ?? null },
-      createdAt: now,
-    });
-  })();
-  return {
-    token,
-    summary: {
-      id,
-      agentId: input.agentId,
-      name: agent.display_name,
-      avatarMediaId: agent.avatar_media_id,
-      role: agent.role,
-      prefix,
-      scopes,
-      lastEventCursor: 0,
-      lastUsedAt: null,
-      createdAt: now,
-      rootDocumentId,
-      rootDocumentTitle,
-    } satisfies ApiTokenSummary,
-  };
-}
-
 export function listWorkspaceTokens(
   database: NyxDatabase,
   workspaceId: string,
@@ -680,18 +505,20 @@ export function listWorkspaceTokens(
               credential.last_used_at, credential.created_at,
               membership.root_document_id, document.title AS root_document_title,
               membership.id AS agent_id, agent.display_name, agent.avatar_media_id,
-              membership.role
+              membership.access_profile, membership.capabilities_json
        FROM workspace_agents membership
        JOIN agents agent ON agent.id = membership.agent_identity_id
+       JOIN agent_credential_grant_bindings binding
+         ON binding.grant_id = membership.id
+        AND binding.status = 'active' AND binding.revoked_at IS NULL
        JOIN agent_credentials credential
-         ON credential.agent_id = agent.id AND credential.revoked_at IS NULL
+         ON credential.id = binding.credential_id
+        AND credential.agent_id = agent.id AND credential.revoked_at IS NULL
        LEFT JOIN agent_credential_workspace_state state
          ON state.credential_id = credential.id AND state.workspace_id = membership.workspace_id
        LEFT JOIN documents document ON document.id = membership.root_document_id
        WHERE membership.workspace_id = ? AND membership.status = 'active'
-         AND (credential.workspace_allowlist_json = '[]'
-              OR EXISTS (SELECT 1 FROM json_each(credential.workspace_allowlist_json)
-                         WHERE value = membership.workspace_id))
+         AND membership.revoked_at IS NULL
        ORDER BY credential.created_at DESC`,
     )
     .all(workspaceId) as Array<{
@@ -706,14 +533,16 @@ export function listWorkspaceTokens(
     agent_id: string;
     display_name: string;
     avatar_media_id: string | null;
-    role: AgentWorkspaceRole;
+    access_profile: AgentAccessProfile;
+    capabilities_json: string;
   }>;
   return rows.map((row) => ({
     id: row.id,
     agentId: row.agent_id,
     name: row.display_name,
     avatarMediaId: row.avatar_media_id,
-    role: row.role,
+    accessProfile: row.access_profile,
+    capabilities: parseStringList(row.capabilities_json, WORKSPACE_PERMISSIONS),
     prefix: row.token_prefix,
     scopes: parseScopes(row.scopes_json),
     lastEventCursor: Number(row.last_event_cursor),
@@ -722,49 +551,6 @@ export function listWorkspaceTokens(
     rootDocumentId: row.root_document_id,
     rootDocumentTitle: row.root_document_title,
   }));
-}
-
-export function revokeWorkspaceToken(
-  database: NyxDatabase,
-  input: { workspaceId: string; userId: string; tokenId: string },
-) {
-  requireHumanWorkspacePermission(
-    database,
-    input.workspaceId,
-    input.userId,
-    "credentials.manage",
-  );
-  const now = new Date().toISOString();
-  database.transaction(() => {
-    const token = database.prepare(
-      `SELECT membership.id AS agent_id
-       FROM agent_credentials credential
-       JOIN workspace_agents membership
-         ON membership.agent_identity_id = credential.agent_id
-        AND membership.workspace_id = ?
-       WHERE credential.id = ? AND credential.revoked_at IS NULL`,
-    ).get(input.workspaceId, input.tokenId) as { agent_id: string | null } | undefined;
-    if (!token) throw new ApiTokenError("NOT_FOUND", "연결을 찾을 수 없습니다.");
-    database.prepare(
-      `UPDATE agent_credentials SET revoked_at = ?, updated_at = ?
-       WHERE id = ? AND revoked_at IS NULL`,
-    ).run(now, now, input.tokenId);
-    database.prepare(
-      `UPDATE workspace_api_tokens SET revoked_at = ?
-       WHERE id = ? AND revoked_at IS NULL`,
-    ).run(now, input.tokenId);
-    recordWorkspaceAuditEvent(database, {
-      workspaceId: input.workspaceId,
-      action: "credential.revoked",
-      actorType: "human",
-      actorUserId: input.userId,
-      actorLabel: "사용자",
-      targetType: "credential",
-      targetId: input.tokenId,
-      metadata: { agentId: token.agent_id },
-      createdAt: now,
-    });
-  })();
 }
 
 type CredentialAuthenticationRow = {
@@ -811,14 +597,16 @@ function authenticateCredentialRow(
   if (!workspaceId) {
     throw new ApiTokenError("FORBIDDEN", "대상 워크스페이스를 명시해주세요.");
   }
-  const workspaceAllowlist = parseStringList<string>(row.workspace_allowlist_json);
-  if (workspaceAllowlist.length > 0 && !workspaceAllowlist.includes(workspaceId)) {
-    throw new ApiTokenError("FORBIDDEN", "이 연결 키에 허용되지 않은 워크스페이스입니다.");
-  }
   const membership = database.prepare(
-    `SELECT membership.id, membership.role, membership.root_document_id,
-            membership.permission_allow_json, membership.permission_deny_json
+    `SELECT membership.id, membership.access_profile,
+            membership.capabilities_json, membership.root_document_id,
+            binding.id AS binding_id
      FROM workspace_agents membership
+     JOIN agent_credential_grant_bindings binding
+       ON binding.grant_id = membership.id
+      AND binding.credential_id = ?
+      AND binding.status = 'active'
+      AND binding.revoked_at IS NULL
      JOIN workspaces workspace ON workspace.id = membership.workspace_id
      JOIN workspace_ownership ownership ON ownership.workspace_id = workspace.id
      JOIN agent_ownership agent_owner ON agent_owner.agent_id = membership.agent_identity_id
@@ -831,7 +619,8 @@ function authenticateCredentialRow(
        ON personal_agent_member.organization_id = ownership.organization_id
       AND personal_agent_member.user_id = agent_owner.owner_user_id
      WHERE membership.workspace_id = ? AND membership.agent_identity_id = ?
-       AND membership.status = 'active' AND workspace.lifecycle_state = 'active'
+       AND membership.status = 'active' AND membership.revoked_at IS NULL
+       AND workspace.lifecycle_state = 'active'
        AND (ownership.owner_type = 'personal' OR organization.lifecycle_state = 'active')
        AND (
          (ownership.owner_type = 'personal'
@@ -847,15 +636,18 @@ function authenticateCredentialRow(
             AND personal_agent_member.id IS NOT NULL)
          ))
        )`,
-  ).get(workspaceId, row.global_agent_id) as {
+  ).get(row.id, workspaceId, row.global_agent_id) as {
     id: string;
-    role: AgentWorkspaceRole;
+    access_profile: AgentAccessProfile;
+    capabilities_json: string;
     root_document_id: string | null;
-    permission_allow_json: string;
-    permission_deny_json: string;
+    binding_id: string;
   } | undefined;
   if (!membership) {
-    throw new ApiTokenError("FORBIDDEN", "이 에이전트는 대상 워크스페이스에 할당되지 않았습니다.");
+    throw new ApiTokenError(
+      "FORBIDDEN",
+      "이 연결 키는 대상 워크스페이스의 에이전트 접근 권한에 연결되어 있지 않습니다.",
+    );
   }
   const state = database.prepare(
     `SELECT last_event_cursor FROM agent_credential_workspace_state
@@ -875,8 +667,7 @@ function authenticateCredentialRow(
   ).run(row.id, workspaceId, now, options.clientIp ?? null);
   database.prepare("UPDATE workspace_api_tokens SET last_used_at = ? WHERE id = ?")
     .run(now, row.id);
-  const permissionAllow = parseStringList(membership.permission_allow_json, WORKSPACE_PERMISSIONS);
-  const permissionDeny = parseStringList(membership.permission_deny_json, WORKSPACE_PERMISSIONS);
+  const capabilities = parseStringList(membership.capabilities_json, WORKSPACE_PERMISSIONS);
   const credentialScopes = parseScopes(row.scopes_json);
   const scopes = options.scopeOverride
     ? credentialScopes.filter((scope) => options.scopeOverride!.includes(scope))
@@ -889,14 +680,13 @@ function authenticateCredentialRow(
     userId: row.created_by_user_id,
     name: row.display_name,
     avatarMediaId: row.avatar_media_id,
-    role: membership.role,
+    accessProfile: membership.access_profile,
+    capabilities,
+    bindingId: membership.binding_id,
     prefix: row.token_prefix,
     scopes,
     lastEventCursor: Number(state?.last_event_cursor ?? 0),
     rootDocumentId: membership.root_document_id,
-    permissionAllow,
-    permissionDeny,
-    workspaceAllowlist,
     ipAllowlist,
   };
 }
@@ -945,11 +735,16 @@ export function listApiTokenWorkspaceIdentities(
 ): ApiTokenWorkspaceIdentity[] {
   const rows = database.prepare(
     `SELECT membership.id, membership.workspace_id,
-            membership.role, membership.root_document_id,
-            membership.permission_allow_json, membership.permission_deny_json,
+            membership.access_profile, membership.capabilities_json,
+            membership.root_document_id, binding.id AS binding_id,
             workspace.name AS workspace_name, workspace.slug AS workspace_slug,
             COALESCE(state.last_event_cursor, 0) AS last_event_cursor
      FROM workspace_agents membership
+     JOIN agent_credential_grant_bindings binding
+       ON binding.grant_id = membership.id
+      AND binding.credential_id = ?
+      AND binding.status = 'active'
+      AND binding.revoked_at IS NULL
      JOIN workspaces workspace ON workspace.id = membership.workspace_id
      JOIN workspace_ownership ownership ON ownership.workspace_id = workspace.id
      JOIN agent_ownership agent_owner ON agent_owner.agent_id = membership.agent_identity_id
@@ -964,7 +759,7 @@ export function listApiTokenWorkspaceIdentities(
      LEFT JOIN agent_credential_workspace_state state
        ON state.credential_id = ? AND state.workspace_id = membership.workspace_id
      WHERE membership.agent_identity_id = ?
-       AND membership.status = 'active'
+       AND membership.status = 'active' AND membership.revoked_at IS NULL
        AND workspace.lifecycle_state = 'active'
        AND (ownership.owner_type = 'personal' OR organization.lifecycle_state = 'active')
        AND (
@@ -982,38 +777,27 @@ export function listApiTokenWorkspaceIdentities(
          ))
        )
      ORDER BY workspace.name COLLATE NOCASE, workspace.id`,
-  ).all(identity.id, identity.globalAgentId) as Array<{
+  ).all(identity.id, identity.id, identity.globalAgentId) as Array<{
     id: string;
     workspace_id: string;
-    role: AgentWorkspaceRole;
+    access_profile: AgentAccessProfile;
+    capabilities_json: string;
+    binding_id: string;
     root_document_id: string | null;
-    permission_allow_json: string;
-    permission_deny_json: string;
     workspace_name: string;
     workspace_slug: string;
     last_event_cursor: number;
   }>;
 
-  return rows
-    .filter((row) => (
-      identity.workspaceAllowlist.length === 0
-      || identity.workspaceAllowlist.includes(row.workspace_id)
-    ))
-    .map((row) => ({
+  return rows.map((row) => ({
       identity: {
         ...identity,
         agentId: row.id,
         workspaceId: row.workspace_id,
-        role: row.role,
+        accessProfile: row.access_profile,
+        capabilities: parseStringList(row.capabilities_json, WORKSPACE_PERMISSIONS),
+        bindingId: row.binding_id,
         rootDocumentId: row.root_document_id,
-        permissionAllow: parseStringList(
-          row.permission_allow_json,
-          WORKSPACE_PERMISSIONS,
-        ),
-        permissionDeny: parseStringList(
-          row.permission_deny_json,
-          WORKSPACE_PERMISSIONS,
-        ),
         lastEventCursor: Number(row.last_event_cursor),
       },
       workspace: {
@@ -1030,7 +814,7 @@ export function requireTokenScope(identity: ApiTokenIdentity, scope: ApiTokenSco
   }
   const permission = TOKEN_SCOPE_PERMISSIONS[scope];
   if (!agentPrincipalAllows(identity, permission)) {
-    throw new ApiTokenError("FORBIDDEN", `이 에이전트 역할에는 ${scope} 권한이 없습니다.`);
+    throw new ApiTokenError("FORBIDDEN", `이 에이전트의 워크스페이스 grant에는 ${scope}에 필요한 capability가 없습니다.`);
   }
 }
 

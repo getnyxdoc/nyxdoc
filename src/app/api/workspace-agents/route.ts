@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { requireWorkspaceSession } from "@/data/workspace-context";
 import { assignAgentToWorkspace, listWorkspaceAgentMemberships } from "@/lib/agents/service";
-import { WORKSPACE_PERMISSIONS } from "@/lib/authz/permissions";
+import { AGENT_ACCESS_PROFILES, WORKSPACE_PERMISSIONS } from "@/lib/authz/permissions";
 import { sqlite } from "@/lib/db/client";
 import { apiErrorResponse } from "@/lib/http/errors";
 import { assertSameOrigin } from "@/lib/http/origin";
@@ -11,10 +11,24 @@ export const dynamic = "force-dynamic";
 
 const assignSchema = z.object({
   agentId: z.string().uuid(),
-  role: z.enum(["admin", "editor", "viewer"]).optional(),
+  accessProfile: z.enum(AGENT_ACCESS_PROFILES),
+  capabilities: z.array(z.enum(WORKSPACE_PERMISSIONS)).max(WORKSPACE_PERMISSIONS.length).optional(),
   rootDocumentId: z.string().uuid().nullable().optional(),
-  permissionAllow: z.array(z.enum(WORKSPACE_PERMISSIONS)).max(WORKSPACE_PERMISSIONS.length).optional(),
-  permissionDeny: z.array(z.enum(WORKSPACE_PERMISSIONS)).max(WORKSPACE_PERMISSIONS.length).optional(),
+}).strict().superRefine((value, context) => {
+  if (value.accessProfile === "custom" && !value.capabilities?.length) {
+    context.addIssue({
+      code: "custom",
+      path: ["capabilities"],
+      message: "A custom access profile requires at least one capability.",
+    });
+  }
+  if (value.accessProfile !== "custom" && value.capabilities !== undefined) {
+    context.addIssue({
+      code: "custom",
+      path: ["capabilities"],
+      message: "Fixed access profiles define their own capabilities.",
+    });
+  }
 });
 
 export async function GET(request: Request) {

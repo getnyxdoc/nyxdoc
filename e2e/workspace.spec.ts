@@ -894,7 +894,7 @@ test("creates a document task from a one-line request and keeps agent execution 
   await expect(dialog.getByRole("combobox", { name: "담당 에이전트" }))
     .toHaveValue("00000000-0000-4000-8000-0000000000a1");
   await expect(dialog.getByRole("combobox", { name: "담당 에이전트" }))
-    .toContainText("Admin Agent · 관리자");
+    .toContainText("Admin Agent · 사용자 지정 권한");
 
   await dialog.getByRole("button", { name: "대상 문서 선택" }).click();
   const documentTree = dialog.getByRole("tree", { name: "대상 문서 선택 트리" });

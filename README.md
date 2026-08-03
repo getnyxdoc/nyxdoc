@@ -123,7 +123,7 @@ npm run build
 ## Connect an external agent
 
 Create an agent identity and connection key in Nyxdoc. The UI provides one
-copyable handoff containing the MCP URL, transport, Bearer key, workspace role,
+copyable handoff containing the MCP URL, transport, Bearer key, workspace access profile,
 and verification steps.
 
 Generic MCP connection:
@@ -136,7 +136,7 @@ Authorization: Bearer <NYXDOC_TOKEN>
 
 Nyxdoc also advertises OAuth 2.1 discovery metadata for clients that support
 remote MCP authorization. OAuth uses PKCE S256 and lets the person choose the
-allowed workspaces and each workspace role; existing Bearer connection keys
+allowed workspaces and each workspace access profile; existing Bearer connection keys
 remain supported for local agents and automation.
 
 Call the compact `get_capabilities` summary first. Fetch a full AST schema with
@@ -158,7 +158,7 @@ See [docs/agent-contract.md](docs/agent-contract.md) for the full contract and
 
 ## Project status
 
-Version `0.24.1` is an early 0.x release used with real documents. Data
+Version `0.25.0` is an early 0.x release used with real documents. Data
 migrations are forward-only and rehearsed against verified backups, but APIs
 and UI details may still evolve before 1.0.
 

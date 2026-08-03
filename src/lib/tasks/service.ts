@@ -156,13 +156,29 @@ function actorMembershipId(
   actor: DocumentActor,
 ) {
   if (actor.type !== "agent") return null;
-  const row = database.prepare(
-    `SELECT id
-     FROM workspace_agents
-     WHERE workspace_id = ?
-       AND (agent_identity_id = ? OR id = ?)
-       AND status = 'active'`,
-  ).get(workspaceId, actor.principalId ?? "", actor.principalId ?? "") as { id: string } | undefined;
+  const row = actor.tokenId
+    ? database.prepare(
+      `SELECT membership.id
+       FROM workspace_agents membership
+       JOIN agent_credentials credential
+         ON credential.id = ?
+        AND credential.agent_id = membership.agent_identity_id
+        AND credential.revoked_at IS NULL
+       JOIN agent_credential_grant_bindings binding
+         ON binding.credential_id = credential.id
+        AND binding.grant_id = membership.id
+        AND binding.status = 'active'
+        AND binding.revoked_at IS NULL
+       WHERE membership.workspace_id = ?
+         AND membership.status = 'active' AND membership.revoked_at IS NULL`,
+    ).get(actor.tokenId, workspaceId) as { id: string } | undefined
+    : database.prepare(
+      `SELECT id
+       FROM workspace_agents
+       WHERE workspace_id = ?
+         AND (agent_identity_id = ? OR id = ?)
+         AND status = 'active' AND revoked_at IS NULL`,
+    ).get(workspaceId, actor.principalId ?? "", actor.principalId ?? "") as { id: string } | undefined;
   if (!row) {
     throw new TaskServiceError("FORBIDDEN", "현재 워크스페이스의 활성 에이전트 연결을 찾을 수 없습니다.");
   }

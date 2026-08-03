@@ -13,10 +13,10 @@ const updateSchema = z.object({
   name: z.string().trim().min(1).max(80),
   scopes: z.array(z.enum(API_TOKEN_SCOPES)).min(1).max(API_TOKEN_SCOPES.length),
   defaultWorkspaceId: z.string().uuid().nullable(),
-  workspaceAllowlist: z.array(z.string().uuid()).max(100),
+  workspaceIds: z.array(z.string().uuid()).max(100),
   ipAllowlist: z.array(z.string().max(80)).max(32),
   expiresAt: z.string().datetime().nullable(),
-});
+}).strict();
 
 export async function PATCH(request: Request, context: { params: Promise<{ agentId: string; credentialId: string }> }) {
   try {
@@ -30,6 +30,7 @@ export async function PATCH(request: Request, context: { params: Promise<{ agent
         agentId,
         credentialId,
         ...body,
+        workspaceAllowlist: body.workspaceIds,
       }),
     }, { headers: { "Cache-Control": "no-store" } });
   } catch (error) {

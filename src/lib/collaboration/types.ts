@@ -1,4 +1,4 @@
-import type { AgentWorkspaceRole } from "@/lib/authz/permissions";
+import type { AgentAccessProfile, WorkspacePermission } from "@/lib/authz/permissions";
 import type { DocumentListEntry, DocumentWorkflowStatus } from "@/lib/documents/types";
 
 export const ASSIGNMENT_TYPES = ["owner", "contributor", "reviewer"] as const;
@@ -15,7 +15,8 @@ export type WorkspaceAgentSummary = {
   id: string;
   displayName: string;
   avatarMediaId: string | null;
-  role: AgentWorkspaceRole;
+  accessProfile: AgentAccessProfile;
+  capabilities: WorkspacePermission[];
   status: "active" | "disabled";
   activeAssignmentCount: number;
   createdAt: string;

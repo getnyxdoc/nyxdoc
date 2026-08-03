@@ -27,12 +27,12 @@ Nyxdoc의 정식 원격 도구 표면은 `/mcp`의 stateless Streamable HTTP다.
 ## 연결 방식
 
 OAuth 클라이언트는 보호 리소스 메타데이터와 인증 서버 메타데이터를 발견하고 PKCE S256을
-사용해야 한다. Nyxdoc 0.24.1은 동적 클라이언트 등록(DCR)을 제공한다. Client ID Metadata
+사용해야 한다. Nyxdoc 0.25.0은 동적 클라이언트 등록(DCR)을 제공한다. Client ID Metadata
 Document(CIMD)는 아직 제공하지 않으며, CIMD만 허용하는 클라이언트는 별도 등록이 필요하다.
 
 기존 자동화나 로컬 에이전트는 계속 `Authorization: Bearer <NYXDOC_TOKEN>`을 사용할 수
-있다. OAuth와 연결 키는 같은 전역 에이전트·워크스페이스 멤버십·문서 루트·IP 제한·감사
-계약 아래에서 인증된다.
+있다. OAuth와 연결 키는 같은 전역 에이전트·워크스페이스 grant capability·명시적
+credential binding·문서 루트·IP 제한·감사 계약 아래에서 인증된다.
 
 ## 발견 주소
 
@@ -54,7 +54,7 @@ Codex에서 연결 키를 사용할 때는 원문을 설정 파일에 직접 쓰
 명령으로 브라우저 승인을 진행한다.
 
 ChatGPT는 사용자가 임의의 API 키를 입력하는 방식 대신 원격 MCP OAuth 흐름을 사용한다.
-연결 화면에서 Nyxdoc 계정으로 로그인하고 워크스페이스와 역할을 승인한다. app 게시 뒤
+연결 화면에서 Nyxdoc 계정으로 로그인하고 에이전트 신원·워크스페이스·접근 프로필을 승인한다. app 게시 뒤
 도구 정의를 바꾸면 ChatGPT 관리자가 새 action snapshot을 검토해야 할 수 있다.
 
 OpenClaw는 현재 Nyxdoc 연결 안내가 발급하는 MCP 주소와 Bearer 연결 키를 사용하는 경로를

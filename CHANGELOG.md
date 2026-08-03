@@ -2,6 +2,35 @@
 
 All notable user-facing changes are recorded here.
 
+## 0.25.0 - 2026-08-03
+
+- Replaced the ambiguous agent `admin | editor | viewer` model with global agent
+  identities, workspace-local grants, canonical capability sets, and explicit
+  credential-to-grant bindings.
+- Added `reader`, `drafter`, `writer`, and `custom` access profiles while keeping
+  authorization fail-closed on the stored capability set; legacy role fields are
+  rejected by public agent-management and OAuth contracts.
+- Made effective agent access the intersection of active identity, active workspace
+  grant capabilities, active credential binding and scopes, document boundary, and
+  IP allowlist. The workspace open in a human browser never affects agent routing.
+- Made workspace connection setup atomic for existing and new credentials, with
+  structured field-level errors and explicit reuse or creation of a grant binding.
+- Preserved every active workspace binding during credential rotation instead of
+  rebuilding access from the legacy allowlist mirror.
+- Updated OAuth consent to select a global agent identity and workspace access
+  profile, preserve an existing workspace grant on re-consent, and update only the
+  OAuth credential binding.
+- Made OAuth consent provider-first so a failed provider consent cannot mutate
+  Nyxdoc grants, credentials, bindings, or previously issued tokens.
+- Hardened inactive, revoked, tenant, organization, document, media, sharing, task,
+  transfer, and collaboration boundaries around the canonical authorization model.
+- Made legacy credential migration fail closed on malformed workspace allowlists
+  and preserve editor revision-restore capability as a custom grant.
+- Prioritized Agent To-do assignees by their effective capabilities instead of a
+  legacy role label.
+- Published Agent Protocol 5.0.0 and server version 0.25.0 for the breaking agent
+  authorization contract.
+
 ## 0.24.1 - 2026-08-02
 
 - Reuse legacy editor credentials in new workspace assignments by applying the

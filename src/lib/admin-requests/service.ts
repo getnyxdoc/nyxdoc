@@ -7,14 +7,16 @@ import {
 } from "@/lib/authz/permissions";
 import type { NyxDatabase } from "@/lib/db/client";
 import { createWorkspace } from "@/lib/workspaces/service";
+import { listWorkspaceTokens, type ApiTokenSummary } from "@/lib/tokens/service";
 import {
-  createWorkspaceToken,
-  listWorkspaceTokens,
-  revokeWorkspaceToken,
-  updateWorkspaceAgent,
-  type ApiTokenSummary,
-} from "@/lib/tokens/service";
-import { rotateAgentCredential } from "@/lib/agents/service";
+  assignAgentToWorkspace,
+  createAccountAgent,
+  createAgentCredential,
+  createOrganizationAgent,
+  revokeAgentCredential,
+  rotateAgentCredential,
+  updateAgentWorkspaceMembership,
+} from "@/lib/agents/service";
 import {
   proposeAdminActionSchema,
   reviewAdminActionSchema,
@@ -95,22 +97,104 @@ function getRequestRow(database: NyxDatabase, workspaceId: string, requestId: st
   ).get(workspaceId, requestId) as AdminRequestRow | undefined;
 }
 
-function activeCredentialId(database: NyxDatabase, workspaceId: string, agentId: string) {
-  return (database.prepare(
-    `SELECT credential.id
-     FROM workspace_agents membership
-     JOIN agent_credentials credential ON credential.agent_id = membership.agent_identity_id
-     WHERE membership.workspace_id = ? AND membership.id = ?
-       AND credential.revoked_at IS NULL
-     ORDER BY credential.created_at DESC, credential.id DESC LIMIT 1`,
-  ).get(workspaceId, agentId) as { id: string } | undefined)?.id ?? null;
+type ActiveBoundCredential = {
+  credentialId: string;
+  agentIdentityId: string;
+  membershipId: string;
+  bindingId: string;
+  displayName: string;
+  credentialUpdatedAt: string;
+};
+
+function activeBoundCredential(
+  database: NyxDatabase,
+  workspaceId: string,
+  credentialId: string,
+) {
+  const now = new Date().toISOString();
+  return database.prepare(
+    `SELECT credential.id AS credential_id, credential.agent_id AS agent_identity_id,
+            credential.updated_at AS credential_updated_at, membership.id AS membership_id,
+            binding.id AS binding_id, agent.display_name
+     FROM agent_credentials credential
+     JOIN agents agent
+       ON agent.id = credential.agent_id AND agent.status = 'active'
+     JOIN workspace_agents membership
+       ON membership.agent_identity_id = credential.agent_id
+      AND membership.workspace_id = ?
+      AND membership.status = 'active' AND membership.revoked_at IS NULL
+     JOIN agent_credential_grant_bindings binding
+       ON binding.credential_id = credential.id AND binding.grant_id = membership.id
+      AND binding.status = 'active' AND binding.revoked_at IS NULL
+     WHERE credential.id = ? AND credential.revoked_at IS NULL
+       AND (credential.expires_at IS NULL OR credential.expires_at > ?)`,
+  ).get(workspaceId, credentialId, now) as {
+    credential_id: string;
+    agent_identity_id: string;
+    credential_updated_at: string;
+    membership_id: string;
+    binding_id: string;
+    display_name: string;
+  } | undefined satisfies {
+    credential_id: string;
+    agent_identity_id: string;
+    credential_updated_at: string;
+    membership_id: string;
+    binding_id: string;
+    display_name: string;
+  } | undefined;
 }
 
-function globalAgentIdForMembership(database: NyxDatabase, workspaceId: string, membershipId: string) {
-  return (database.prepare(
-    `SELECT agent_identity_id FROM workspace_agents
-     WHERE workspace_id = ? AND id = ?`,
-  ).get(workspaceId, membershipId) as { agent_identity_id: string } | undefined)?.agent_identity_id ?? null;
+function toActiveBoundCredential(row: ReturnType<typeof activeBoundCredential>): ActiveBoundCredential | null {
+  if (!row) return null;
+  return {
+    credentialId: row.credential_id,
+    agentIdentityId: row.agent_identity_id,
+    membershipId: row.membership_id,
+    bindingId: row.binding_id,
+    displayName: row.display_name,
+    credentialUpdatedAt: row.credential_updated_at,
+  };
+}
+
+function synchronizeSelectedCredentialBindingsForRotation(
+  database: NyxDatabase,
+  credentialId: string,
+) {
+  const workspaceIds = (database.prepare(
+    `SELECT DISTINCT membership.workspace_id
+     FROM agent_credential_grant_bindings binding
+     JOIN workspace_agents membership ON membership.id = binding.grant_id
+     WHERE binding.credential_id = ?
+       AND binding.status = 'active' AND binding.revoked_at IS NULL
+       AND membership.status = 'active' AND membership.revoked_at IS NULL
+     ORDER BY membership.workspace_id`,
+  ).all(credentialId) as Array<{ workspace_id: string }>).map((row) => row.workspace_id);
+  const current = database.prepare(
+    `SELECT default_workspace_id, workspace_allowlist_json
+     FROM agent_credentials WHERE id = ? AND revoked_at IS NULL`,
+  ).get(credentialId) as {
+    default_workspace_id: string | null;
+    workspace_allowlist_json: string;
+  } | undefined;
+  if (!current || workspaceIds.length === 0) {
+    throw new AdminActionRequestError("NOT_FOUND", "회전할 활성 연결 키를 찾을 수 없습니다.");
+  }
+  const defaultWorkspaceId = current.default_workspace_id && workspaceIds.includes(current.default_workspace_id)
+    ? current.default_workspace_id
+    : workspaceIds[0];
+  const serializedWorkspaceIds = JSON.stringify(workspaceIds);
+  if (
+    current.workspace_allowlist_json === serializedWorkspaceIds
+    && current.default_workspace_id === defaultWorkspaceId
+  ) {
+    return;
+  }
+  database.prepare(
+    `UPDATE agent_credentials
+     SET workspace_allowlist_json = ?, default_workspace_id = ?, updated_at = ?
+     WHERE id = ? AND revoked_at IS NULL`,
+  ).run(serializedWorkspaceIds, defaultWorkspaceId, new Date().toISOString(), credentialId);
 }
 
 function proposalContext(
@@ -161,23 +245,26 @@ function proposalContext(
       }
       return {
         precondition: {},
-        preview: `‘${proposal.payload.name}’ 에이전트를 ${proposal.payload.role} 역할로 연결하고, ${rootTitle ? `‘${rootTitle}’ 이하` : "전체 워크스페이스"}에 한정된 키를 발급합니다. 키는 승인한 사람에게 한 번만 표시됩니다.`,
+        preview: `‘${proposal.payload.name}’ 에이전트 신원을 만들고 ${proposal.payload.accessProfile} 접근 프로필로 연결합니다. ${rootTitle ? `범위는 ‘${rootTitle}’ 이하` : "범위는 전체 워크스페이스"}이며, 명시적으로 이 워크스페이스에 연결된 키를 발급합니다. 키는 승인한 사람에게 한 번만 표시됩니다.`,
       };
     }
     case "agent.update": {
       const agent = database.prepare(
-        `SELECT display_name, role, status, updated_at
-         FROM workspace_agents WHERE workspace_id = ? AND id = ?`,
+        `SELECT display_name, access_profile, capabilities_json, root_document_id, status, updated_at
+         FROM workspace_agents WHERE workspace_id = ? AND agent_identity_id = ? AND revoked_at IS NULL`,
       ).get(workspaceId, proposal.payload.agentId) as {
         display_name: string;
-        role: string;
+        access_profile: string;
+        capabilities_json: string;
+        root_document_id: string | null;
         status: string;
         updated_at: string;
       } | undefined;
       if (!agent) throw new AdminActionRequestError("NOT_FOUND", "에이전트를 찾을 수 없습니다.");
       const changes = [
-        proposal.payload.displayName !== undefined ? `이름 → ‘${proposal.payload.displayName}’` : null,
-        proposal.payload.role !== undefined ? `역할 → ${proposal.payload.role}` : null,
+        proposal.payload.accessProfile !== undefined ? `접근 프로필 → ${proposal.payload.accessProfile}` : null,
+        proposal.payload.capabilities !== undefined ? `사용자 지정 권한 → ${proposal.payload.capabilities.length}개` : null,
+        proposal.payload.rootDocumentId !== undefined ? "접근 문서 범위 변경" : null,
         proposal.payload.status !== undefined ? `상태 → ${proposal.payload.status}` : null,
       ].filter(Boolean).join(", ");
       return {
@@ -186,50 +273,40 @@ function proposalContext(
       };
     }
     case "credential.rotate": {
-      const agent = database.prepare(
-        `SELECT display_name, status, updated_at
-         FROM workspace_agents WHERE workspace_id = ? AND id = ?`,
-      ).get(workspaceId, proposal.payload.agentId) as {
-        display_name: string;
-        status: string;
-        updated_at: string;
-      } | undefined;
-      if (!agent) throw new AdminActionRequestError("NOT_FOUND", "에이전트를 찾을 수 없습니다.");
-      if (agent.status !== "active") {
-        throw new AdminActionRequestError("INVALID_INPUT", "비활성 에이전트의 키는 회전할 수 없습니다.");
+      const credential = toActiveBoundCredential(
+        activeBoundCredential(database, workspaceId, proposal.payload.credentialId),
+      );
+      if (!credential) {
+        throw new AdminActionRequestError(
+          "NOT_FOUND",
+          "현재 워크스페이스에 명시적으로 연결된 활성 연결 키를 찾을 수 없습니다.",
+        );
       }
       return {
         precondition: {
-          agentUpdatedAt: agent.updated_at,
-          activeCredentialId: activeCredentialId(database, workspaceId, proposal.payload.agentId),
+          credentialId: credential.credentialId,
+          agentId: credential.agentIdentityId,
+          membershipId: credential.membershipId,
+          bindingId: credential.bindingId,
+          credentialUpdatedAt: credential.credentialUpdatedAt,
         },
-        preview: `‘${agent.display_name}’의 가장 최근 활성 연결 키 하나를 전역으로 회전합니다. 이 키를 사용하던 모든 워크스페이스 연결에 영향이 있으며, 새 키는 승인한 사람에게 한 번만 표시됩니다.`,
+        preview: `‘${credential.displayName}’의 선택한 연결 키를 회전합니다. 기존 키의 명시적 워크스페이스 연결만 새 키로 이어지며, 새 키는 승인한 사람에게 한 번만 표시됩니다.`,
       };
     }
     case "credential.revoke": {
-      const credential = database.prepare(
-        `SELECT credential.id, credential.agent_id,
-                membership.id AS membership_id, agent.display_name
-         FROM agent_credentials credential
-         JOIN agents agent ON agent.id = credential.agent_id
-         JOIN workspace_agents membership
-           ON membership.agent_identity_id = credential.agent_id
-          AND membership.workspace_id = ?
-         WHERE credential.id = ? AND credential.revoked_at IS NULL`,
-      ).get(workspaceId, proposal.payload.credentialId) as {
-        id: string;
-        agent_id: string;
-        membership_id: string;
-        display_name: string;
-      } | undefined;
+      const credential = toActiveBoundCredential(
+        activeBoundCredential(database, workspaceId, proposal.payload.credentialId),
+      );
       if (!credential) throw new AdminActionRequestError("NOT_FOUND", "활성 연결 키를 찾을 수 없습니다.");
       return {
         precondition: {
-          credentialId: credential.id,
-          agentId: credential.agent_id,
-          membershipId: credential.membership_id,
+          credentialId: credential.credentialId,
+          agentId: credential.agentIdentityId,
+          membershipId: credential.membershipId,
+          bindingId: credential.bindingId,
+          credentialUpdatedAt: credential.credentialUpdatedAt,
         },
-        preview: `‘${credential.display_name}’의 연결 키를 전역으로 폐기합니다. 이 키를 사용하는 모든 워크스페이스 연결이 즉시 중단되며, 에이전트 신원과 과거 기록은 유지됩니다.`,
+        preview: `‘${credential.displayName}’의 선택한 연결 키를 폐기합니다. 이 키의 모든 명시적 워크스페이스 연결이 즉시 중단되며, 에이전트 신원과 과거 기록은 유지됩니다.`,
       };
     }
   }
@@ -316,7 +393,7 @@ export function proposeAdminAction(
       serializedPayload,
       JSON.stringify(context.precondition),
       context.preview,
-      principal.agentId,
+      principal.membershipId,
       principal.displayName,
       now,
       expiresAt,
@@ -376,30 +453,29 @@ function assertPrecondition(
       throw new AdminActionRequestError("CONFLICT", "워크스페이스 설정이 요청 후 변경되었습니다. 새 요청이 필요합니다.");
     }
   }
-  if (proposal.actionType === "agent.update" || proposal.actionType === "credential.rotate") {
+  if (proposal.actionType === "agent.update") {
     const row = database.prepare(
-      "SELECT updated_at FROM workspace_agents WHERE workspace_id = ? AND id = ?",
+      "SELECT updated_at FROM workspace_agents WHERE workspace_id = ? AND agent_identity_id = ? AND revoked_at IS NULL",
     ).get(workspaceId, proposal.payload.agentId) as { updated_at: string } | undefined;
     if (!row || row.updated_at !== expected.agentUpdatedAt) {
       throw new AdminActionRequestError("CONFLICT", "에이전트 정보가 요청 후 변경되었습니다. 새 요청이 필요합니다.");
     }
   }
-  if (proposal.actionType === "credential.rotate") {
-    if (activeCredentialId(database, workspaceId, proposal.payload.agentId) !== expected.activeCredentialId) {
-      throw new AdminActionRequestError("CONFLICT", "연결 키가 요청 후 변경되었습니다. 새 요청이 필요합니다.");
-    }
-  }
-  if (proposal.actionType === "credential.revoke") {
-    const row = database.prepare(
-      `SELECT credential.agent_id
-       FROM agent_credentials credential
-       JOIN workspace_agents membership
-         ON membership.agent_identity_id = credential.agent_id
-        AND membership.workspace_id = ?
-       WHERE credential.id = ? AND credential.revoked_at IS NULL`,
-    ).get(workspaceId, proposal.payload.credentialId) as { agent_id: string } | undefined;
-    if (!row || row.agent_id !== expected.agentId) {
-      throw new AdminActionRequestError("CONFLICT", "연결 키가 요청 후 변경되거나 이미 폐기되었습니다.");
+  if (proposal.actionType === "credential.rotate" || proposal.actionType === "credential.revoke") {
+    const credential = toActiveBoundCredential(
+      activeBoundCredential(database, workspaceId, proposal.payload.credentialId),
+    );
+    if (
+      !credential
+      || credential.agentIdentityId !== expected.agentId
+      || credential.membershipId !== expected.membershipId
+      || credential.bindingId !== expected.bindingId
+      || credential.credentialUpdatedAt !== expected.credentialUpdatedAt
+    ) {
+      throw new AdminActionRequestError(
+        "CONFLICT",
+        "연결 키의 활성 워크스페이스 연결이 요청 후 변경되거나 이미 해제되었습니다.",
+      );
     }
   }
 }
@@ -457,41 +533,99 @@ function executeApprovedAction(
       return { result: { workspaceId, ...after } };
     }
     case "agent.connect": {
-      const created = createWorkspaceToken(database, {
+      const ownership = database.prepare(
+        `SELECT owner_type, organization_id
+         FROM workspace_ownership
+         WHERE workspace_id = ?`,
+      ).get(workspaceId) as {
+        owner_type: "personal" | "organization";
+        organization_id: string | null;
+      } | undefined;
+      if (!ownership) throw new AdminActionRequestError("NOT_FOUND", "워크스페이스 소유권을 찾을 수 없습니다.");
+      const agent = ownership.owner_type === "organization"
+        ? (() => {
+          if (!ownership.organization_id) {
+            throw new AdminActionRequestError("CONFLICT", "조직 워크스페이스 소유권이 올바르지 않습니다.");
+          }
+          return createOrganizationAgent(database, {
+            organizationId: ownership.organization_id,
+            userId: reviewer.id,
+            actorLabel: reviewer.name,
+            displayName: proposal.payload.name,
+          });
+        })()
+        : createAccountAgent(database, {
+          userId: reviewer.id,
+          displayName: proposal.payload.name,
+        });
+      const membership = assignAgentToWorkspace(database, {
         workspaceId,
         userId: reviewer.id,
-        name: proposal.payload.name,
-        role: proposal.payload.role,
-        scopes: proposal.payload.scopes,
-        rootDocumentId: proposal.payload.rootDocumentId,
+        agentId: agent.id,
+        accessProfile: proposal.payload.accessProfile,
+        ...(proposal.payload.capabilities ? { capabilities: proposal.payload.capabilities } : {}),
+        rootDocumentId: proposal.payload.rootDocumentId ?? null,
       });
+      const created = createAgentCredential(database, {
+        userId: reviewer.id,
+        agentId: agent.id,
+        name: proposal.payload.credentialName ?? `${proposal.payload.name} 연결 키`,
+        scopes: proposal.payload.scopes,
+        defaultWorkspaceId: workspaceId,
+        workspaceAllowlist: [workspaceId],
+      });
+      const tokenSummary = listWorkspaceTokens(database, workspaceId, reviewer.id)
+        .find((token) => token.id === created.credential.id);
+      if (!tokenSummary) {
+        throw new AdminActionRequestError("CONFLICT", "생성된 연결 키의 명시적 워크스페이스 연결을 확인할 수 없습니다.");
+      }
       return {
-        result: { tokenSummary: created.summary },
+        result: {
+          agentId: agent.id,
+          membershipId: membership.membershipId,
+          tokenSummary,
+        },
         revealedToken: created.token,
-        tokenSummary: created.summary,
+        tokenSummary,
       };
     }
     case "agent.update": {
-      const agent = updateWorkspaceAgent(database, {
+      const current = database.prepare(
+        `SELECT root_document_id
+         FROM workspace_agents
+         WHERE workspace_id = ? AND agent_identity_id = ? AND revoked_at IS NULL`,
+      ).get(workspaceId, proposal.payload.agentId) as { root_document_id: string | null } | undefined;
+      if (!current) throw new AdminActionRequestError("NOT_FOUND", "에이전트를 찾을 수 없습니다.");
+      const agent = updateAgentWorkspaceMembership(database, {
         workspaceId,
         userId: reviewer.id,
         agentId: proposal.payload.agentId,
-        displayName: proposal.payload.displayName,
-        role: proposal.payload.role,
+        ...(proposal.payload.accessProfile ? { accessProfile: proposal.payload.accessProfile } : {}),
+        ...(proposal.payload.capabilities ? { capabilities: proposal.payload.capabilities } : {}),
+        rootDocumentId: proposal.payload.rootDocumentId === undefined
+          ? current.root_document_id
+          : proposal.payload.rootDocumentId,
         status: proposal.payload.status,
       });
       return { result: { agent } };
     }
     case "credential.rotate": {
-      const globalAgentId = globalAgentIdForMembership(database, workspaceId, proposal.payload.agentId);
-      const credentialId = activeCredentialId(database, workspaceId, proposal.payload.agentId);
-      if (!globalAgentId || !credentialId) {
-        throw new AdminActionRequestError("NOT_FOUND", "회전할 활성 연결 키를 찾을 수 없습니다.");
+      const credential = toActiveBoundCredential(
+        activeBoundCredential(database, workspaceId, proposal.payload.credentialId),
+      );
+      if (!credential) {
+        throw new AdminActionRequestError(
+          "NOT_FOUND",
+          "회전할 명시적 워크스페이스 연결 키를 찾을 수 없습니다.",
+        );
       }
+      // Legacy credentials may still have an empty serialized allowlist. Bindings are canonical,
+      // so synchronize only this explicitly selected credential before the rotation helper clones it.
+      synchronizeSelectedCredentialBindingsForRotation(database, credential.credentialId);
       const rotated = rotateAgentCredential(database, {
         userId: reviewer.id,
-        agentId: globalAgentId,
-        credentialId,
+        agentId: credential.agentIdentityId,
+        credentialId: credential.credentialId,
       });
       const summary = listWorkspaceTokens(database, workspaceId, reviewer.id)
         .find((token) => token.id === rotated.credential.id);
@@ -503,12 +637,21 @@ function executeApprovedAction(
       };
     }
     case "credential.revoke": {
-      revokeWorkspaceToken(database, {
-        workspaceId,
+      const credential = toActiveBoundCredential(
+        activeBoundCredential(database, workspaceId, proposal.payload.credentialId),
+      );
+      if (!credential) {
+        throw new AdminActionRequestError(
+          "NOT_FOUND",
+          "폐기할 명시적 워크스페이스 연결 키를 찾을 수 없습니다.",
+        );
+      }
+      revokeAgentCredential(database, {
         userId: reviewer.id,
-        tokenId: proposal.payload.credentialId,
+        agentId: credential.agentIdentityId,
+        credentialId: credential.credentialId,
       });
-      return { result: { credentialId: proposal.payload.credentialId, revoked: true } };
+      return { result: { credentialId: credential.credentialId, revoked: true } };
     }
   }
 }

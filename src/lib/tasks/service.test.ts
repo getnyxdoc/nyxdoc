@@ -26,6 +26,41 @@ afterEach(() => {
 });
 
 describe("document task service", () => {
+  it("rejects direct task actions after the credential grant binding is revoked", () => {
+    const database = createTestDatabase();
+    databases.push(database);
+    const { user, workspace } = createTestUser(database);
+    const connection = createWorkspaceToken(database, {
+      workspaceId: workspace.id,
+      userId: user.id,
+      name: "Unbound task agent",
+      role: "editor",
+    });
+    const identity = authenticateApiToken(database, `Bearer ${connection.token}`);
+    const task = createDocumentTask(
+      database,
+      workspace.id,
+      humanDocumentActor(user),
+      { title: "Binding-protected task", assignedAgentId: identity.agentId },
+    );
+    database.prepare(
+      `UPDATE agent_credential_grant_bindings
+       SET status = 'revoked', revoked_at = ?
+       WHERE credential_id = ?`,
+    ).run("2026-08-03T00:00:00.000Z", identity.id);
+
+    expect(() => claimDocumentTask(
+      database,
+      workspace.id,
+      task.id,
+      tokenDocumentActor(identity, "mcp"),
+      {
+        expectedVersion: task.version,
+        requestId: "unbound-task-claim-001",
+      },
+    )).toThrowError(expect.objectContaining({ code: "FORBIDDEN" }));
+  });
+
   it("carries a human request through agent claim, progress, review, and acceptance", () => {
     const database = createTestDatabase();
     databases.push(database);

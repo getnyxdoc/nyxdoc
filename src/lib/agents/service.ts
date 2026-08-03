@@ -2,9 +2,12 @@ import { createHash, randomBytes, randomUUID } from "node:crypto";
 import {
   AGENT_NON_DELEGABLE_PERMISSIONS,
   WORKSPACE_PERMISSIONS,
+  legacyRoleForAgentProfile,
+  listAgentProfilePermissions,
   listAgentPrincipalPermissions,
   recordWorkspaceAuditEvent,
   requireHumanWorkspacePermission,
+  type AgentAccessProfile,
   type AgentWorkspaceRole,
   type WorkspacePermission,
 } from "@/lib/authz/permissions";
@@ -21,19 +24,30 @@ import {
   requireOrganizationPermission,
 } from "@/lib/organizations/service";
 
+export type AgentCredentialBindingSummary = {
+  id: string;
+  grantId: string;
+  workspaceId: string;
+  workspaceName: string;
+  status: "active" | "revoked";
+  createdAt: string;
+  revokedAt: string | null;
+};
+
 export type AgentCredentialSummary = {
   id: string;
   name: string;
   prefix: string;
   scopes: ApiTokenScope[];
   defaultWorkspaceId: string | null;
-  workspaceAllowlist: string[];
+  workspaceIds: string[];
   ipAllowlist: string[];
   lastUsedAt: string | null;
   lastUsedIp: string | null;
   expiresAt: string | null;
   revokedAt: string | null;
   createdAt: string;
+  bindings: AgentCredentialBindingSummary[];
 };
 
 export type AgentWorkspaceMembershipSummary = {
@@ -41,10 +55,12 @@ export type AgentWorkspaceMembershipSummary = {
   agentId: string;
   workspaceId: string;
   workspaceName: string;
-  role: AgentWorkspaceRole;
+  accessProfile: AgentAccessProfile;
+  capabilities: WorkspacePermission[];
+  scopeMode: "workspace" | "document_tree";
+  policyVersion: number;
+  revokedAt: string | null;
   status: "active" | "disabled";
-  permissionAllow: WorkspacePermission[];
-  permissionDeny: WorkspacePermission[];
   effectivePermissions: WorkspacePermission[];
   rootDocumentId: string | null;
   rootDocumentTitle: string | null;
@@ -75,29 +91,104 @@ export type ConnectAgentToWorkspaceInput = {
   agent:
     | { mode: "existing"; agentId: string }
     | { mode: "new"; displayName: string };
-  role: AgentWorkspaceRole;
+  accessProfile?: AgentAccessProfile;
+  capabilities?: WorkspacePermission[];
   rootDocumentId: string | null;
   credential:
     | { mode: "existing"; credentialId: string }
-    | { mode: "new"; name: string; restrictToWorkspace: boolean };
+    | { mode: "new"; name: string; restrictToWorkspace: boolean }
+    | { mode: "later" };
 };
 
 export type ConnectAgentToWorkspaceResult = {
   agent: AccountAgentSummary;
   membership: AgentWorkspaceMembershipSummary;
-  credential: AgentCredentialSummary;
+  credential: AgentCredentialSummary | null;
+  binding: AgentCredentialBindingSummary | null;
   token: string | null;
-  expandedCredentialWorkspaceAllowlist: boolean;
 };
 
 export class AgentServiceError extends Error {
   constructor(
-    public readonly code: "FORBIDDEN" | "INVALID_INPUT" | "NOT_FOUND" | "CONFLICT",
+    public readonly code:
+      | "FORBIDDEN"
+      | "INVALID_INPUT"
+      | "NOT_FOUND"
+      | "CONFLICT"
+      | "AGENT_TENANT_MISMATCH"
+      | "GRANT_ALREADY_ACTIVE"
+      | "INVALID_DOCUMENT_SCOPE"
+      | "CREDENTIAL_AGENT_MISMATCH"
+      | "CREDENTIAL_REVOKED"
+      | "CREDENTIAL_EXPIRED"
+      | "CREDENTIAL_NOT_BOUND_TO_GRANT",
     message: string,
+    public readonly details?: Record<string, unknown>,
   ) {
     super(message);
     this.name = "AgentServiceError";
   }
+}
+
+function normalizeCapabilities(
+  profile: AgentAccessProfile,
+  explicitCapabilities?: readonly WorkspacePermission[],
+) {
+  if (profile === "custom" && !explicitCapabilities?.length) {
+    throw new AgentServiceError(
+      "INVALID_INPUT",
+      "사용자 지정 접근 프로필에는 하나 이상의 명시적 권한이 필요합니다.",
+      { field: "capabilities" },
+    );
+  }
+  const profileCapabilities = profile === "custom" ? [] : listAgentProfilePermissions(profile);
+  if (profile !== "custom" && explicitCapabilities) {
+    const explicit = new Set(explicitCapabilities);
+    const differs = explicit.size !== profileCapabilities.length
+      || profileCapabilities.some((permission) => !explicit.has(permission));
+    if (differs) {
+      throw new AgentServiceError(
+        "INVALID_INPUT",
+        "고정 접근 프로필과 상충하는 개별 권한을 함께 지정할 수 없습니다.",
+        { field: "capabilities", accessProfile: profile },
+      );
+    }
+  }
+  const values = profile === "custom"
+    ? Array.from(new Set(explicitCapabilities))
+    : profileCapabilities;
+  if (values.some((permission) => !WORKSPACE_PERMISSIONS.includes(permission))) {
+    throw new AgentServiceError("INVALID_INPUT", "알 수 없는 에이전트 권한이 포함되어 있습니다.");
+  }
+  const protectedPermission = values.find((permission) => AGENT_NON_DELEGABLE_PERMISSIONS.has(permission));
+  if (protectedPermission) {
+    throw new AgentServiceError(
+      "INVALID_INPUT",
+      "사람에게만 허용된 보호 권한은 에이전트 접근에 추가할 수 없습니다.",
+      { field: "capabilities", permission: protectedPermission },
+    );
+  }
+  const needsDocumentRead = values.some((permission) => [
+    "documents.create",
+    "documents.update",
+    "documents.commit",
+    "documents.trash_own",
+    "documents.trash",
+    "documents.restore",
+    "revisions.read",
+    "revisions.restore",
+    "changes.read",
+    "media.upload",
+    "exports.create",
+  ].includes(permission));
+  if (needsDocumentRead && !values.includes("documents.read")) {
+    throw new AgentServiceError(
+      "INVALID_INPUT",
+      "문서 작업 권한에는 문서 읽기 권한이 필요합니다.",
+      { field: "capabilities", requires: "documents.read" },
+    );
+  }
+  return WORKSPACE_PERMISSIONS.filter((permission) => values.includes(permission));
 }
 
 function parseJsonList<T extends string>(value: string, allowed?: readonly T[]) {
@@ -256,27 +347,30 @@ function membershipFromRow(row: {
   agent_identity_id: string;
   workspace_id: string;
   workspace_name: string;
-  role: AgentWorkspaceRole;
+  access_profile: AgentAccessProfile;
+  capabilities_json: string;
+  scope_mode: "workspace" | "document_tree";
+  policy_version: number;
+  revoked_at: string | null;
   status: "active" | "disabled";
-  permission_allow_json: string;
-  permission_deny_json: string;
   root_document_id: string | null;
   root_document_title: string | null;
   created_at: string;
   updated_at: string;
 }): AgentWorkspaceMembershipSummary {
-  const permissionAllow = parseJsonList(row.permission_allow_json, WORKSPACE_PERMISSIONS);
-  const permissionDeny = parseJsonList(row.permission_deny_json, WORKSPACE_PERMISSIONS);
+  const capabilities = parseJsonList(row.capabilities_json, WORKSPACE_PERMISSIONS);
   return {
     membershipId: row.membership_id,
     agentId: row.agent_identity_id,
     workspaceId: row.workspace_id,
     workspaceName: row.workspace_name,
-    role: row.role,
+    accessProfile: row.access_profile,
+    capabilities,
+    scopeMode: row.scope_mode,
+    policyVersion: Number(row.policy_version),
+    revokedAt: row.revoked_at,
     status: row.status,
-    permissionAllow,
-    permissionDeny,
-    effectivePermissions: listAgentPrincipalPermissions({ role: row.role, permissionAllow, permissionDeny }),
+    effectivePermissions: listAgentPrincipalPermissions({ capabilities }),
     rootDocumentId: row.root_document_id,
     rootDocumentTitle: row.root_document_title,
     createdAt: row.created_at,
@@ -312,22 +406,230 @@ function credentialFromRow(row: {
     prefix: row.token_prefix,
     scopes,
     defaultWorkspaceId: row.default_workspace_id,
-    workspaceAllowlist: parseJsonList<string>(row.workspace_allowlist_json),
+    workspaceIds: parseJsonList<string>(row.workspace_allowlist_json),
     ipAllowlist: parseJsonList<string>(row.ip_allowlist_json),
     lastUsedAt: row.last_used_at,
     lastUsedIp: row.last_used_ip,
     expiresAt: row.expires_at,
     revokedAt: row.revoked_at,
     createdAt: row.created_at,
+    bindings: [],
   };
+}
+
+function listCredentialBindings(database: NyxDatabase, credentialId: string) {
+  return (database.prepare(
+    `SELECT binding.id, binding.grant_id, membership.workspace_id,
+            workspace.name AS workspace_name, binding.status,
+            binding.created_at, binding.revoked_at
+     FROM agent_credential_grant_bindings binding
+     JOIN workspace_agents membership ON membership.id = binding.grant_id
+     JOIN workspaces workspace ON workspace.id = membership.workspace_id
+     WHERE binding.credential_id = ?
+     ORDER BY binding.status, workspace.name COLLATE NOCASE, binding.created_at`,
+  ).all(credentialId) as Array<{
+    id: string;
+    grant_id: string;
+    workspace_id: string;
+    workspace_name: string;
+    status: "active" | "revoked";
+    created_at: string;
+    revoked_at: string | null;
+  }>).map((row): AgentCredentialBindingSummary => ({
+    id: row.id,
+    grantId: row.grant_id,
+    workspaceId: row.workspace_id,
+    workspaceName: row.workspace_name,
+    status: row.status,
+    createdAt: row.created_at,
+    revokedAt: row.revoked_at,
+  }));
+}
+
+type ActiveGrantRow = {
+  id: string;
+  workspace_id: string;
+  workspace_name: string;
+  agent_identity_id: string;
+};
+
+function listActiveGrantRows(database: NyxDatabase, agentId: string) {
+  return database.prepare(
+    `SELECT membership.id, membership.workspace_id, workspace.name AS workspace_name,
+            membership.agent_identity_id
+     FROM workspace_agents membership
+     JOIN workspaces workspace ON workspace.id = membership.workspace_id
+     WHERE membership.agent_identity_id = ?
+       AND membership.status = 'active'
+       AND membership.revoked_at IS NULL
+       AND workspace.lifecycle_state = 'active'
+     ORDER BY workspace.name COLLATE NOCASE, membership.created_at`,
+  ).all(agentId) as ActiveGrantRow[];
+}
+
+function resolveCredentialGrantRows(
+  database: NyxDatabase,
+  input: {
+    userId: string;
+    agentId: string;
+    workspaceIds: readonly string[];
+  },
+) {
+  const activeGrants = listActiveGrantRows(database, input.agentId);
+  const requestedWorkspaceIds = Array.from(new Set(input.workspaceIds));
+  // Bindings are always explicit. An empty list means that the credential is
+  // currently unbound; it never means present or future access to everything.
+  const selected = activeGrants.filter(
+    (grant) => requestedWorkspaceIds.includes(grant.workspace_id),
+  );
+  if (requestedWorkspaceIds.some(
+    (workspaceId) => !selected.some((grant) => grant.workspace_id === workspaceId),
+  )) {
+    throw new AgentServiceError(
+      "INVALID_INPUT",
+      "에이전트 접근 권한이 없는 워크스페이스가 연결 키 범위에 포함되어 있습니다.",
+      { field: "workspaceIds" },
+    );
+  }
+  for (const grant of selected) {
+    requireAgentWorkspaceAccess(database, grant.workspace_id, input.userId, "manage");
+  }
+  return selected;
+}
+
+function reconcileCredentialGrantBindings(
+  database: NyxDatabase,
+  input: {
+    userId: string;
+    agentId: string;
+    credentialId: string;
+    workspaceIds: readonly string[];
+  },
+) {
+  const selected = resolveCredentialGrantRows(database, input);
+  const selectedGrantIds = new Set(selected.map((grant) => grant.id));
+  const now = new Date().toISOString();
+  const existing = database.prepare(
+    `SELECT binding.id, binding.grant_id, binding.status, binding.revoked_at
+     FROM agent_credential_grant_bindings binding
+     JOIN workspace_agents membership ON membership.id = binding.grant_id
+     WHERE binding.credential_id = ? AND membership.agent_identity_id = ?`,
+  ).all(input.credentialId, input.agentId) as Array<{
+    id: string;
+    grant_id: string;
+    status: "active" | "revoked";
+    revoked_at: string | null;
+  }>;
+  const activeByGrant = new Map(existing
+    .filter((binding) => binding.status === "active" && !binding.revoked_at)
+    .map((binding) => [binding.grant_id, binding]));
+
+  for (const binding of activeByGrant.values()) {
+    if (selectedGrantIds.has(binding.grant_id)) continue;
+    database.prepare(
+      `UPDATE agent_credential_grant_bindings
+       SET status = 'revoked', revoked_at = ? WHERE id = ?`,
+    ).run(now, binding.id);
+  }
+  for (const grant of selected) {
+    if (activeByGrant.has(grant.id)) continue;
+    database.prepare(
+      `INSERT INTO agent_credential_grant_bindings
+       (id, credential_id, grant_id, status, created_by_user_id, created_at, revoked_at)
+       VALUES (?, ?, ?, 'active', ?, ?, NULL)`,
+    ).run(randomUUID(), input.credentialId, grant.id, input.userId, now);
+  }
+  return selected;
+}
+
+export function bindAgentCredentialToGrant(
+  database: NyxDatabase,
+  input: {
+    userId: string;
+    agentId: string;
+    credentialId: string;
+    grantId: string;
+  },
+) {
+  requireMutableAgent(
+    requireOwnedAgent(database, input.userId, input.agentId),
+    "연결 키를 워크스페이스 접근에 연결",
+  );
+  const credential = database.prepare(
+    `SELECT id, revoked_at, expires_at
+     FROM agent_credentials WHERE id = ? AND agent_id = ?`,
+  ).get(input.credentialId, input.agentId) as {
+    id: string;
+    revoked_at: string | null;
+    expires_at: string | null;
+  } | undefined;
+  if (!credential) {
+    throw new AgentServiceError(
+      "CREDENTIAL_AGENT_MISMATCH",
+      "선택한 연결 키는 이 에이전트에 속하지 않습니다.",
+      { credentialId: input.credentialId, agentId: input.agentId },
+    );
+  }
+  if (credential.revoked_at) {
+    throw new AgentServiceError("CREDENTIAL_REVOKED", "폐기된 연결 키는 사용할 수 없습니다.");
+  }
+  if (credential.expires_at && Date.parse(credential.expires_at) <= Date.now()) {
+    throw new AgentServiceError("CREDENTIAL_EXPIRED", "만료된 연결 키는 사용할 수 없습니다.");
+  }
+  const grant = database.prepare(
+    `SELECT membership.id, membership.workspace_id, membership.agent_identity_id
+     FROM workspace_agents membership
+     JOIN workspaces workspace ON workspace.id = membership.workspace_id
+     WHERE membership.id = ? AND membership.status = 'active'
+       AND membership.revoked_at IS NULL AND workspace.lifecycle_state = 'active'`,
+  ).get(input.grantId) as {
+    id: string;
+    workspace_id: string;
+    agent_identity_id: string;
+  } | undefined;
+  if (!grant) throw new AgentServiceError("NOT_FOUND", "활성 에이전트 접근 권한을 찾을 수 없습니다.");
+  if (grant.agent_identity_id !== input.agentId) {
+    throw new AgentServiceError(
+      "CREDENTIAL_AGENT_MISMATCH",
+      "연결 키와 워크스페이스 접근 권한의 에이전트가 다릅니다.",
+    );
+  }
+  requireAgentWorkspaceAccess(database, grant.workspace_id, input.userId, "manage");
+  const active = database.prepare(
+    `SELECT id FROM agent_credential_grant_bindings
+     WHERE credential_id = ? AND grant_id = ?
+       AND status = 'active' AND revoked_at IS NULL`,
+  ).get(input.credentialId, input.grantId) as { id: string } | undefined;
+  if (!active) {
+    const now = new Date().toISOString();
+    database.prepare(
+      `INSERT INTO agent_credential_grant_bindings
+       (id, credential_id, grant_id, status, created_by_user_id, created_at, revoked_at)
+       VALUES (?, ?, ?, 'active', ?, ?, NULL)`,
+    ).run(randomUUID(), input.credentialId, input.grantId, input.userId, now);
+    recordWorkspaceAuditEvent(database, {
+      workspaceId: grant.workspace_id,
+      action: "agent.credential_bound",
+      actorType: "human",
+      actorUserId: input.userId,
+      actorLabel: "사용자",
+      targetType: "credential",
+      targetId: input.credentialId,
+      metadata: { agentId: input.agentId, grantId: input.grantId },
+      createdAt: now,
+    });
+  }
+  return listCredentialBindings(database, input.credentialId)
+    .find((binding) => binding.grantId === input.grantId && binding.status === "active")!;
 }
 
 function listMemberships(database: NyxDatabase, agentId: string) {
   return (database.prepare(
     `SELECT membership.id AS membership_id, membership.agent_identity_id,
             membership.workspace_id, workspace.name AS workspace_name,
-            membership.role, membership.status, membership.permission_allow_json,
-            membership.permission_deny_json, membership.root_document_id,
+            membership.access_profile, membership.capabilities_json,
+            membership.scope_mode, membership.policy_version, membership.revoked_at,
+            membership.status, membership.root_document_id,
             document.title AS root_document_title,
             membership.created_at, membership.updated_at
      FROM workspace_agents membership
@@ -335,7 +637,8 @@ function listMemberships(database: NyxDatabase, agentId: string) {
      JOIN workspace_ownership ownership ON ownership.workspace_id = workspace.id
      LEFT JOIN organizations organization ON organization.id = ownership.organization_id
      LEFT JOIN documents document ON document.id = membership.root_document_id
-     WHERE membership.agent_identity_id = ? AND workspace.lifecycle_state = 'active'
+     WHERE membership.agent_identity_id = ? AND membership.revoked_at IS NULL
+       AND workspace.lifecycle_state = 'active'
        AND (ownership.owner_type = 'personal' OR organization.lifecycle_state = 'active')
      ORDER BY workspace.name, membership.created_at`,
   ).all(agentId) as Parameters<typeof membershipFromRow>[0][]).map(membershipFromRow);
@@ -384,7 +687,17 @@ function listCredentials(database: NyxDatabase, agentId: string, includeRevoked 
      FROM agent_credentials
      WHERE agent_id = ? ${where}
      ORDER BY created_at DESC`,
-  ).all(agentId) as Parameters<typeof credentialFromRow>[0][]).map(credentialFromRow);
+  ).all(agentId) as Parameters<typeof credentialFromRow>[0][]).map((row) => {
+    const credential = credentialFromRow(row);
+    const bindings = listCredentialBindings(database, credential.id);
+    return {
+      ...credential,
+      bindings,
+      workspaceIds: bindings
+        .filter((binding) => binding.status === "active" && !binding.revokedAt)
+        .map((binding) => binding.workspaceId),
+    };
+  });
 }
 
 export function listAccountAgents(database: NyxDatabase, userId: string): AccountAgentSummary[] {
@@ -536,14 +849,15 @@ export function listWorkspaceAgentMemberships(
   return (database.prepare(
     `SELECT membership.id AS membership_id, membership.agent_identity_id,
             membership.workspace_id, workspace.name AS workspace_name,
-            membership.role, membership.status, membership.permission_allow_json,
-            membership.permission_deny_json, membership.root_document_id,
+            membership.access_profile, membership.capabilities_json,
+            membership.scope_mode, membership.policy_version, membership.revoked_at,
+            membership.status, membership.root_document_id,
             document.title AS root_document_title,
             membership.created_at, membership.updated_at
      FROM workspace_agents membership
      JOIN workspaces workspace ON workspace.id = membership.workspace_id
      LEFT JOIN documents document ON document.id = membership.root_document_id
-     WHERE membership.workspace_id = ?
+     WHERE membership.workspace_id = ? AND membership.revoked_at IS NULL
      ORDER BY membership.status, membership.display_name`,
   ).all(workspaceId) as Parameters<typeof membershipFromRow>[0][]).map(membershipFromRow);
 }
@@ -930,22 +1244,6 @@ export function purgeExpiredAccountAgents(
   return purgedIds;
 }
 
-function validatePermissionOverrides(allow: readonly WorkspacePermission[], deny: readonly WorkspacePermission[]) {
-  const permissionAllow = Array.from(new Set(allow));
-  const permissionDeny = Array.from(new Set(deny));
-  if ([...permissionAllow, ...permissionDeny].some((permission) => !WORKSPACE_PERMISSIONS.includes(permission))) {
-    throw new AgentServiceError("INVALID_INPUT", "알 수 없는 에이전트 권한이 포함되어 있습니다.");
-  }
-  const nonDelegable = permissionAllow.find((permission) => AGENT_NON_DELEGABLE_PERMISSIONS.has(permission));
-  if (nonDelegable) {
-    throw new AgentServiceError("INVALID_INPUT", `${nonDelegable} 권한은 사람의 승인 경계를 넘어 직접 위임할 수 없습니다.`);
-  }
-  return {
-    permissionAllow,
-    permissionDeny: permissionDeny.filter((permission) => !permissionAllow.includes(permission)),
-  };
-}
-
 function validateMembershipRoot(database: NyxDatabase, workspaceId: string, rootDocumentId: string | null) {
   if (!rootDocumentId) return null;
   const document = database.prepare(
@@ -1018,10 +1316,9 @@ export function assignAgentToWorkspace(
     userId: string;
     workspaceId: string;
     agentId: string;
-    role?: AgentWorkspaceRole;
+    accessProfile?: AgentAccessProfile;
+    capabilities?: WorkspacePermission[];
     rootDocumentId?: string | null;
-    permissionAllow?: WorkspacePermission[];
-    permissionDeny?: WorkspacePermission[];
   },
 ) {
   requireAgentWorkspaceAccess(database, input.workspaceId, input.userId, "manage");
@@ -1032,12 +1329,23 @@ export function assignAgentToWorkspace(
   const ownership = agentWorkspaceOwnershipCompatibility(database, input);
   if (agent.status !== "active") throw new AgentServiceError("INVALID_INPUT", "비활성 에이전트는 할당할 수 없습니다.");
   const existing = database.prepare(
-    "SELECT id, status FROM workspace_agents WHERE workspace_id = ? AND agent_identity_id = ?",
+    `SELECT id, status FROM workspace_agents
+     WHERE workspace_id = ? AND agent_identity_id = ? AND revoked_at IS NULL`,
   ).get(input.workspaceId, input.agentId) as { id: string; status: string } | undefined;
-  if (existing?.status === "active") throw new AgentServiceError("CONFLICT", "이미 이 워크스페이스에 할당된 에이전트입니다.");
-  const role = input.role ?? "viewer";
+  if (existing?.status === "active") {
+    throw new AgentServiceError(
+      "GRANT_ALREADY_ACTIVE",
+      "이미 이 워크스페이스에 활성 접근이 있습니다.",
+      { agentId: input.agentId, workspaceId: input.workspaceId, grantId: existing.id },
+    );
+  }
+  const accessProfile = input.accessProfile ?? "reader";
+  const capabilities = normalizeCapabilities(accessProfile, input.capabilities);
+  const role = accessProfile === "custom"
+    ? (capabilities.includes("documents.update") ? "editor" : "viewer")
+    : legacyRoleForAgentProfile(accessProfile);
   const rootDocumentId = validateMembershipRoot(database, input.workspaceId, input.rootDocumentId ?? null);
-  const overrides = validatePermissionOverrides(input.permissionAllow ?? [], input.permissionDeny ?? []);
+  const scopeMode = rootDocumentId ? "document_tree" : "workspace";
   const membershipId = existing?.id ?? randomUUID();
   const now = new Date().toISOString();
   database.transaction(() => {
@@ -1072,16 +1380,29 @@ export function assignAgentToWorkspace(
       database.prepare(
         `UPDATE workspace_agents
          SET role = ?, status = 'active', permission_allow_json = ?, permission_deny_json = ?,
-             root_document_id = ?, display_name = ?, updated_at = ?
+             root_document_id = ?, display_name = ?, access_profile = ?, capabilities_json = ?,
+             scope_mode = ?, policy_version = policy_version + 1, updated_at = ?
          WHERE id = ?`,
-      ).run(role, JSON.stringify(overrides.permissionAllow), JSON.stringify(overrides.permissionDeny), rootDocumentId, agent.display_name, now, membershipId);
+      ).run(
+        role,
+        "[]",
+        "[]",
+        rootDocumentId,
+        agent.display_name,
+        accessProfile,
+        JSON.stringify(capabilities),
+        scopeMode,
+        now,
+        membershipId,
+      );
     } else {
       database.prepare(
         `INSERT INTO workspace_agents
          (id, workspace_id, display_name, avatar_media_id, role, status,
           created_by_user_id, created_at, updated_at, agent_identity_id,
-          permission_allow_json, permission_deny_json, root_document_id)
-         VALUES (?, ?, ?, NULL, ?, 'active', ?, ?, ?, ?, ?, ?, ?)`,
+          permission_allow_json, permission_deny_json, root_document_id,
+          access_profile, capabilities_json, scope_mode, policy_version, revoked_at)
+         VALUES (?, ?, ?, NULL, ?, 'active', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, NULL)`,
       ).run(
         membershipId,
         input.workspaceId,
@@ -1091,9 +1412,12 @@ export function assignAgentToWorkspace(
         now,
         now,
         input.agentId,
-        JSON.stringify(overrides.permissionAllow),
-        JSON.stringify(overrides.permissionDeny),
+        "[]",
+        "[]",
         rootDocumentId,
+        accessProfile,
+        JSON.stringify(capabilities),
+        scopeMode,
       );
     }
     recordWorkspaceAuditEvent(database, {
@@ -1104,7 +1428,7 @@ export function assignAgentToWorkspace(
       actorLabel: "사용자",
       targetType: "agent",
       targetId: input.agentId,
-      metadata: { membershipId, role, rootDocumentId, ...overrides },
+      metadata: { membershipId, accessProfile, capabilities, rootDocumentId },
       createdAt: now,
     });
     recordOrganizationWorkspaceAgentAudit(database, {
@@ -1114,7 +1438,7 @@ export function assignAgentToWorkspace(
         : "organization.agent_workspace_assigned",
       userId: input.userId,
       agentId: input.agentId,
-      metadata: { membershipId, role, rootDocumentId, ...overrides },
+      metadata: { membershipId, accessProfile, capabilities, rootDocumentId },
       createdAt: now,
     });
   })();
@@ -1128,10 +1452,9 @@ export function updateAgentWorkspaceMembership(
     userId: string;
     workspaceId: string;
     agentId: string;
-    role: AgentWorkspaceRole;
+    accessProfile?: AgentAccessProfile;
+    capabilities?: WorkspacePermission[];
     rootDocumentId: string | null;
-    permissionAllow: WorkspacePermission[];
-    permissionDeny: WorkspacePermission[];
     status?: "active" | "disabled";
   },
 ) {
@@ -1141,28 +1464,51 @@ export function updateAgentWorkspaceMembership(
     "권한을 변경",
   );
   const current = database.prepare(
-    `SELECT id, role, status, root_document_id, permission_allow_json, permission_deny_json
-     FROM workspace_agents WHERE workspace_id = ? AND agent_identity_id = ?`,
+    `SELECT id, role, access_profile, capabilities_json, status, root_document_id,
+            policy_version
+     FROM workspace_agents
+     WHERE workspace_id = ? AND agent_identity_id = ? AND revoked_at IS NULL`,
   ).get(input.workspaceId, input.agentId) as {
     id: string;
     role: AgentWorkspaceRole;
+    access_profile: AgentAccessProfile;
+    capabilities_json: string;
     status: "active" | "disabled";
     root_document_id: string | null;
-    permission_allow_json: string;
-    permission_deny_json: string;
+    policy_version: number;
   } | undefined;
   if (!current) throw new AgentServiceError("NOT_FOUND", "워크스페이스 에이전트 할당을 찾을 수 없습니다.");
   const rootDocumentId = validateMembershipRoot(database, input.workspaceId, input.rootDocumentId);
-  const overrides = validatePermissionOverrides(input.permissionAllow, input.permissionDeny);
+  const accessProfile = input.accessProfile ?? current.access_profile;
+  const capabilities = normalizeCapabilities(
+    accessProfile,
+    input.capabilities ?? parseJsonList(current.capabilities_json, WORKSPACE_PERMISSIONS),
+  );
+  const role = accessProfile === "custom"
+    ? (capabilities.includes("documents.update") ? "editor" : "viewer")
+    : legacyRoleForAgentProfile(accessProfile);
   const status = input.status ?? current.status;
+  const scopeMode = rootDocumentId ? "document_tree" : "workspace";
   const now = new Date().toISOString();
   database.transaction(() => {
     database.prepare(
       `UPDATE workspace_agents
-       SET role = ?, status = ?, root_document_id = ?, permission_allow_json = ?,
-           permission_deny_json = ?, updated_at = ?
+       SET role = ?, access_profile = ?, capabilities_json = ?, status = ?,
+           root_document_id = ?, scope_mode = ?, permission_allow_json = ?,
+           permission_deny_json = ?, policy_version = policy_version + 1, updated_at = ?
        WHERE id = ?`,
-    ).run(input.role, status, rootDocumentId, JSON.stringify(overrides.permissionAllow), JSON.stringify(overrides.permissionDeny), now, current.id);
+    ).run(
+      role,
+      accessProfile,
+      JSON.stringify(capabilities),
+      status,
+      rootDocumentId,
+      scopeMode,
+      "[]",
+      "[]",
+      now,
+      current.id,
+    );
     recordWorkspaceAuditEvent(database, {
       workspaceId: input.workspaceId,
       action: status === "disabled" ? "agent.unassigned" : "agent.permissions_updated",
@@ -1175,12 +1521,12 @@ export function updateAgentWorkspaceMembership(
         membershipId: current.id,
         before: {
           role: current.role,
+          accessProfile: current.access_profile,
+          capabilities: parseJsonList(current.capabilities_json, WORKSPACE_PERMISSIONS),
           status: current.status,
           rootDocumentId: current.root_document_id,
-          permissionAllow: parseJsonList(current.permission_allow_json, WORKSPACE_PERMISSIONS),
-          permissionDeny: parseJsonList(current.permission_deny_json, WORKSPACE_PERMISSIONS),
         },
-        after: { role: input.role, status, rootDocumentId, ...overrides },
+        after: { role, accessProfile, capabilities, status, rootDocumentId },
       },
       createdAt: now,
     });
@@ -1195,12 +1541,12 @@ export function updateAgentWorkspaceMembership(
         membershipId: current.id,
         before: {
           role: current.role,
+          accessProfile: current.access_profile,
+          capabilities: parseJsonList(current.capabilities_json, WORKSPACE_PERMISSIONS),
           status: current.status,
           rootDocumentId: current.root_document_id,
-          permissionAllow: parseJsonList(current.permission_allow_json, WORKSPACE_PERMISSIONS),
-          permissionDeny: parseJsonList(current.permission_deny_json, WORKSPACE_PERMISSIONS),
         },
-        after: { role: input.role, status, rootDocumentId, ...overrides },
+        after: { role, accessProfile, capabilities, status, rootDocumentId },
       },
       createdAt: now,
     });
@@ -1217,35 +1563,30 @@ function normalizeScopes(scopes: readonly ApiTokenScope[]) {
   if (result.includes("documents:write") && !result.includes("documents:read")) {
     throw new AgentServiceError("INVALID_INPUT", "문서 쓰기에는 읽기 권한이 필요합니다.");
   }
-  if (result.includes("documents:commit") && !result.includes("documents:write")) {
-    throw new AgentServiceError("INVALID_INPUT", "정본 저장에는 문서 쓰기 권한이 필요합니다.");
+  if (result.includes("documents:commit") && !result.includes("documents:read")) {
+    throw new AgentServiceError("INVALID_INPUT", "정본 저장에는 문서 읽기 권한이 필요합니다.");
   }
-  if (result.includes("revisions:restore") && !result.includes("documents:commit")) {
-    throw new AgentServiceError("INVALID_INPUT", "리비전 복원에는 정본 저장 권한이 필요합니다.");
+  if (result.includes("revisions:restore") && !result.includes("documents:read")) {
+    throw new AgentServiceError("INVALID_INPUT", "리비전 복원에는 문서 읽기 권한이 필요합니다.");
   }
   return result;
 }
 
-function validateCredentialWorkspaces(
-  database: NyxDatabase,
-  agentId: string,
+function validateCredentialDefaultWorkspace(
   defaultWorkspaceId: string | null,
-  workspaceAllowlist: readonly string[],
+  selectedGrants: readonly ActiveGrantRow[],
 ) {
-  const memberships = new Set((database.prepare(
-    "SELECT workspace_id FROM workspace_agents WHERE agent_identity_id = ? AND status = 'active'",
-  ).all(agentId) as Array<{ workspace_id: string }>).map((row) => row.workspace_id));
-  const allowlist = Array.from(new Set(workspaceAllowlist));
-  if (allowlist.some((workspaceId) => !memberships.has(workspaceId))) {
-    throw new AgentServiceError("INVALID_INPUT", "에이전트가 할당되지 않은 워크스페이스가 키 제한에 포함되어 있습니다.");
+  if (
+    defaultWorkspaceId
+    && !selectedGrants.some((grant) => grant.workspace_id === defaultWorkspaceId)
+  ) {
+    throw new AgentServiceError(
+      "INVALID_INPUT",
+      "기본 워크스페이스는 이 연결 키에 명시적으로 연결되어 있어야 합니다.",
+      { field: "defaultWorkspaceId" },
+    );
   }
-  if (defaultWorkspaceId && !memberships.has(defaultWorkspaceId)) {
-    throw new AgentServiceError("INVALID_INPUT", "기본 워크스페이스에 먼저 에이전트를 할당해주세요.");
-  }
-  if (defaultWorkspaceId && allowlist.length && !allowlist.includes(defaultWorkspaceId)) {
-    throw new AgentServiceError("INVALID_INPUT", "기본 워크스페이스는 키의 허용 범위에도 포함되어야 합니다.");
-  }
-  return { defaultWorkspaceId, workspaceAllowlist: allowlist };
+  return defaultWorkspaceId;
 }
 
 function normalizeExpiry(value: string | null | undefined) {
@@ -1283,12 +1624,16 @@ export function createAgentCredential(
   if (activeCount.count >= 20) throw new AgentServiceError("INVALID_INPUT", "활성 연결 키는 에이전트마다 최대 20개입니다.");
   const name = normalizedName(input.name, "연결 키 이름");
   const scopes = normalizeScopes(input.scopes ?? DEFAULT_API_TOKEN_SCOPES);
-  const workspaces = validateCredentialWorkspaces(
-    database,
-    input.agentId,
+  const selectedGrants = resolveCredentialGrantRows(database, {
+    userId: input.userId,
+    agentId: input.agentId,
+    workspaceIds: input.workspaceAllowlist ?? [],
+  });
+  const defaultWorkspaceId = validateCredentialDefaultWorkspace(
     input.defaultWorkspaceId ?? null,
-    input.workspaceAllowlist ?? [],
+    selectedGrants,
   );
+  const workspaceIds = selectedGrants.map((grant) => grant.workspace_id);
   let ipAllowlist: string[];
   try {
     ipAllowlist = normalizeIpAllowlist(input.ipAllowlist ?? []);
@@ -1301,28 +1646,36 @@ export function createAgentCredential(
   const prefix = `nyx_live_${secret.slice(0, 7)}`;
   const id = randomUUID();
   const now = new Date().toISOString();
-  database.prepare(
-    `INSERT INTO agent_credentials
-     (id, agent_id, created_by_user_id, name, token_prefix, token_hash,
-      scopes_json, default_workspace_id, workspace_allowlist_json,
-      ip_allowlist_json, last_used_at, last_used_ip, expires_at, revoked_at,
-      created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, NULL, ?, ?)`,
-  ).run(
-    id,
-    input.agentId,
-    input.userId,
-    name,
-    prefix,
-    createHash("sha256").update(token, "utf8").digest("hex"),
-    JSON.stringify(scopes),
-    workspaces.defaultWorkspaceId,
-    JSON.stringify(workspaces.workspaceAllowlist),
-    JSON.stringify(ipAllowlist),
-    expiresAt,
-    now,
-    now,
-  );
+  database.transaction(() => {
+    database.prepare(
+      `INSERT INTO agent_credentials
+       (id, agent_id, created_by_user_id, name, token_prefix, token_hash,
+        scopes_json, default_workspace_id, workspace_allowlist_json,
+        ip_allowlist_json, last_used_at, last_used_ip, expires_at, revoked_at,
+        created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, NULL, ?, ?)`,
+    ).run(
+      id,
+      input.agentId,
+      input.userId,
+      name,
+      prefix,
+      createHash("sha256").update(token, "utf8").digest("hex"),
+      JSON.stringify(scopes),
+      defaultWorkspaceId,
+      JSON.stringify(workspaceIds),
+      JSON.stringify(ipAllowlist),
+      expiresAt,
+      now,
+      now,
+    );
+    reconcileCredentialGrantBindings(database, {
+      userId: input.userId,
+      agentId: input.agentId,
+      credentialId: id,
+      workspaceIds,
+    });
+  })();
   recordGlobalAgentAudit(database, {
     agentId: input.agentId,
     userId: input.userId,
@@ -1332,8 +1685,8 @@ export function createAgentCredential(
     metadata: {
       prefix,
       scopes,
-      defaultWorkspaceId: workspaces.defaultWorkspaceId,
-      workspaceAllowlist: workspaces.workspaceAllowlist,
+      defaultWorkspaceId,
+      workspaceIds,
       ipAllowlist,
       expiresAt,
     },
@@ -1366,7 +1719,16 @@ export function updateAgentCredential(
   if (!current) throw new AgentServiceError("NOT_FOUND", "활성 연결 키를 찾을 수 없습니다.");
   const name = normalizedName(input.name, "연결 키 이름");
   const scopes = normalizeScopes(input.scopes);
-  const workspaces = validateCredentialWorkspaces(database, input.agentId, input.defaultWorkspaceId, input.workspaceAllowlist);
+  const selectedGrants = resolveCredentialGrantRows(database, {
+    userId: input.userId,
+    agentId: input.agentId,
+    workspaceIds: input.workspaceAllowlist,
+  });
+  const defaultWorkspaceId = validateCredentialDefaultWorkspace(
+    input.defaultWorkspaceId,
+    selectedGrants,
+  );
+  const workspaceIds = selectedGrants.map((grant) => grant.workspace_id);
   let ipAllowlist: string[];
   try {
     ipAllowlist = normalizeIpAllowlist(input.ipAllowlist);
@@ -1375,12 +1737,30 @@ export function updateAgentCredential(
   }
   const expiresAt = normalizeExpiry(input.expiresAt);
   const now = new Date().toISOString();
-  database.prepare(
-    `UPDATE agent_credentials
-     SET name = ?, scopes_json = ?, default_workspace_id = ?,
-         workspace_allowlist_json = ?, ip_allowlist_json = ?, expires_at = ?, updated_at = ?
-     WHERE id = ? AND agent_id = ? AND revoked_at IS NULL`,
-  ).run(name, JSON.stringify(scopes), workspaces.defaultWorkspaceId, JSON.stringify(workspaces.workspaceAllowlist), JSON.stringify(ipAllowlist), expiresAt, now, input.credentialId, input.agentId);
+  database.transaction(() => {
+    database.prepare(
+      `UPDATE agent_credentials
+       SET name = ?, scopes_json = ?, default_workspace_id = ?,
+           workspace_allowlist_json = ?, ip_allowlist_json = ?, expires_at = ?, updated_at = ?
+       WHERE id = ? AND agent_id = ? AND revoked_at IS NULL`,
+    ).run(
+      name,
+      JSON.stringify(scopes),
+      defaultWorkspaceId,
+      JSON.stringify(workspaceIds),
+      JSON.stringify(ipAllowlist),
+      expiresAt,
+      now,
+      input.credentialId,
+      input.agentId,
+    );
+    reconcileCredentialGrantBindings(database, {
+      userId: input.userId,
+      agentId: input.agentId,
+      credentialId: input.credentialId,
+      workspaceIds,
+    });
+  })();
   recordGlobalAgentAudit(database, {
     agentId: input.agentId,
     userId: input.userId,
@@ -1390,8 +1770,8 @@ export function updateAgentCredential(
     metadata: {
       name,
       scopes,
-      defaultWorkspaceId: workspaces.defaultWorkspaceId,
-      workspaceAllowlist: workspaces.workspaceAllowlist,
+      defaultWorkspaceId,
+      workspaceIds,
       ipAllowlist,
       expiresAt,
     },
@@ -1400,39 +1780,14 @@ export function updateAgentCredential(
   return listCredentials(database, input.agentId).find((credential) => credential.id === input.credentialId)!;
 }
 
-function wizardCredentialScopes(role: AgentWorkspaceRole): ApiTokenScope[] {
-  if (role === "viewer") return ["documents:read", "changes:read"];
-  return [
-    "documents:read",
-    "documents:write",
-    "documents:commit",
-    "changes:read",
-    "revisions:restore",
-  ];
-}
-
-function validateCredentialForWorkspaceRole(
-  credential: AgentCredentialSummary,
-  role: AgentWorkspaceRole,
-) {
-  if (credential.revokedAt) {
-    throw new AgentServiceError("INVALID_INPUT", "폐기된 연결 키는 사용할 수 없습니다.");
-  }
-  if (credential.expiresAt && Date.parse(credential.expiresAt) <= Date.now()) {
-    throw new AgentServiceError("INVALID_INPUT", "만료된 연결 키는 사용할 수 없습니다.");
-  }
-  if (!credential.scopes.includes("documents:read")) {
-    throw new AgentServiceError("INVALID_INPUT", "이 연결 키에는 문서 읽기 권한이 없습니다.");
-  }
-  if (role !== "viewer" && (
-    !credential.scopes.includes("documents:write")
-    || !credential.scopes.includes("documents:commit")
-  )) {
-    throw new AgentServiceError(
-      "INVALID_INPUT",
-      "에디터와 관리자 역할에는 읽기·쓰기·정본 저장이 가능한 연결 키가 필요합니다.",
-    );
-  }
+function wizardCredentialScopes(capabilities: readonly WorkspacePermission[]): ApiTokenScope[] {
+  const scopes: ApiTokenScope[] = [];
+  if (capabilities.includes("documents.read")) scopes.push("documents:read");
+  if (capabilities.includes("documents.update")) scopes.push("documents:write");
+  if (capabilities.includes("documents.commit")) scopes.push("documents:commit");
+  if (capabilities.includes("changes.read")) scopes.push("changes:read");
+  if (capabilities.includes("revisions.restore")) scopes.push("revisions:restore");
+  return scopes.length ? scopes : ["documents:read"];
 }
 
 export function connectAgentToWorkspace(
@@ -1483,59 +1838,51 @@ export function connectAgentToWorkspace(
       if (!existingCredential) {
         throw new AgentServiceError("NOT_FOUND", "선택한 에이전트의 연결 키를 찾을 수 없습니다.");
       }
-      validateCredentialForWorkspaceRole(existingCredential, input.role);
     }
 
     const membership = assignAgentToWorkspace(database, {
       userId: input.userId,
       workspaceId: input.workspaceId,
       agentId: selectedAgent.id,
-      role: input.role,
+      accessProfile: input.accessProfile,
+      capabilities: input.capabilities,
       rootDocumentId: input.rootDocumentId,
     });
 
     let token: string | null = null;
-    let credential: AgentCredentialSummary;
-    let expandedCredentialWorkspaceAllowlist = false;
+    let credential: AgentCredentialSummary | null = null;
+    let binding: AgentCredentialBindingSummary | null = null;
     if (input.credential.mode === "new") {
       const created = createAgentCredential(database, {
         userId: input.userId,
         agentId: selectedAgent.id,
         name: input.credential.name,
-        scopes: wizardCredentialScopes(input.role),
+        scopes: wizardCredentialScopes(membership.capabilities),
         defaultWorkspaceId: input.workspaceId,
-        workspaceAllowlist: input.credential.restrictToWorkspace ? [input.workspaceId] : [],
+        // A newly issued key starts on the grant being configured. Additional
+        // grants can be attached explicitly from credential settings.
+        workspaceAllowlist: [input.workspaceId],
       });
       token = created.token;
       credential = created.credential;
-    } else {
-      const current = existingCredential!;
-      const workspaceAllowlist = current.workspaceAllowlist.length
-        && !current.workspaceAllowlist.includes(input.workspaceId)
-        ? [...current.workspaceAllowlist, input.workspaceId]
-        : current.workspaceAllowlist;
-      expandedCredentialWorkspaceAllowlist = workspaceAllowlist.length !== current.workspaceAllowlist.length;
-      credential = expandedCredentialWorkspaceAllowlist
-        ? updateAgentCredential(database, {
-          userId: input.userId,
-          agentId: selectedAgent.id,
-          credentialId: current.id,
-          name: current.name,
-          scopes: current.scopes,
-          defaultWorkspaceId: current.defaultWorkspaceId,
-          workspaceAllowlist,
-          ipAllowlist: current.ipAllowlist,
-          expiresAt: current.expiresAt,
-        })
-        : current;
+      binding = credential.bindings.find((item) => item.grantId === membership.membershipId) ?? null;
+    } else if (input.credential.mode === "existing") {
+      binding = bindAgentCredentialToGrant(database, {
+        userId: input.userId,
+        agentId: selectedAgent.id,
+        credentialId: existingCredential!.id,
+        grantId: membership.membershipId,
+      });
+      credential = listCredentials(database, selectedAgent.id)
+        .find((item) => item.id === existingCredential!.id) ?? null;
     }
 
     return {
       agent: listAccountAgents(database, input.userId).find((agent) => agent.id === selectedAgent.id)!,
       membership,
       credential,
+      binding,
       token,
-      expandedCredentialWorkspaceAllowlist,
     };
   })();
 }
@@ -1549,22 +1896,29 @@ export function revokeAgentCredential(
     "연결 키를 폐기",
   );
   const now = new Date().toISOString();
-  const result = database.prepare(
-    `UPDATE agent_credentials SET revoked_at = ?, updated_at = ?
-     WHERE id = ? AND agent_id = ? AND revoked_at IS NULL`,
-  ).run(now, now, input.credentialId, input.agentId);
-  if (result.changes !== 1) throw new AgentServiceError("NOT_FOUND", "활성 연결 키를 찾을 수 없습니다.");
-  database.prepare(
-    "UPDATE workspace_api_tokens SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL",
-  ).run(now, input.credentialId);
-  recordGlobalAgentAudit(database, {
-    agentId: input.agentId,
-    userId: input.userId,
-    action: "credential.global_revoked",
-    targetType: "credential",
-    targetId: input.credentialId,
-    createdAt: now,
-  });
+  database.transaction(() => {
+    const result = database.prepare(
+      `UPDATE agent_credentials SET revoked_at = ?, updated_at = ?
+       WHERE id = ? AND agent_id = ? AND revoked_at IS NULL`,
+    ).run(now, now, input.credentialId, input.agentId);
+    if (result.changes !== 1) throw new AgentServiceError("NOT_FOUND", "활성 연결 키를 찾을 수 없습니다.");
+    database.prepare(
+      `UPDATE agent_credential_grant_bindings
+       SET status = 'revoked', revoked_at = ?
+       WHERE credential_id = ? AND status = 'active' AND revoked_at IS NULL`,
+    ).run(now, input.credentialId);
+    database.prepare(
+      "UPDATE workspace_api_tokens SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL",
+    ).run(now, input.credentialId);
+    recordGlobalAgentAudit(database, {
+      agentId: input.agentId,
+      userId: input.userId,
+      action: "credential.global_revoked",
+      targetType: "credential",
+      targetId: input.credentialId,
+      createdAt: now,
+    });
+  })();
 }
 
 export function rotateAgentCredential(
@@ -1576,19 +1930,37 @@ export function rotateAgentCredential(
     "연결 키를 회전",
   );
   const current = database.prepare(
-    `SELECT name, scopes_json, default_workspace_id, workspace_allowlist_json,
-            ip_allowlist_json, expires_at
+    `SELECT name, scopes_json, default_workspace_id, ip_allowlist_json, expires_at
      FROM agent_credentials
      WHERE id = ? AND agent_id = ? AND revoked_at IS NULL`,
   ).get(input.credentialId, input.agentId) as {
     name: string;
     scopes_json: string;
     default_workspace_id: string | null;
-    workspace_allowlist_json: string;
     ip_allowlist_json: string;
     expires_at: string | null;
   } | undefined;
   if (!current) throw new AgentServiceError("NOT_FOUND", "활성 연결 키를 찾을 수 없습니다.");
+  // `workspace_allowlist_json` remains a legacy storage mirror. A credential can
+  // be attached to another workspace later without rewriting that mirror, so the
+  // active binding rows are the only authoritative source when rotating a key.
+  const boundWorkspaceIds = (database.prepare(
+    `SELECT DISTINCT membership.workspace_id
+     FROM agent_credential_grant_bindings binding
+     JOIN workspace_agents membership ON membership.id = binding.grant_id
+     JOIN workspaces workspace ON workspace.id = membership.workspace_id
+     WHERE binding.credential_id = ?
+       AND binding.status = 'active' AND binding.revoked_at IS NULL
+       AND membership.agent_identity_id = ?
+       AND membership.status = 'active' AND membership.revoked_at IS NULL
+       AND workspace.lifecycle_state = 'active'
+     ORDER BY membership.workspace_id`,
+  ).all(input.credentialId, input.agentId) as Array<{ workspace_id: string }>)
+    .map((row) => row.workspace_id);
+  const defaultWorkspaceId = current.default_workspace_id
+    && boundWorkspaceIds.includes(current.default_workspace_id)
+    ? current.default_workspace_id
+    : null;
   const preservedExpiry = current.expires_at && Date.parse(current.expires_at) > Date.now()
     ? current.expires_at
     : null;
@@ -1599,8 +1971,8 @@ export function rotateAgentCredential(
       agentId: input.agentId,
       name: current.name,
       scopes: parseJsonList(current.scopes_json, API_TOKEN_SCOPES),
-      defaultWorkspaceId: current.default_workspace_id,
-      workspaceAllowlist: parseJsonList<string>(current.workspace_allowlist_json),
+      defaultWorkspaceId,
+      workspaceAllowlist: boundWorkspaceIds,
       ipAllowlist: parseJsonList<string>(current.ip_allowlist_json),
       expiresAt: preservedExpiry,
     });

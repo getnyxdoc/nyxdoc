@@ -4,6 +4,7 @@ import { createAssignmentSchema, savedViewQuerySchema } from "@/lib/collaboratio
 import {
   assignDocument,
   createSavedView,
+  listAssignmentHistory,
   listAssignments,
   listSavedViews,
   listWorkspaceAgents,
@@ -84,6 +85,72 @@ describe("workspace collaboration service", () => {
 
     updateAssignment(database, workspace.id, assignment.id, actor, { status: "completed" });
     expect(listAssignments(database, workspace.id, { status: "active" })).toHaveLength(0);
+  });
+
+  it("excludes revoked or inactive agent grants from active lists and assignment targets while retaining history", () => {
+    const { database, workspace, document, first, second, actor } = fixture();
+    const disabled = createWorkspaceToken(database, {
+      workspaceId: workspace.id,
+      userId: actor.userId,
+      name: "Disabled",
+      role: "editor",
+    });
+    const deleted = createWorkspaceToken(database, {
+      workspaceId: workspace.id,
+      userId: actor.userId,
+      name: "Deleted",
+      role: "editor",
+    });
+    const purged = createWorkspaceToken(database, {
+      workspaceId: workspace.id,
+      userId: actor.userId,
+      name: "Purged",
+      role: "editor",
+    });
+    const historicalAssignment = assignDocument(database, workspace.id, actor, {
+      documentId: document.id,
+      agentId: second.summary.agentId,
+      assignmentType: "reviewer",
+    });
+    const now = new Date().toISOString();
+    database.prepare("UPDATE workspace_agents SET revoked_at = ? WHERE id = ?")
+      .run(now, second.summary.agentId);
+    database.prepare(
+      `UPDATE agents SET status = 'disabled'
+       WHERE id = (SELECT agent_identity_id FROM workspace_agents WHERE id = ?)`,
+    ).run(disabled.summary.agentId);
+    database.prepare(
+      `UPDATE agents SET deleted_at = ?
+       WHERE id = (SELECT agent_identity_id FROM workspace_agents WHERE id = ?)`,
+    ).run(now, deleted.summary.agentId);
+    database.prepare(
+      `UPDATE agents SET purged_at = ?
+       WHERE id = (SELECT agent_identity_id FROM workspace_agents WHERE id = ?)`,
+    ).run(now, purged.summary.agentId);
+
+    const activeAgentIds = listWorkspaceAgents(database, workspace.id).map((agent) => agent.id);
+    expect(activeAgentIds).toContain(first.summary.agentId);
+    expect(activeAgentIds).not.toEqual(expect.arrayContaining([
+      second.summary.agentId,
+      disabled.summary.agentId,
+      deleted.summary.agentId,
+      purged.summary.agentId,
+    ]));
+    expect(listAssignmentHistory(database, workspace.id)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: historicalAssignment.id, agentId: second.summary.agentId }),
+    ]));
+    for (const agentId of [
+      second.summary.agentId,
+      disabled.summary.agentId,
+      deleted.summary.agentId,
+      purged.summary.agentId,
+    ]) {
+      expect(() => assignDocument(database, workspace.id, actor, {
+        documentId: document.id,
+        agentId,
+        assignmentType: "owner",
+      })).toThrowError("활성 에이전트를 찾을 수 없습니다.");
+    }
   });
 
   it("runs dynamic saved views over assignment and recent-update filters", () => {

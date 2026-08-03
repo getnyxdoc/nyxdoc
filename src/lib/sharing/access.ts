@@ -119,6 +119,9 @@ function listInheritedWorkspaceAccess(
      SELECT team_member.user_id, recipient.name, recipient.email,
             'member' AS membership_role, team_grant.access_role
      FROM workspace_team_grants team_grant
+     JOIN workspaces workspace ON workspace.id = team_grant.workspace_id
+     JOIN workspace_ownership ownership ON ownership.workspace_id = workspace.id
+     JOIN organizations organization ON organization.id = ownership.organization_id
      JOIN team_members team_member
        ON team_member.organization_id = team_grant.organization_id
       AND team_member.team_id = team_grant.team_id
@@ -126,7 +129,12 @@ function listInheritedWorkspaceAccess(
        ON organization_member.organization_id = team_grant.organization_id
       AND organization_member.user_id = team_member.user_id
      JOIN user recipient ON recipient.id = team_member.user_id
-     WHERE team_grant.workspace_id = ? AND recipient.emailVerified = 1`,
+     WHERE team_grant.workspace_id = ?
+       AND ownership.owner_type = 'organization'
+       AND ownership.organization_id = team_grant.organization_id
+       AND workspace.lifecycle_state = 'active'
+       AND organization.lifecycle_state = 'active'
+       AND recipient.emailVerified = 1`,
   ).all(workspaceId, workspaceId) as WorkspaceMemberRow[];
   const highestByUser = new Map<string, DocumentHumanAccessEntry>();
   for (const row of rows) {
@@ -225,10 +233,18 @@ export function listDocumentShareCandidates(
        AND NOT EXISTS (
          SELECT 1
          FROM workspace_team_grants team_grant
+         JOIN workspaces workspace ON workspace.id = team_grant.workspace_id
+         JOIN workspace_ownership team_ownership ON team_ownership.workspace_id = workspace.id
+         JOIN organizations organization ON organization.id = team_ownership.organization_id
          JOIN team_members team_member
            ON team_member.organization_id = team_grant.organization_id
           AND team_member.team_id = team_grant.team_id
-         WHERE team_grant.workspace_id = ? AND team_member.user_id = recipient.id
+         WHERE team_grant.workspace_id = ?
+           AND team_member.user_id = recipient.id
+           AND team_ownership.owner_type = 'organization'
+           AND team_ownership.organization_id = team_grant.organization_id
+           AND workspace.lifecycle_state = 'active'
+           AND organization.lifecycle_state = 'active'
        )
        AND NOT EXISTS (
          SELECT 1 FROM document_human_grants grant_entry

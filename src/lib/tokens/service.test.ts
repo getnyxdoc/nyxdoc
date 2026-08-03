@@ -9,12 +9,16 @@ import {
   requireTokenScope,
   requireTokenDocumentAccess,
   resolveTokenCreateParent,
-  rotateWorkspaceAgentCredential,
   tokenCanAccessDocument,
-  updateWorkspaceConnectionPermissions,
   updateWorkspaceAgent,
-  revokeWorkspaceToken,
 } from "@/lib/tokens/service";
+import {
+  createAgentCredential,
+  revokeAgentCredential,
+  rotateAgentCredential,
+  updateAgentWorkspaceMembership,
+} from "@/lib/agents/service";
+import { listAgentProfilePermissions } from "@/lib/authz/permissions";
 import { createTestDatabase, createTestUser } from "@/test/fixture";
 
 const databases: NyxDatabase[] = [];
@@ -24,7 +28,7 @@ afterEach(() => {
 });
 
 describe("workspace API tokens", () => {
-  it("returns the secret once, stores only a hash, authenticates, and revokes", () => {
+  it("returns the secret once, stores only a hash, authenticates, and canonically revokes", () => {
     const database = createTestDatabase();
     databases.push(database);
     const { user, workspace } = createTestUser(database);
@@ -49,10 +53,10 @@ describe("workspace API tokens", () => {
       userId: user.id,
       name: "Codex",
     });
-    revokeWorkspaceToken(database, {
-      workspaceId: workspace.id,
+    revokeAgentCredential(database, {
       userId: user.id,
-      tokenId: created.summary.id,
+      agentId: created.summary.agentId,
+      credentialId: created.summary.id,
     });
     expect(() => authenticateApiToken(database, `Bearer ${created.token}`)).toThrowError(
       ApiTokenError,
@@ -68,11 +72,15 @@ describe("workspace API tokens", () => {
       userId: user.id,
       name: "Role bounded agent",
     });
-    database.prepare("UPDATE workspace_agents SET role = 'viewer' WHERE id = ?")
-      .run(created.summary.agentId);
+    updateWorkspaceAgent(database, {
+      workspaceId: workspace.id,
+      userId: user.id,
+      agentId: created.summary.agentId,
+      role: "viewer",
+    });
 
     const identity = authenticateApiToken(database, `Bearer ${created.token}`);
-    expect(identity.role).toBe("viewer");
+    expect(identity.accessProfile).toBe("reader");
     expect(() => requireTokenScope(identity, "documents:read")).not.toThrow();
     expect(() => requireTokenScope(identity, "documents:write"))
       .toThrowError(expect.objectContaining({ code: "FORBIDDEN" }));
@@ -99,7 +107,7 @@ describe("workspace API tokens", () => {
       .toThrowError(expect.objectContaining({ code: "FORBIDDEN" }));
   });
 
-  it("rotates credentials without changing the agent identity", () => {
+  it("rotates an explicitly selected credential without changing the agent identity", () => {
     const database = createTestDatabase();
     databases.push(database);
     const { user, workspace } = createTestUser(database);
@@ -108,38 +116,31 @@ describe("workspace API tokens", () => {
       userId: user.id,
       name: "gameroom-main",
     });
-    const updated = updateWorkspaceAgent(database, {
-      workspaceId: workspace.id,
+    const replacementCandidate = createAgentCredential(database, {
       userId: user.id,
       agentId: created.summary.agentId,
-      displayName: "Gameroom",
-      role: "admin",
+      name: "gameroom-main",
+      scopes: ["documents:read", "documents:write", "changes:read"],
+      defaultWorkspaceId: workspace.id,
+      workspaceAllowlist: [workspace.id],
     });
-    const rotated = rotateWorkspaceAgentCredential(database, {
-      workspaceId: workspace.id,
+    const rotated = rotateAgentCredential(database, {
       userId: user.id,
       agentId: created.summary.agentId,
+      credentialId: replacementCandidate.credential.id,
     });
 
-    expect(updated).toMatchObject({ displayName: "Gameroom", role: "admin" });
-    expect(rotated.summary.agentId).toBe(created.summary.agentId);
-    expect(rotated.summary.id).not.toBe(created.summary.id);
-    expect(() => authenticateApiToken(database, `Bearer ${created.token}`)).toThrowError(ApiTokenError);
+    expect(rotated.credential.id).not.toBe(replacementCandidate.credential.id);
+    expect(() => authenticateApiToken(database, `Bearer ${replacementCandidate.token}`)).toThrowError(ApiTokenError);
     expect(authenticateApiToken(database, `Bearer ${rotated.token}`)).toMatchObject({
       agentId: created.summary.agentId,
-      name: "Gameroom",
-      role: "admin",
+      globalAgentId: created.summary.agentId,
+      name: "gameroom-main",
+      accessProfile: "writer",
     });
-    expect(database.prepare(
-      "SELECT action FROM workspace_audit_events WHERE workspace_id = ? ORDER BY cursor",
-    ).all(workspace.id)).toEqual([
-      { action: "agent.created" },
-      { action: "agent.updated" },
-      { action: "credential.rotated" },
-    ]);
   });
 
-  it("updates an existing key's role, scopes, and document boundary atomically", () => {
+  it("updates the workspace grant without mutating the credential scope", () => {
     const database = createTestDatabase();
     databases.push(database);
     const { user, workspace } = createTestUser(database);
@@ -153,33 +154,33 @@ describe("workspace API tokens", () => {
       role: "viewer",
     });
 
-    const updated = updateWorkspaceConnectionPermissions(database, {
+    const updated = updateAgentWorkspaceMembership(database, {
       workspaceId: workspace.id,
       userId: user.id,
-      tokenId: created.summary.id,
-      role: "editor",
-      scopes: ["documents:read", "documents:write", "documents:commit", "changes:read", "revisions:restore"],
+      agentId: created.summary.agentId,
+      accessProfile: "writer",
+      capabilities: listAgentProfilePermissions("writer"),
       rootDocumentId,
     });
     expect(updated).toMatchObject({
-      id: created.summary.id,
       agentId: created.summary.agentId,
-      role: "editor",
+      accessProfile: "writer",
       rootDocumentId,
     });
-    expect(updated.scopes).toContain("revisions:restore");
 
     const identity = authenticateApiToken(database, `Bearer ${created.token}`);
     expect(identity).toMatchObject({
       id: created.summary.id,
-      role: "editor",
+      accessProfile: "writer",
+      capabilities: expect.arrayContaining(["documents.update", "documents.commit"]),
       rootDocumentId,
     });
-    expect(() => requireTokenScope(identity, "documents:write")).not.toThrow();
-    expect(() => requireTokenScope(identity, "revisions:restore")).not.toThrow();
+    expect(identity.scopes).toEqual(["documents:read", "changes:read"]);
+    expect(() => requireTokenScope(identity, "documents:write"))
+      .toThrowError(expect.objectContaining({ code: "FORBIDDEN" }));
     expect(database.prepare(
       "SELECT action FROM workspace_audit_events WHERE workspace_id = ? ORDER BY cursor DESC LIMIT 1",
-    ).get(workspace.id)).toEqual({ action: "connection.permissions_updated" });
+    ).get(workspace.id)).toEqual({ action: "agent.permissions_updated" });
   });
 
   it("limits a connection to one document subtree and keeps restore permission explicit", () => {

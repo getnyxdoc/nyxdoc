@@ -9,6 +9,7 @@ import type {
   WorkspaceAgentSummary,
 } from "@/lib/collaboration/types";
 import type { NyxDatabase } from "@/lib/db/client";
+import { WORKSPACE_PERMISSIONS, type WorkspacePermission } from "@/lib/authz/permissions";
 import { queryDocuments } from "@/lib/documents/service";
 import { DocumentServiceError } from "@/lib/documents/types";
 
@@ -121,14 +122,19 @@ export function listWorkspaceAgents(
 ): WorkspaceAgentSummary[] {
   const rows = database.prepare(
     `SELECT membership.id, identity.display_name, identity.avatar_media_id,
-            membership.role, membership.status,
+            membership.access_profile, membership.capabilities_json, membership.status,
             membership.created_at, membership.updated_at,
             COUNT(CASE WHEN x.status = 'active' THEN 1 END) AS active_assignment_count
      FROM workspace_agents membership
-     JOIN agents identity ON identity.id = membership.agent_identity_id
+     JOIN agents identity
+       ON identity.id = membership.agent_identity_id
+      AND identity.status = 'active'
+      AND identity.deleted_at IS NULL
+      AND identity.purged_at IS NULL
      LEFT JOIN agent_document_assignments x
        ON x.agent_id = membership.id AND x.workspace_id = membership.workspace_id
      WHERE membership.workspace_id = ?
+       AND membership.revoked_at IS NULL
        AND (? = 1 OR membership.status = 'active')
      GROUP BY membership.id
      ORDER BY CASE membership.status WHEN 'active' THEN 0 ELSE 1 END,
@@ -137,7 +143,8 @@ export function listWorkspaceAgents(
     id: string;
     display_name: string;
     avatar_media_id: string | null;
-    role: WorkspaceAgentSummary["role"];
+    access_profile: WorkspaceAgentSummary["accessProfile"];
+    capabilities_json: string;
     status: WorkspaceAgentSummary["status"];
     created_at: string;
     updated_at: string;
@@ -147,7 +154,16 @@ export function listWorkspaceAgents(
     id: row.id,
     displayName: row.display_name,
     avatarMediaId: row.avatar_media_id,
-    role: row.role,
+    accessProfile: row.access_profile,
+    capabilities: (() => {
+      try {
+        const parsed = JSON.parse(row.capabilities_json) as unknown;
+        if (!Array.isArray(parsed)) return [];
+        return WORKSPACE_PERMISSIONS.filter((permission) => parsed.includes(permission)) as WorkspacePermission[];
+      } catch {
+        return [];
+      }
+    })(),
     status: row.status,
     activeAssignmentCount: Number(row.active_assignment_count),
     createdAt: row.created_at,
@@ -306,7 +322,11 @@ export function deleteSavedView(
   })();
 }
 
-export function listAssignments(
+/**
+ * Reads assignment records without applying current grant or identity lifecycle
+ * filters, so completed and revoked-agent assignments remain available as history.
+ */
+export function listAssignmentHistory(
   database: NyxDatabase,
   workspaceId: string,
   query: {
@@ -347,6 +367,9 @@ export function listAssignments(
   ).all(...values) as AssignmentRow[];
   return rows.map(mapAssignment);
 }
+
+// Compatibility name for existing assignment-listing consumers.
+export const listAssignments = listAssignmentHistory;
 
 export function runSavedView(
   database: NyxDatabase,
@@ -390,8 +413,17 @@ export function assignDocument(
   ).get(input.documentId, workspaceId);
   if (!document) throw new DocumentServiceError("NOT_FOUND", "문서를 찾을 수 없습니다.");
   const agent = database.prepare(
-    `SELECT id FROM workspace_agents
-     WHERE id = ? AND workspace_id = ? AND status = 'active'`,
+    `SELECT membership.id
+     FROM workspace_agents membership
+     JOIN agents identity
+       ON identity.id = membership.agent_identity_id
+      AND identity.status = 'active'
+      AND identity.deleted_at IS NULL
+      AND identity.purged_at IS NULL
+     WHERE membership.id = ?
+       AND membership.workspace_id = ?
+       AND membership.status = 'active'
+       AND membership.revoked_at IS NULL`,
   ).get(input.agentId, workspaceId);
   if (!agent) throw new DocumentServiceError("NOT_FOUND", "활성 에이전트를 찾을 수 없습니다.");
   const existing = database.prepare(

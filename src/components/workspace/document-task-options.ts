@@ -12,28 +12,36 @@ export type TaskDocumentTreeRow = {
   path: string[];
 };
 
-const agentRolePriority: Record<WorkspaceAgentSummary["role"], number> = {
-  admin: 3,
-  editor: 2,
-  viewer: 1,
-};
-
-export function taskAgentRoleLabel(
-  role: WorkspaceAgentSummary["role"],
+export function taskAgentAccessLabel(
+  profile: WorkspaceAgentSummary["accessProfile"],
   locale: AppLocale,
 ) {
   return {
-    en: { admin: "Administrator", editor: "Editor", viewer: "Viewer" },
-    ko: { admin: "관리자", editor: "편집자", viewer: "뷰어" },
-    ja: { admin: "管理者", editor: "編集者", viewer: "閲覧者" },
-  }[locale][role];
+    en: { reader: "Reader", drafter: "Drafter", writer: "Writer", custom: "Custom access" },
+    ko: { reader: "읽기", drafter: "초안 작성", writer: "문서 작업", custom: "사용자 지정 권한" },
+    ja: { reader: "閲覧", drafter: "下書き作成", writer: "文書作業", custom: "カスタムアクセス" },
+  }[locale][profile];
+}
+
+function agentAccessPriority(agent: WorkspaceAgentSummary) {
+  const capabilities = new Set(agent.capabilities);
+  const operationLevel = capabilities.has("tasks.manage") || capabilities.has("assignments.manage")
+    ? 4
+    : capabilities.has("documents.commit")
+      ? 3
+      : capabilities.has("documents.update")
+        ? 2
+        : capabilities.has("documents.read")
+          ? 1
+          : 0;
+  return operationLevel * 1_000 + capabilities.size;
 }
 
 export function orderedActiveTaskAgents(agents: WorkspaceAgentSummary[]) {
   return agents
     .filter((agent) => agent.status === "active")
     .sort((left, right) =>
-      agentRolePriority[right.role] - agentRolePriority[left.role]
+      agentAccessPriority(right) - agentAccessPriority(left)
       || left.displayName.localeCompare(right.displayName)
       || left.id.localeCompare(right.id),
     );

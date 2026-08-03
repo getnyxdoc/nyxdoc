@@ -45,9 +45,10 @@ export async function apiErrorResponse(error: unknown) {
     status: number,
     details?: unknown,
     messageKey = messageKeyForCode(code),
+    publicMessage?: string,
   ) => NextResponse.json(
     {
-      error: translate(locale, messageKey),
+      error: publicMessage ?? translate(locale, messageKey),
       code,
       ...(details ? { details } : {}),
     },
@@ -65,10 +66,10 @@ export async function apiErrorResponse(error: unknown) {
       ? 403
       : error.code === "NOT_FOUND"
         ? 404
-        : error.code === "CONFLICT"
+        : error.code === "CONFLICT" || error.code === "GRANT_ALREADY_ACTIVE"
           ? 409
           : 400;
-    return response(error.code, status);
+    return response(error.code, status, error.details, messageKeyForCode(error.code), error.message);
   }
   if (error instanceof AuthorizationError) {
     return response(error.code, error.code === "FORBIDDEN" ? 403 : 404);
@@ -174,7 +175,14 @@ export async function apiErrorResponse(error: unknown) {
     return response(error.code, status);
   }
   if (error instanceof Error && error.name === "ZodError") {
-    return response("INVALID_INPUT", 400);
+    const issues = "issues" in error && Array.isArray(error.issues)
+      ? error.issues.map((issue: { path?: unknown; message?: unknown; code?: unknown }) => ({
+          path: Array.isArray(issue.path) ? issue.path : [],
+          message: typeof issue.message === "string" ? issue.message : "Invalid value",
+          code: typeof issue.code === "string" ? issue.code : "invalid_input",
+        }))
+      : [];
+    return response("INVALID_INPUT", 400, { issues });
   }
   console.error("[nyxdoc] unhandled API error", error);
   return response("INTERNAL_ERROR", 500, undefined, "api.internalError");

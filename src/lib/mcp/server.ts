@@ -155,6 +155,7 @@ const instructions = [
   "Never use a person's logged-in browser session, a different credential, or UI automation to bypass a Nyxdoc permission denial. Report the denied capability and stop.",
   "Call get_capabilities with its default summary profile to discover the protocol and recommended workflow. Call get_schema only when an AST schema is actually needed.",
   "One credential identifies one global agent. Call list_agent_workspaces to discover every allowed workspace membership. The workspace open in a person's browser never controls agent access or routing.",
+  "A workspace grant has an access profile, canonical capabilities, and an optional document-tree boundary. A credential can use a workspace only through an explicit active binding to that grant; credential scopes are an additional upper bound.",
   "Document-ID tools infer the workspace from the document. For list, search, create, workspace context, and other ambiguous workspace operations, pass workspaceId explicitly; the connection default is only a fallback when workspaceId is omitted.",
   "At the start of work in a target workspace, call get_workspace_context and list_my_work with that workspaceId so you know your active document responsibilities before choosing or changing a document.",
   "Call list_my_tasks without switching workspaces. It returns this global agent's Agent To-dos across every workspace allowed by the credential, and each task includes workspace metadata. Agent To-dos are explicit finite document requests; assignments describe ongoing responsibility and are not interchangeable with tasks.",
@@ -184,7 +185,7 @@ const instructions = [
   "Use capture_handoff when a person explicitly asks to preserve a conversation as structured project memory. It creates one durable handoff document and optional Agent To-dos atomically; use dryRun first when the destination or task breakdown is uncertain.",
   "Saved views are structured workspace queries. Assignments describe responsibility and never grant document access.",
   "When doing longer work, publish presence so people can see which document or block you are working on.",
-  "Admin agents never directly change credentials, agent roles, or workspace policy. They propose an admin action that a person must review and approve.",
+  "Agents with management-request capabilities never directly change credentials, workspace grants, or workspace policy. They propose an admin action that a person must review and approve.",
   "Use concise summaries that explain why a document changed.",
 ].join(" ");
 
@@ -277,11 +278,23 @@ const handoffTodoSchema = z.object({
 }).strict();
 
 const capabilities = {
-  protocolVersion: "4.13.0",
-  serverVersion: "0.24.1",
+  protocolVersion: "5.0.0",
+  serverVersion: "0.25.0",
   workspace: {
     tenantBoundary: true,
+    authorizationModel: "global-agent-identity + workspace-grant + credential-binding",
     credentialBelongsToGlobalAgent: true,
+    credentialGrantBindingRequired: true,
+    accessProfiles: ["reader", "drafter", "writer", "custom"],
+    canonicalAuthorizationField: "capabilities",
+    legacyAgentRolesAccepted: false,
+    effectiveAccessIntersection: [
+      "active-agent-identity",
+      "active-workspace-grant-capabilities",
+      "active-credential-binding-and-scopes",
+      "document-boundary",
+      "ip-allowlist",
+    ],
     connectionBelongsToExactlyOneWorkspace: false,
     requestBindsExactlyOneWorkspace: false,
     browserSelectionAffectsAgent: false,
@@ -1121,11 +1134,10 @@ export function createNyxdocMcpServer(
       workspaceId: workspaceIdentity.workspaceId,
       membershipId: workspaceIdentity.agentId,
       agentId: workspaceIdentity.globalAgentId,
-      role: workspaceIdentity.role,
+      accessProfile: workspaceIdentity.accessProfile,
+      capabilities: workspaceIdentity.capabilities,
       displayName: workspaceIdentity.name,
       avatarMediaId: workspaceIdentity.avatarMediaId,
-      permissionAllow: workspaceIdentity.permissionAllow,
-      permissionDeny: workspaceIdentity.permissionDeny,
     };
   }
 
@@ -1372,7 +1384,7 @@ export function createNyxdocMcpServer(
     {
       title: "List this agent's workspaces",
       description:
-        "List the workspaces this global agent may use with the current credential, including each workspace-local membership ID, effective permissions, and document boundary.",
+        "List the workspaces this global agent may use with the current credential, including each workspace-local grant ID, access profile, effective capabilities, and document boundary.",
       annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
     },
     async () => {
@@ -1407,8 +1419,8 @@ export function createNyxdocMcpServer(
               type: "personal" as const,
               id: ownership.owner_user_id,
             },
-          membershipId: entry.identity.agentId,
-          role: entry.identity.role,
+          grantId: entry.identity.agentId,
+          accessProfile: entry.identity.accessProfile,
           effectivePermissions: listAgentPrincipalPermissions(
             workspacePrincipal(entry.identity),
           ),
@@ -1485,7 +1497,7 @@ export function createNyxdocMcpServer(
             },
           membership: {
             id: identity.agentId,
-            role: identity.role,
+            accessProfile: identity.accessProfile,
             allowedActions: listAgentPrincipalPermissions(defaultPrincipal),
             rootDocumentId: identity.rootDocumentId,
           },
@@ -1577,7 +1589,8 @@ export function createNyxdocMcpServer(
       if (query.parentDocumentId) {
         requireTokenDocumentAccess(database, workspaceIdentity, query.parentDocumentId);
       }
-      const { workspaceId: _workspaceId, ...documentQuery } = query;
+      const { workspaceId: workspaceSelector, ...documentQuery } = query;
+      void workspaceSelector;
       const result = queryDocuments(database, workspaceIdentity.workspaceId, {
         ...documentQuery,
         withinDocumentId: resolveTokenReadRoot(
@@ -2894,9 +2907,9 @@ export function createNyxdocMcpServer(
         },
         agent: {
           id: workspaceIdentity.globalAgentId,
-          membershipId: workspaceIdentity.agentId,
+          grantId: workspaceIdentity.agentId,
           displayName: workspaceIdentity.name,
-          role: workspaceIdentity.role,
+          accessProfile: workspaceIdentity.accessProfile,
           avatarMediaId: workspaceIdentity.avatarMediaId,
           allowedActions: listAgentPrincipalPermissions(agentPrincipal),
         },
@@ -2940,7 +2953,7 @@ export function createNyxdocMcpServer(
     {
       title: "List workspace audit events",
       description:
-        "Read immutable workspace management and lifecycle audit events. This is available only to the constrained admin agent role.",
+        "Read immutable workspace management and lifecycle audit events. This requires the audit.read workspace capability.",
       inputSchema: {
         workspaceId: z.string().uuid().optional(),
         beforeCursor: z.number().int().positive().optional(),
@@ -2955,7 +2968,8 @@ export function createNyxdocMcpServer(
       const agentPrincipal = workspacePrincipal(workspaceIdentity);
       requireTokenScope(workspaceIdentity, "documents:read");
       requireAgentWorkspacePermission(agentPrincipal, "audit.read");
-      const { workspaceId: _workspaceId, ...auditQuery } = query;
+      const { workspaceId: workspaceSelector, ...auditQuery } = query;
+      void workspaceSelector;
       return toolResult({
         workspaceId: workspaceIdentity.workspaceId,
         ...listWorkspaceAuditEvents(database, workspaceIdentity.workspaceId, auditQuery),
@@ -2968,7 +2982,7 @@ export function createNyxdocMcpServer(
     {
       title: "List human-reviewed admin requests",
       description:
-        "List this workspace's management proposals and their review outcomes. Only the constrained admin agent role can read these requests.",
+        "List this workspace's management proposals and their review outcomes. This requires the admin_requests.read workspace capability.",
       inputSchema: {
         workspaceId: z.string().uuid().optional(),
         status: z.enum(["pending", "executed", "rejected", "failed", "expired"]).optional(),
@@ -2981,7 +2995,8 @@ export function createNyxdocMcpServer(
       const agentPrincipal = workspacePrincipal(workspaceIdentity);
       requireTokenScope(workspaceIdentity, "documents:read");
       requireAgentWorkspacePermission(agentPrincipal, "admin_requests.read");
-      const { workspaceId: _workspaceId, ...requestQuery } = query;
+      const { workspaceId: workspaceSelector, ...requestQuery } = query;
+      void workspaceSelector;
       return toolResult({
         workspaceId: workspaceIdentity.workspaceId,
         requests: listAdminActionRequests(
@@ -3040,7 +3055,7 @@ export function createNyxdocMcpServer(
     {
       title: "List recoverable document trees",
       description:
-        "List soft-deleted document trees visible to this constrained admin agent, including deletion and scheduled purge times. Permanent purge is human-only.",
+        "List soft-deleted document trees visible to an agent with documents.restore capability, including deletion and scheduled purge times. Permanent purge is human-only.",
       inputSchema: { workspaceId: z.string().uuid().optional() },
       annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
     },
@@ -3063,7 +3078,7 @@ export function createNyxdocMcpServer(
     {
       title: "Move a document tree to trash",
       description:
-        "Soft-delete one current document and every descendant as a recoverable tree. Editor agents may trash only trees whose documents they all created; admin agents with documents.trash may trash any permitted tree. Requires the latest baseRevision. The workspace retention policy schedules purge; this tool never permanently deletes data.",
+        "Soft-delete one current document and every descendant as a recoverable tree. documents.trash_own allows only trees whose documents the agent created; documents.trash allows any permitted tree. Requires the latest baseRevision. The workspace retention policy schedules purge; this tool never permanently deletes data.",
       inputSchema: {
         documentId: z.string().uuid(),
         baseRevision: z.number().int().positive(),
@@ -3630,7 +3645,7 @@ export function createNyxdocMcpServer(
     {
       title: "List document assignments",
       description:
-        "List responsibility assignments with role-specific guidance. Assignments never grant access. Non-admin agents can list only their own assignments.",
+        "List responsibility assignments with role-specific guidance. Assignments never grant access. Agents without assignment-management capability can list only their own assignments.",
       inputSchema: {
         workspaceId: z.string().uuid().optional(),
         documentId: z.string().uuid().optional(),
@@ -3645,8 +3660,9 @@ export function createNyxdocMcpServer(
       requireTokenScope(workspaceIdentity, "documents:read");
       requireAgentWorkspacePermission(agentPrincipal, "assignments.read");
       if (documentId) requireTokenDocumentAccess(database, workspaceIdentity, documentId);
+      const mayManageAssignments = agentPrincipalAllows(agentPrincipal, "assignments.manage");
       if (
-        workspaceIdentity.role !== "admin"
+        !mayManageAssignments
         && agentId
         && agentId !== workspaceIdentity.agentId
       ) {
@@ -3654,7 +3670,7 @@ export function createNyxdocMcpServer(
       }
       const assignments = listAssignments(database, workspaceIdentity.workspaceId, {
         documentId,
-        agentId: workspaceIdentity.role === "admin" ? agentId : workspaceIdentity.agentId,
+        agentId: mayManageAssignments ? agentId : workspaceIdentity.agentId,
         status,
       })
         .filter((assignment) => tokenCanAccessDocument(
@@ -3677,7 +3693,7 @@ export function createNyxdocMcpServer(
     {
       title: "Assign an agent to a document",
       description:
-        "Record responsibility for an active workspace agent. This does not change the target agent's role, credential scopes, or document boundary.",
+        "Record responsibility for an active workspace agent. This does not change the target agent's workspace grant, credential scopes, or document boundary.",
       inputSchema: createAssignmentSchema.shape,
       annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
     },

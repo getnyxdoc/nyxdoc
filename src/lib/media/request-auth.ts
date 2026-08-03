@@ -50,11 +50,10 @@ export async function requireMediaRequestIdentity(
         workspaceId: identity.workspaceId,
         membershipId: identity.agentId,
         agentId: identity.globalAgentId,
-        role: identity.role,
+        accessProfile: identity.accessProfile,
+        capabilities: identity.capabilities,
         displayName: identity.name,
         avatarMediaId: identity.avatarMediaId,
-        permissionAllow: identity.permissionAllow,
-        permissionDeny: identity.permissionDeny,
       }, "media.upload");
     }
     if (options.documentId) {

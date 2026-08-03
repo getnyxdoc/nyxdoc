@@ -96,7 +96,7 @@ async function main() {
     const capabilityContent = capabilityResult.structuredContent as {
       capabilities: { protocolVersion: string; profile: string };
     };
-    assert.equal(capabilityContent.capabilities.protocolVersion, "4.10.0");
+    assert.equal(capabilityContent.capabilities.protocolVersion, "5.0.0");
     assert.equal(capabilityContent.capabilities.profile, "summary");
     assert(!JSON.stringify(capabilityContent).includes("jsonSchema"));
     assert(Buffer.byteLength(JSON.stringify(capabilityContent), "utf8") < 10_000);

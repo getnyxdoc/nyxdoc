@@ -11,7 +11,10 @@ import {
   X,
 } from "lucide-react";
 import { UserAvatar } from "@/components/profile/user-avatar";
-import type { AgentWorkspaceRole } from "@/lib/authz/permissions";
+import type {
+  AgentAccessProfile,
+  WorkspacePermission,
+} from "@/lib/authz/permissions";
 import { useI18n } from "@/lib/i18n/client";
 import styles from "./mcp-oauth-consent.module.css";
 
@@ -41,6 +44,14 @@ type ConsentAgent = {
   activeCredentialCount: number;
 };
 
+type ConsentWorkspaceAccess = {
+  workspaceId: string;
+  accessProfile: AgentAccessProfile;
+  effectiveCapabilities: WorkspacePermission[];
+};
+
+type OAuthAccessProfile = Extract<AgentAccessProfile, "reader" | "drafter" | "writer">;
+
 const copy = {
   en: {
     app: "Application",
@@ -61,12 +72,15 @@ const copy = {
     permissions: "Requested access",
     workspaces: "Workspaces",
     workspacesHelp: "Choose where this external agent may work. You can change or revoke access later.",
-    role: "Workspace role",
-    roleHelp: "Applied when the agent is newly assigned. Existing workspace roles are not changed.",
-    roles: {
-      admin: ["Administrator", "Manage the workspace and work on documents"],
-      editor: ["Editor", "Read, write, and save documents"],
-      viewer: ["Viewer", "Read documents only"],
+    existingAccess: (profile: string, capabilityCount: number) =>
+      `${profile} · ${capabilityCount} effective capabilities`,
+    accessProfile: "Access profile for new workspace grants",
+    accessProfileHelp: "Only applies where this agent has no workspace grant yet. Reauthorizing never changes an existing workspace grant.",
+    accessProfiles: {
+      reader: ["Reader", "Read documents and revisions"],
+      drafter: ["Drafter", "Read and update drafts, without saving a canonical revision"],
+      writer: ["Writer", "Read, update, and save canonical document revisions"],
+      custom: ["Custom", "Existing workspace access is managed outside OAuth"],
     },
     security: "Nyxdoc keeps each workspace boundary and document scope in force after authorization.",
     deny: "Cancel",
@@ -94,12 +108,15 @@ const copy = {
     permissions: "요청 권한",
     workspaces: "접근할 워크스페이스",
     workspacesHelp: "외부 에이전트가 작업할 공간을 선택하세요. 권한은 나중에 변경하거나 철회할 수 있습니다.",
-    role: "워크스페이스 역할",
-    roleHelp: "에이전트를 새로 할당하는 공간에 적용됩니다. 기존 워크스페이스 역할은 바꾸지 않습니다.",
-    roles: {
-      admin: ["관리자", "워크스페이스 관리와 문서 작업"],
-      editor: ["편집자", "문서 읽기·작성·저장"],
-      viewer: ["뷰어", "문서 읽기 전용"],
+    existingAccess: (profile: string, capabilityCount: number) =>
+      `${profile} · 유효 권한 ${capabilityCount}개`,
+    accessProfile: "새 워크스페이스 접근 프로필",
+    accessProfileHelp: "에이전트에 기존 워크스페이스 grant가 없는 곳에만 적용됩니다. 재동의는 기존 grant를 절대 바꾸지 않습니다.",
+    accessProfiles: {
+      reader: ["리더", "문서와 리비전 읽기"],
+      drafter: ["드래프터", "초안을 읽고 수정하되 정본 리비전은 저장하지 않음"],
+      writer: ["라이터", "문서를 읽고 수정하며 정본 리비전까지 저장"],
+      custom: ["사용자 지정", "기존 워크스페이스 접근은 OAuth 밖에서 관리"],
     },
     security: "연결 후에도 Nyxdoc의 워크스페이스 경계와 문서 접근 범위가 그대로 적용됩니다.",
     deny: "취소",
@@ -127,12 +144,15 @@ const copy = {
     permissions: "要求された権限",
     workspaces: "アクセスするワークスペース",
     workspacesHelp: "外部エージェントが作業できる場所を選択します。権限は後から変更・取り消しできます。",
-    role: "ワークスペースの役割",
-    roleHelp: "エージェントを新しく割り当てる場合に適用され、既存の役割は変更されません。",
-    roles: {
-      admin: ["管理者", "ワークスペース管理と文書作業"],
-      editor: ["編集者", "文書の閲覧・編集・保存"],
-      viewer: ["閲覧者", "文書の閲覧のみ"],
+    existingAccess: (profile: string, capabilityCount: number) =>
+      `${profile} ・有効な権限 ${capabilityCount} 件`,
+    accessProfile: "新しいワークスペースアクセスのプロファイル",
+    accessProfileHelp: "このエージェントに既存の workspace grant がない場所だけに適用されます。再承認で既存 grant は変更されません。",
+    accessProfiles: {
+      reader: ["リーダー", "文書とリビジョンを閲覧"],
+      drafter: ["ドラフター", "下書きを閲覧・更新し、正本リビジョンは保存しない"],
+      writer: ["ライター", "文書を閲覧・更新し、正本リビジョンを保存"],
+      custom: ["カスタム", "既存ワークスペースアクセスは OAuth の外で管理"],
     },
     security: "接続後も Nyxdoc のワークスペース境界と文書アクセス範囲が適用されます。",
     deny: "キャンセル",
@@ -149,7 +169,7 @@ export function McpOAuthConsent({
   requestedScopes,
   workspaces,
   initialWorkspaceIds,
-  initialRole,
+  workspaceAccess,
   agents,
   initialAgent,
 }: {
@@ -158,7 +178,7 @@ export function McpOAuthConsent({
   requestedScopes: string[];
   workspaces: ConsentWorkspace[];
   initialWorkspaceIds: string[];
-  initialRole: AgentWorkspaceRole;
+  workspaceAccess: ConsentWorkspaceAccess[];
   agents: ConsentAgent[];
   initialAgent:
     | { mode: "new"; displayName: string }
@@ -174,7 +194,7 @@ export function McpOAuthConsent({
   const [workspaceIds, setWorkspaceIds] = useState<string[]>(
     initialSelection.length ? initialSelection : workspaces[0] ? [workspaces[0].id] : [],
   );
-  const [role, setRole] = useState<AgentWorkspaceRole>(initialRole);
+  const [accessProfile, setAccessProfile] = useState<OAuthAccessProfile>("writer");
   const [agentMode, setAgentMode] = useState<"new" | "existing">(initialAgent.mode);
   const [newAgentName, setNewAgentName] = useState(
     initialAgent.mode === "new"
@@ -202,6 +222,10 @@ export function McpOAuthConsent({
   const effectiveSelectedAgentId = compatibleAgents.some(
     (agent) => agent.id === selectedAgentId,
   ) ? selectedAgentId : compatibleAgents[0]?.id ?? "";
+  const accessByWorkspaceId = useMemo(
+    () => new Map(workspaceAccess.map((access) => [access.workspaceId, access])),
+    [workspaceAccess],
+  );
 
   function toggleWorkspace(workspaceId: string) {
     setWorkspaceIds((current) => current.includes(workspaceId)
@@ -225,7 +249,7 @@ export function McpOAuthConsent({
           accept,
           consentCode,
           workspaceIds,
-          role,
+          accessProfile,
           ...(accept ? {
             agent: agentMode === "existing"
               ? { mode: "existing", agentId: effectiveSelectedAgentId }
@@ -359,6 +383,7 @@ export function McpOAuthConsent({
           <div className={styles.workspaceList}>
             {workspaces.map((workspace) => {
               const selected = workspaceIds.includes(workspace.id);
+              const existingAccess = accessByWorkspaceId.get(workspace.id);
               return (
                 <label
                   className={`${styles.workspace} ${selected ? styles.workspaceSelected : ""}`}
@@ -372,7 +397,12 @@ export function McpOAuthConsent({
                   <span className={styles.check}>{selected && <Check size={14} />}</span>
                   <span>
                     <strong>{workspace.name}</strong>
-                    <small>{workspace.owner ? "Owner" : workspace.humanRole}</small>
+                    <small>{existingAccess
+                      ? text.existingAccess(
+                        existingAccess.accessProfile,
+                        existingAccess.effectiveCapabilities.length,
+                      )
+                      : workspace.owner ? "Owner" : workspace.humanRole}</small>
                   </span>
                 </label>
               );
@@ -382,18 +412,18 @@ export function McpOAuthConsent({
       </section>
 
       <section className={styles.section}>
-        <label className={styles.roleLabel} htmlFor="mcp-role">
-          <strong>{text.role}</strong>
-          <small>{text.roleHelp}</small>
+        <label className={styles.roleLabel} htmlFor="mcp-access-profile">
+          <strong>{text.accessProfile}</strong>
+          <small>{text.accessProfileHelp}</small>
         </label>
         <select
-          id="mcp-role"
-          value={role}
-          onChange={(event) => setRole(event.target.value as AgentWorkspaceRole)}
+          id="mcp-access-profile"
+          value={accessProfile}
+          onChange={(event) => setAccessProfile(event.target.value as OAuthAccessProfile)}
         >
-          {(["admin", "editor", "viewer"] as const).map((value) => (
+          {(["reader", "drafter", "writer"] as const).map((value) => (
             <option value={value} key={value}>
-              {text.roles[value][0]} · {text.roles[value][1]}
+              {text.accessProfiles[value][0]} · {text.accessProfiles[value][1]}
             </option>
           ))}
         </select>

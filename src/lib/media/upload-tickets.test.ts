@@ -172,12 +172,65 @@ describe("agent image upload tickets", () => {
       filename: "revoked.png",
     });
     database.prepare(
-      "UPDATE workspace_agents SET permission_deny_json = '[\"media.upload\"]' WHERE id = ?",
-    ).run(identity.agentId);
+      "UPDATE workspace_agents SET capabilities_json = ? WHERE id = ?",
+    ).run(JSON.stringify(["documents.read", "documents.update"]), identity.agentId);
     await expect(consumeAgentMediaUploadTicket(database, {
       ticketId: revoked.id,
       authorization: revoked.authorization,
       bytes: PNG_BYTES,
     }, { mediaRoot })).rejects.toMatchObject({ code: "UNAUTHORIZED" });
+  });
+
+  it("rejects tickets whose credential binding is revoked or removed after issuance", async () => {
+    const { database, mediaRoot, identity } = fixture();
+    const revoked = createAgentMediaUploadTicket(database, identity, {
+      filename: "revoked-binding.png",
+    });
+    database.prepare(
+      `UPDATE agent_credential_grant_bindings
+       SET status = 'revoked', revoked_at = ?
+       WHERE credential_id = ? AND grant_id = ?`,
+    ).run(new Date().toISOString(), identity.id, identity.agentId);
+
+    await expect(consumeAgentMediaUploadTicket(database, {
+      ticketId: revoked.id,
+      authorization: revoked.authorization,
+      bytes: PNG_BYTES,
+    }, { mediaRoot })).rejects.toMatchObject({ code: "UNAUTHORIZED" });
+
+    database.prepare(
+      `INSERT INTO agent_credential_grant_bindings
+       (id, credential_id, grant_id, status, created_by_user_id, created_at, revoked_at)
+       VALUES ('test-upload-binding', ?, ?, 'active', ?, ?, NULL)`,
+    ).run(identity.id, identity.agentId, identity.userId, new Date().toISOString());
+    const unbound = createAgentMediaUploadTicket(database, identity, {
+      filename: "unbound-binding.png",
+    });
+    database.prepare(
+      "DELETE FROM agent_credential_grant_bindings WHERE id = 'test-upload-binding'",
+    ).run();
+
+    await expect(consumeAgentMediaUploadTicket(database, {
+      ticketId: unbound.id,
+      authorization: unbound.authorization,
+      bytes: PNG_BYTES,
+    }, { mediaRoot })).rejects.toMatchObject({ code: "UNAUTHORIZED" });
+  });
+
+  it("rejects custom grants that omit media.upload", () => {
+    const { database, credential, identity } = fixture();
+    database.prepare(
+      `UPDATE workspace_agents
+       SET access_profile = 'custom', capabilities_json = ?
+       WHERE id = ?`,
+    ).run(JSON.stringify(["documents.read", "documents.update"]), identity.agentId);
+
+    const canonicalIdentity = authenticateApiToken(
+      database,
+      `Bearer ${credential.token}`,
+    );
+    expect(() => createAgentMediaUploadTicket(database, canonicalIdentity, {
+      filename: "not-authorized.png",
+    })).toThrowError(expect.objectContaining({ code: "UNAUTHORIZED" }));
   });
 });

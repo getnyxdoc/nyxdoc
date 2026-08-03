@@ -416,7 +416,7 @@ describe("organization, team, and namespace boundaries", () => {
       userId: first.owner.user.id,
       workspaceId: firstWorkspace.id,
       agentId: secondAgent.id,
-      role: "editor",
+      accessProfile: "writer",
     })).toThrowError("다른 조직이 소유한 에이전트는 할당할 수 없습니다.");
     expect(() => database.prepare(
       `INSERT INTO workspace_team_grants
@@ -435,7 +435,7 @@ describe("organization, team, and namespace boundaries", () => {
       userId: first.owner.user.id,
       workspaceId: secondWorkspace.id,
       agentId: secondAgent.id,
-      role: "editor",
+      accessProfile: "writer",
     })).toMatchObject({ workspaceId: secondWorkspace.id, agentId: secondAgent.id });
   });
 
@@ -456,7 +456,7 @@ describe("organization, team, and namespace boundaries", () => {
       userId: owner.user.id,
       workspaceId: workspace.id,
       agentId: agent.id,
-      role: "editor",
+      accessProfile: "writer",
     });
     const credential = createAgentCredential(database, {
       userId: owner.user.id,
@@ -522,7 +522,7 @@ describe("organization, team, and namespace boundaries", () => {
       userId: owner.user.id,
       workspaceId: workspace.id,
       agentId: personalAgent.id,
-      role: "viewer",
+      accessProfile: "reader",
     })).toMatchObject({ workspaceId: workspace.id, agentId: personalAgent.id });
     expect(database.prepare(
       `SELECT organization_id, agent_id, approved_by_user_id, revoked_at
@@ -564,13 +564,13 @@ describe("organization, team, and namespace boundaries", () => {
       userId: administrator.user.id,
       workspaceId: workspace.id,
       agentId: agent.id,
-      role: "editor",
+      accessProfile: "writer",
     });
 
     expect(assignment).toMatchObject({
       workspaceId: workspace.id,
       agentId: agent.id,
-      role: "editor",
+      accessProfile: "writer",
     });
     expect(listWorkspaceAgentMemberships(database, workspace.id, administrator.user.id))
       .toEqual([expect.objectContaining({ membershipId: assignment.membershipId })]);
@@ -594,13 +594,14 @@ describe("organization, team, and namespace boundaries", () => {
       userId: owner.user.id,
       workspaceId: workspace.id,
       agentId: agent.id,
-      role: "viewer",
+      accessProfile: "reader",
     });
     createAgentCredential(database, {
       userId: owner.user.id,
       agentId: agent.id,
       name: "Private network key",
       defaultWorkspaceId: workspace.id,
+      workspaceAllowlist: [workspace.id],
       ipAllowlist: ["203.0.113.0/24"],
     });
     const member = createTestUser(database, {
@@ -659,13 +660,14 @@ describe("organization, team, and namespace boundaries", () => {
       userId: administrator.user.id,
       workspaceId: workspace.id,
       agentId: personalAgent.id,
-      role: "editor",
+      accessProfile: "writer",
     });
     const credential = createAgentCredential(database, {
       userId: administrator.user.id,
       agentId: personalAgent.id,
       name: "Administrator key",
       defaultWorkspaceId: workspace.id,
+      workspaceAllowlist: [workspace.id],
     });
     expect(authenticateApiToken(database, `Bearer ${credential.token}`)).toMatchObject({
       workspaceId: workspace.id,

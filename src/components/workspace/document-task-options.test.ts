@@ -1,4 +1,9 @@
 import { describe, expect, it } from "vitest";
+import {
+  listAgentProfilePermissions,
+  type AgentAccessProfile,
+  type WorkspacePermission,
+} from "@/lib/authz/permissions";
 import type { WorkspaceAgentSummary } from "@/lib/collaboration/types";
 import {
   buildTaskDocumentTree,
@@ -9,14 +14,19 @@ import {
 function agent(
   id: string,
   displayName: string,
-  role: WorkspaceAgentSummary["role"],
+  accessProfile: AgentAccessProfile,
   status: WorkspaceAgentSummary["status"] = "active",
+  extraCapabilities: WorkspacePermission[] = [],
 ): WorkspaceAgentSummary {
   return {
     id,
     displayName,
     avatarMediaId: null,
-    role,
+    accessProfile,
+    capabilities: [
+      ...listAgentProfilePermissions(accessProfile),
+      ...extraCapabilities,
+    ],
     status,
     activeAssignmentCount: 0,
     createdAt: "2026-07-19T00:00:00.000Z",
@@ -27,27 +37,27 @@ function agent(
 describe("Agent To-do options", () => {
   it("uses the only active agent as the default", () => {
     expect(preferredTaskAgentId([
-      agent("disabled-admin", "비활성 관리자", "admin", "disabled"),
-      agent("only-agent", "단독 에이전트", "viewer"),
+      agent("disabled-manager", "비활성 관리자", "custom", "disabled", ["tasks.manage"]),
+      agent("only-agent", "단독 에이전트", "reader"),
     ])).toBe("only-agent");
   });
 
-  it("orders active agents by workspace role and then name", () => {
+  it("orders active agents by effective capabilities and then name", () => {
     const agents = [
-      agent("viewer", "뷰어", "viewer"),
-      agent("editor-z", "하 편집자", "editor"),
-      agent("admin-z", "하 관리자", "admin"),
-      agent("admin-a", "가 관리자", "admin"),
-      agent("disabled", "비활성", "admin", "disabled"),
+      agent("reader", "읽기", "reader"),
+      agent("writer-z", "하 문서 작업", "writer"),
+      agent("manager-z", "하 관리자", "custom", "active", ["tasks.manage"]),
+      agent("manager-a", "가 관리자", "custom", "active", ["tasks.manage"]),
+      agent("disabled", "비활성", "custom", "disabled", ["tasks.manage"]),
     ];
 
     expect(orderedActiveTaskAgents(agents).map((item) => item.id)).toEqual([
-      "admin-a",
-      "admin-z",
-      "editor-z",
-      "viewer",
+      "manager-a",
+      "manager-z",
+      "writer-z",
+      "reader",
     ]);
-    expect(preferredTaskAgentId(agents)).toBe("admin-a");
+    expect(preferredTaskAgentId(agents)).toBe("manager-a");
   });
 
   it("builds a sorted document tree with path and ancestor context", () => {

@@ -1,5 +1,6 @@
 import { notFound } from "next/navigation";
 import { WorkspaceShell } from "@/components/workspace/workspace-shell";
+import { listAgentProfilePermissions } from "@/lib/authz/permissions";
 import type { WorkspaceView } from "@/lib/workspace/view";
 import { AgentLinkFixture } from "./agent-link-fixture";
 
@@ -60,7 +61,8 @@ const taskAgents = [{
   id: "00000000-0000-4000-8000-0000000000e1",
   displayName: "Editor Agent",
   avatarMediaId: null,
-  role: "editor" as const,
+  accessProfile: "writer" as const,
+  capabilities: listAgentProfilePermissions("writer"),
   status: "active" as const,
   activeAssignmentCount: 0,
   createdAt: "2026-07-14T00:00:00.000Z",
@@ -69,7 +71,12 @@ const taskAgents = [{
   id: "00000000-0000-4000-8000-0000000000a1",
   displayName: "Admin Agent",
   avatarMediaId: null,
-  role: "admin" as const,
+  accessProfile: "custom" as const,
+  capabilities: [
+    ...listAgentProfilePermissions("writer"),
+    "assignments.manage" as const,
+    "tasks.manage" as const,
+  ],
   status: "active" as const,
   activeAssignmentCount: 0,
   createdAt: "2026-07-14T00:00:00.000Z",
@@ -78,7 +85,12 @@ const taskAgents = [{
   id: "00000000-0000-4000-8000-0000000000d1",
   displayName: "Disabled Admin",
   avatarMediaId: null,
-  role: "admin" as const,
+  accessProfile: "custom" as const,
+  capabilities: [
+    ...listAgentProfilePermissions("writer"),
+    "assignments.manage" as const,
+    "tasks.manage" as const,
+  ],
   status: "disabled" as const,
   activeAssignmentCount: 0,
   createdAt: "2026-07-14T00:00:00.000Z",

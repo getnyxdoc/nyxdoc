@@ -112,7 +112,7 @@ export default async function McpOAuthAuthorizePage({
         requestedScopes={state.requestedScopes}
         workspaces={state.workspaces}
         initialWorkspaceIds={state.selectedWorkspaceIds}
-        initialRole={state.role}
+        workspaceAccess={state.workspaceAccess}
         agents={state.agents}
         initialAgent={state.initialAgent}
       />

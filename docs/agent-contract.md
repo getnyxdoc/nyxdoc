@@ -27,8 +27,8 @@ Bearer 연결 키를 사용한다. 연결 직후
 - `get_backlinks`: 현재 문서를 참조하는 문서와 원본 블록 ID
 - `get_changes`: 연결별 커서 이후 사람·다른 에이전트의 변경. 명시 커서는 연결 상태를 바꾸지
   않고 미래 커서는 현재 헤드로 보정됨
-- `list_agent_workspaces`: 현재 전역 에이전트와 키로 접근 가능한 워크스페이스, 멤버십 ID,
-  역할·실제 허용 행동·문서 범위와 요청 선택 방법
+- `list_agent_workspaces`: 현재 전역 에이전트와 키로 접근 가능한 워크스페이스, grant ID,
+  접근 프로필·실제 허용 capability·문서 범위와 요청 선택 방법
 - `get_workspace_context`, `list_workspace_agents`: 명시한 `workspaceId` 또는 연결 기본
   워크스페이스의 실제 허용 행동,
   연결 키 범위, 워크스페이스 정책, 현재 활성 담당 및 Agent To-do 요약과 공동작업 에이전트 조회
@@ -40,7 +40,8 @@ Bearer 연결 키를 사용한다. 연결 직후
 - `get_task`: Task ID에서 워크스페이스를 자동 판별해 작업 이력 조회. 조회와 연결만으로
   작업을 자동 시작하지 않음
 - `list_assignments`: 문서별 담당 에이전트와 역할 조회. 담당 지정은 접근 권한을 만들지 않음
-- `list_trash`: 관리 에이전트가 복구 가능한 문서 트리와 자동 삭제 예정 시각 조회
+- `list_trash`: `documents.restore` capability가 있는 에이전트가 복구 가능한 문서 트리와
+  자동 삭제 예정 시각 조회
 - `list_revisions`, `get_revision`, `diff_revisions`: 불변 이력과 블록·메타데이터 diff
 - `export_document`: Markdown 또는 Nyxdoc JSON bundle
 
@@ -66,16 +67,18 @@ Bearer 연결 키를 사용한다. 연결 직후
 - `report_task`: 진행률, 막힌 이유 또는 대기 복귀를 작업 이력에 기록
 - `complete_task`: 결과 요약과 선택적인 불변 결과 리비전을 제출. 기본은 사람 검토 상태
 - `set_presence`, `end_presence`: 현재 읽기·수정·초안·검토 위치를 45초 만료 상태로 게시
-- `trash_document`: 에디터 에이전트는 최초 리비전 기준으로 자신이 모두 만든 문서 트리만
-  soft delete하고, 관리 에이전트는 허용 범위의 문서 트리를 삭제. 다른 사람의 로그인 세션으로
-  권한 거부를 우회하지 않음
-- `restore_trashed_document`: 관리 에이전트가 삭제된 문서 트리를 복구.
+- `trash_document`: `documents.trash_own`은 최초 리비전 기준으로 자신이 모두 만든 문서
+  트리만 soft delete하고, `documents.trash`는 허용 범위의 문서 트리를 삭제. 다른 사람의
+  로그인 세션으로 권한 거부를 우회하지 않음
+- `restore_trashed_document`: `documents.restore` capability가 있는 에이전트가 삭제된
+  문서 트리를 복구.
   영구 삭제는 에이전트에 공개하지 않음
 
 ### 관리 요청
 
-`admin` 에이전트도 워크스페이스 정책, 에이전트 역할, 연결 키를 직접 바꿀 수 없다.
-`propose_admin_action`으로 다음 작업을 검증·미리보기한 뒤 사람의 승인을 기다린다.
+`admin_requests.create` capability가 있는 에이전트도 워크스페이스 정책, 다른 에이전트의
+grant 또는 연결 키를 직접 바꿀 수 없다. `propose_admin_action`으로 다음 작업을
+검증·미리보기한 뒤 사람의 승인을 기다린다.
 
 - `workspace.create`, `workspace.update`
 - `agent.connect`, `agent.update`
@@ -192,7 +195,8 @@ MCP JSON에 넣지 않고 다음 절차를 사용한다.
 3. 성공 응답의 `imageBlock`을 `patch_document` 또는 문서 생성 도구에 넣는다.
 
 업로드 권한은 발급한 연결 키·워크스페이스·선택한 문서에 묶이며, 사용 시점에도 연결 키와
-멤버십의 활성 상태, `documents:write`, `documents.update`, `media.upload`, 문서 트리 범위를
+워크스페이스 grant 및 binding의 활성 상태, `documents:write`, `documents.update`,
+`media.upload`, 문서 트리 범위를
 다시 확인한다. 한 번 사용했거나 만료된 URL은 다시 쓸 수 없다. 일회용 Authorization 값은
 문서·로그·답변에 저장하거나 재표시하지 않는다. 파일은 15MB 이하 PNG/JPEG/GIF/WebP만
 허용하고, 선언한 크기·MIME·SHA-256이 있으면 실제 디코딩한 이미지와 일치해야 한다.
@@ -220,13 +224,15 @@ MCP JSON에 넣지 않고 다음 절차를 사용한다.
 - `tags`: 최대 30개
 
 내부 링크는 `doc_ref`로 저장되고 `get_backlinks`에서 역방향으로 찾는다. 워크스페이스의
-에이전트 멤버십에 루트 문서를 정하면 해당 문서와 하위 트리만 읽고 쓸 수 있다. 범위 제한 연결이 최상위 생성을
+에이전트 grant에 루트 문서를 정하면 해당 문서와 하위 트리만 읽고 쓸 수 있다. 범위 제한 연결이 최상위 생성을
 요청하면 허용된 루트 아래에 생성된다. `revisions:restore`는 별도로 선택해야 하는 권한이다.
 
-담당 지정은 책임 정보이고 권한이 아니다. 실제 접근은 항상 키 scope·허용 워크스페이스·IP
-제한, 워크스페이스 멤버십의 역할·세부 허용/제외, 선택적 루트 문서 범위의 교집합으로 계산한다.
-내장 역할은 누적 권한 묶음인 `admin | editor | viewer`이며
-관리 에이전트도 키 발급·권한 상승·영구 삭제·백업 실행 권한을 직접 갖지 않는다.
+담당 지정은 책임 정보이고 권한이 아니다. 실제 접근은 항상 `활성 전역 에이전트 신원 ∩
+활성 워크스페이스 grant capability ∩ 연결 키의 명시적 grant binding과 scope 상한 ∩
+선택적 루트 문서 범위 ∩ IP 제한`의 교집합으로 계산한다. 접근 프로필은 `reader`,
+`drafter`, `writer`, `custom`이며 정규 인가 값은 항상 capability 목록이다. `custom`은
+명시적인 capability를 하나 이상 가져야 하고, 에이전트는 키 발급·권한 상승·영구 삭제·백업
+실행처럼 사람 전용인 보호 capability를 가질 수 없다.
 
 담당 역할은 에이전트에게 다음 기대 행동을 전달한다.
 
@@ -250,9 +256,10 @@ Agent To-do는 담당과 별도의 유한 문서 요청이다. 기본 상태 `re
 문서 삭제는 현재 리비전과 하위 트리를 한 묶음으로 휴지통에 옮긴다. 기본 보존 기간은
 30일이며 원래 부모·정렬 순서, 첨부·리비전·이벤트를 유지한다. 복구는 같은 트리를 되살리고,
 영구 삭제는 사람만 실행할 수 있으며 직전에 검증 가능한 DB/미디어 백업을 만든다.
-에디터 에이전트의 기본 `documents.trash_own` 권한은 최초 불변 리비전의 에이전트 신원을
+`documents.trash_own` capability는 최초 불변 리비전의 에이전트 신원을
 확인하며, 트리 안에 다른 사람이 만든 하위 문서가 하나라도 있으면 전체 작업을 거부한다.
-모든 문서를 지울 수 있는 `documents.trash`는 관리 에이전트에만 기본 제공한다.
+모든 허용 문서를 지울 수 있는 `documents.trash`는 해당 capability가 명시된 grant에서만
+사용할 수 있다.
 
 실시간 협업은 Yjs CRDT 공유 초안을 사용한다. 사람은 WebSocket으로 문자 단위 변경을 교환하고,
 에이전트는 같은 초안을 `expectedDraftVersion` 명령으로 안전하게 바꾼다. 초안은 서버 SQLite에
@@ -284,8 +291,9 @@ Markdown 직렬화는 의미가 같은 비순서 목록 표식을 `*`로 통일�
 ## 콘텐츠와 접근 보안
 
 Nyxdoc는 문서 내용을 비밀번호·토큰 패턴으로 임의 판정하거나 차단하지 않는다. 어떤 내용을
-기록할지는 사용자와 조직의 정책이다. 플랫폼은 인증, 워크스페이스 멤버십, 역할·세부 권한,
-문서 트리 범위, 연결 키 상한과 IP/CIDR 제한을 일관되게 적용해 권한 없는 접근을 막는다.
+기록할지는 사용자와 조직의 정책이다. 플랫폼은 인증, 워크스페이스 grant capability,
+연결 키 binding과 scope 상한, 문서 트리 범위, IP/CIDR 제한을 일관되게 적용해 권한 없는
+접근을 막는다.
 
 ## 연결 설정
 
@@ -305,8 +313,8 @@ Nyxdoc는 문서 내용을 비밀번호·토큰 패턴으로 임의 판정하거
 `list_my_tasks`는 전역 에이전트 기준으로 허용된 모든 워크스페이스를 조회하고,
 `get_task`, `claim_task`, `report_task`, `complete_task`는 Task ID에서 워크스페이스를
 판별한다. 사람 브라우저에서 현재 열어둔 워크스페이스는 이 라우팅에 관여하지 않는다. 모든
-호출은 키의 허용 워크스페이스·IP/CIDR 제한과 대상 워크스페이스의 최신 활성 멤버십·역할·문서
-범위를 다시 통과해야 한다.
+호출은 키의 명시적 grant binding·scope·IP/CIDR 제한과 대상 워크스페이스의 최신 활성
+grant capability·문서 범위를 다시 통과해야 한다.
 
 ```json
 {
@@ -325,7 +333,7 @@ bearer_token_env_var = "NYXDOC_TOKEN"
 ```
 
 OAuth를 지원하는 원격 MCP 클라이언트는 `/mcp`에서 시작해 well-known 메타데이터를
-발견한다. 사용자는 로그인 후 연결할 워크스페이스와 역할을 승인한다. 자세한 계약은
+발견한다. 사용자는 로그인 후 연결할 에이전트 신원, 워크스페이스와 접근 프로필을 승인한다. 자세한 계약은
 [MCP OAuth](mcp/oauth.md)와 [클라이언트 호환성](mcp/compatibility.md)을 참고한다.
 
 ## REST 대응 경로

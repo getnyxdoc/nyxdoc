@@ -34,7 +34,12 @@ import type {
   AgentWorkspaceMembershipSummary,
   ConnectAgentToWorkspaceResult,
 } from "@/lib/agents/service";
-import type { AgentWorkspaceRole, WorkspacePermission } from "@/lib/authz/permissions";
+import {
+  AGENT_ACCESS_PROFILES,
+  listAgentProfilePermissions,
+  type AgentAccessProfile,
+  type WorkspacePermission,
+} from "@/lib/authz/permissions";
 import type { ApiTokenScope } from "@/lib/tokens/service";
 import type { DocumentSummary } from "@/lib/documents/types";
 import type { WorkspaceSummary } from "@/lib/workspaces/service";
@@ -168,24 +173,27 @@ function delegablePermissions(locale: AppLocale): Array<{
 
 type ApiBody = { error?: string };
 
-function roleLabel(role: AgentWorkspaceRole, locale: AppLocale) {
+function accessProfileLabel(profile: AgentAccessProfile, locale: AppLocale) {
   return {
     en: {
-      viewer: "Viewer · read only",
-      editor: "Editor · document work",
-      admin: "Workspace administrator",
+      reader: "Reader · read only",
+      drafter: "Drafter · edit drafts",
+      writer: "Writer · edit and save",
+      custom: "Custom access",
     },
     ko: {
-      viewer: "뷰어 · 읽기 전용",
-      editor: "에디터 · 문서 작업",
-      admin: "워크스페이스 관리자",
+      reader: "읽기 · 읽기 전용",
+      drafter: "초안 작성 · 초안 편집",
+      writer: "문서 작업 · 편집 및 저장",
+      custom: "사용자 지정 권한",
     },
     ja: {
-      viewer: "閲覧者 · 読み取り専用",
-      editor: "編集者 · 文書作業",
-      admin: "ワークスペース管理者",
+      reader: "閲覧 · 読み取り専用",
+      drafter: "下書き作成 · 下書き編集",
+      writer: "文書作業 · 編集と保存",
+      custom: "カスタムアクセス",
     },
-  }[locale][role];
+  }[locale][profile];
 }
 
 function humanRoleLabel(role: WorkspaceSummary["role"], locale: AppLocale) {
@@ -287,8 +295,8 @@ export function AccountAgentsPanel({
       neverUsed: "Not used yet",
       ipLimit: "IP limit: {ips}",
       noIpLimit: "No IP limit",
-      workspaceLimit: "Limited to {count} workspaces",
-      allAssignedWorkspaces: "All assigned workspaces",
+      workspaceLimit: "Attached to {count} workspace grants",
+      allAssignedWorkspaces: "No workspace access attached",
       keySettings: "Key settings",
       rotateKey: "Rotate key",
       revokeKey: "Revoke key",
@@ -331,8 +339,8 @@ export function AccountAgentsPanel({
       expiry: "Expiration (optional)",
       allowRevisionRestore: "Allow revision restore",
       revisionRestoreHint: "The workspace permission must also allow restore.",
-      workspaceRestriction: "Workspace restriction",
-      restrictedHint: "This key can be used only in selected workspaces.",
+      workspaceRestriction: "Workspace access bindings",
+      restrictedHint: "The key can access only explicitly selected workspace grants. Saving never changes the grants themselves.",
       assignBeforeRestrict: "Assign the agent to a workspace before restricting it.",
       assignFirst: "Assign the agent to a workspace first.",
       noUsableWorkspace: "This key cannot use any workspace yet. Assign the agent, then choose a role and document scope.",
@@ -415,8 +423,8 @@ export function AccountAgentsPanel({
       neverUsed: "아직 사용 전",
       ipLimit: "IP 제한 {ips}",
       noIpLimit: "IP 제한 없음",
-      workspaceLimit: "{count}개 워크스페이스로 제한",
-      allAssignedWorkspaces: "할당된 모든 워크스페이스",
+      workspaceLimit: "워크스페이스 접근 권한 {count}개에 연결",
+      allAssignedWorkspaces: "연결된 워크스페이스 접근 권한 없음",
       keySettings: "키 설정",
       rotateKey: "키 회전",
       revokeKey: "키 폐기",
@@ -459,8 +467,8 @@ export function AccountAgentsPanel({
       expiry: "만료일 (선택)",
       allowRevisionRestore: "리비전 복원 허용",
       revisionRestoreHint: "워크스페이스 권한도 복원을 허용해야 실제로 동작합니다.",
-      workspaceRestriction: "워크스페이스 제한",
-      restrictedHint: "선택한 워크스페이스에서만 이 키를 사용할 수 있습니다.",
+      workspaceRestriction: "워크스페이스 접근 권한 연결",
+      restrictedHint: "명시적으로 선택한 워크스페이스 접근 권한에서만 이 키를 사용할 수 있습니다. 키를 저장해도 접근 권한 자체는 바뀌지 않습니다.",
       assignBeforeRestrict: "워크스페이스에 배정한 뒤 제한할 수 있습니다.",
       assignFirst: "먼저 워크스페이스에 배정해주세요.",
       noUsableWorkspace: "현재 키를 사용할 수 있는 워크스페이스가 없습니다. 에이전트를 배정한 뒤 역할과 문서 범위를 정할 수 있습니다.",
@@ -543,8 +551,8 @@ export function AccountAgentsPanel({
       neverUsed: "未使用",
       ipLimit: "IP制限 {ips}",
       noIpLimit: "IP制限なし",
-      workspaceLimit: "{count}ワークスペースに制限",
-      allAssignedWorkspaces: "割り当て済みのすべてのワークスペース",
+      workspaceLimit: "ワークスペースアクセス{count}件に関連付け",
+      allAssignedWorkspaces: "関連付けられたワークスペースアクセスなし",
       keySettings: "キー設定",
       rotateKey: "キーローテーション",
       revokeKey: "キーを失効",
@@ -587,8 +595,8 @@ export function AccountAgentsPanel({
       expiry: "有効期限（任意）",
       allowRevisionRestore: "リビジョン復元を許可",
       revisionRestoreHint: "ワークスペース権限でも復元が許可されている必要があります。",
-      workspaceRestriction: "ワークスペース制限",
-      restrictedHint: "選択したワークスペースでのみこのキーを使用できます。",
+      workspaceRestriction: "ワークスペースアクセスの関連付け",
+      restrictedHint: "明示的に選択したワークスペース権限でのみこのキーを使用できます。キー保存で権限自体は変更されません。",
       assignBeforeRestrict: "ワークスペースへ割り当てた後に制限できます。",
       assignFirst: "先にワークスペースへ割り当ててください。",
       noUsableWorkspace: "このキーを使用できるワークスペースがありません。エージェントを割り当て、役割と文書範囲を設定してください。",
@@ -646,7 +654,6 @@ export function AccountAgentsPanel({
   const [keyMode, setKeyMode] = useState<"read" | "write">("write");
   const [keyRestore, setKeyRestore] = useState(false);
   const [keyDefaultWorkspace, setKeyDefaultWorkspace] = useState("");
-  const [keyRestricted, setKeyRestricted] = useState(false);
   const [keyWorkspaces, setKeyWorkspaces] = useState<string[]>([]);
   const [keyIps, setKeyIps] = useState("");
   const [keyExpiresAt, setKeyExpiresAt] = useState("");
@@ -759,8 +766,7 @@ export function AccountAgentsPanel({
     setKeyMode(credential?.scopes.includes("documents:write") === false ? "read" : "write");
     setKeyRestore(Boolean(credential?.scopes.includes("revisions:restore")));
     setKeyDefaultWorkspace(credential?.defaultWorkspaceId ?? "");
-    setKeyRestricted(Boolean(credential?.workspaceAllowlist.length));
-    setKeyWorkspaces(credential?.workspaceAllowlist ?? []);
+    setKeyWorkspaces(credential?.workspaceIds ?? []);
     setKeyIps(credential?.ipAllowlist.join("\n") ?? "");
     setKeyExpiresAt(dateTimeLocal(credential?.expiresAt ?? null));
     setError("");
@@ -768,16 +774,12 @@ export function AccountAgentsPanel({
 
   async function saveCredential() {
     if (!credentialEditor || pending) return;
-    if (keyRestricted && keyWorkspaces.length === 0) {
-      setError(copy.workspaceRestrictionRequired);
-      return;
-    }
     const { agent, credential } = credentialEditor;
     const payload = {
       name: keyName,
       scopes: credentialScopes(keyMode, keyMode === "write" && keyRestore),
       defaultWorkspaceId: keyDefaultWorkspace || null,
-      workspaceAllowlist: keyRestricted ? keyWorkspaces : [],
+      workspaceIds: keyWorkspaces,
       ipAllowlist: keyIps.split(/[\s,]+/).filter(Boolean),
       expiresAt: keyExpiresAt ? new Date(keyExpiresAt).toISOString() : null,
     };
@@ -1022,7 +1024,7 @@ export function AccountAgentsPanel({
               {activeMemberships.length
                 ? activeMemberships.map((membership) => <Link href={`/settings/workspace?workspace=${encodeURIComponent(membership.workspaceId)}#workspace-agents`} key={membership.membershipId}>{formatCopy(copy.membership, {
                   workspace: membership.workspaceName,
-                  role: roleLabel(membership.role, locale),
+                  role: accessProfileLabel(membership.accessProfile, locale),
                 })}</Link>)
                 : <button type="button" onClick={() => setWorkspaceManagerAgentId(agent.id)}>{copy.noAssignments}</button>}
             </div>
@@ -1082,9 +1084,9 @@ export function AccountAgentsPanel({
                         })
                         : copy.noIpLimit}
                       {" · "}
-                      {credential.workspaceAllowlist.length
+                      {credential.workspaceIds.length
                         ? formatCopy(copy.workspaceLimit, {
-                          count: credential.workspaceAllowlist.length,
+                          count: credential.workspaceIds.length,
                         })
                         : copy.allAssignedWorkspaces}
                     </small>
@@ -1228,7 +1230,7 @@ export function AccountAgentsPanel({
             <span>{copy.defaultWorkspace}</span>
             <select value={keyDefaultWorkspace} onChange={(event) => setKeyDefaultWorkspace(event.target.value)}>
               <option value="">{credentialMemberships.length ? copy.noDefault : copy.noAssignedWorkspace}</option>
-              {credentialMemberships.map((membership) => <option key={membership.workspaceId} value={membership.workspaceId}>{membership.workspaceName}</option>)}
+              {credentialMemberships.filter((membership) => keyWorkspaces.includes(membership.workspaceId)).map((membership) => <option key={membership.workspaceId} value={membership.workspaceId}>{membership.workspaceName}</option>)}
               {unassignedCredentialWorkspaces.length > 0 && <optgroup label={copy.assignFirstGroup}>
                 {unassignedCredentialWorkspaces.map((workspace) => <option disabled value={`unassigned:${workspace.id}`} key={workspace.id}>{workspace.name} · {copy.unassigned}</option>)}
               </optgroup>}
@@ -1237,8 +1239,11 @@ export function AccountAgentsPanel({
           </label>
           <label><span>{copy.expiry}</span><input type="datetime-local" value={keyExpiresAt} onChange={(event) => setKeyExpiresAt(event.target.value)} /></label>
           <label className={styles.editPermissionToggle}><input type="checkbox" checked={keyMode === "write" && keyRestore} disabled={keyMode === "read"} onChange={(event) => setKeyRestore(event.target.checked)} /><span><strong>{copy.allowRevisionRestore}</strong><small>{copy.revisionRestoreHint}</small></span></label>
-          <label className={styles.editPermissionToggle}><input type="checkbox" checked={keyRestricted} disabled={credentialMemberships.length === 0} onChange={(event) => setKeyRestricted(event.target.checked)} /><span><strong>{copy.workspaceRestriction}</strong><small>{credentialMemberships.length ? copy.restrictedHint : copy.assignBeforeRestrict}</small></span></label>
-          {keyRestricted && <div className={styles.workspaceChecklist}>{credentialMemberships.map((membership) => <label key={membership.workspaceId}><input type="checkbox" checked={keyWorkspaces.includes(membership.workspaceId)} onChange={(event) => setKeyWorkspaces((current) => event.target.checked ? [...new Set([...current, membership.workspaceId])] : current.filter((id) => id !== membership.workspaceId))} /><span>{membership.workspaceName}</span></label>)}</div>}
+          <div className={styles.editPermissionToggle}><span><strong>{copy.workspaceRestriction}</strong><small>{credentialMemberships.length ? copy.restrictedHint : copy.assignBeforeRestrict}</small></span></div>
+          {credentialMemberships.length > 0 && <div className={styles.workspaceChecklist}>{credentialMemberships.map((membership) => <label key={membership.workspaceId}><input type="checkbox" checked={keyWorkspaces.includes(membership.workspaceId)} onChange={(event) => {
+            setKeyWorkspaces((current) => event.target.checked ? [...new Set([...current, membership.workspaceId])] : current.filter((id) => id !== membership.workspaceId));
+            if (!event.target.checked && keyDefaultWorkspace === membership.workspaceId) setKeyDefaultWorkspace("");
+          }} /><span>{membership.workspaceName}</span></label>)}</div>}
           {credentialMemberships.length === 0 && credentialAgent && <div className={styles.credentialWorkspaceNotice}>
             <Building2 size={17} />
             <div><strong>{copy.assignFirst}</strong><small>{copy.noUsableWorkspace}</small></div>
@@ -1247,7 +1252,7 @@ export function AccountAgentsPanel({
           <label className={styles.fullWidthField}><span>{copy.allowedIp}</span><textarea value={keyIps} onChange={(event) => setKeyIps(event.target.value)} placeholder={"203.0.113.10\n2001:db8::/48"} /><small>{copy.ipHint}</small></label>
         </div>
         {error && <div className={styles.inlineError} role="alert">{error}</div>}
-        <footer><button type="button" onClick={() => { setCredentialEditor(null); setError(""); }} disabled={Boolean(pending)}>{copy.cancel}</button><button type="button" onClick={() => void saveCredential()} disabled={Boolean(pending) || !keyName.trim() || (keyRestricted && keyWorkspaces.length === 0)}><Save size={14} /> {pending ? copy.saving : copy.save}</button></footer>
+        <footer><button type="button" onClick={() => { setCredentialEditor(null); setError(""); }} disabled={Boolean(pending)}>{copy.cancel}</button><button type="button" onClick={() => void saveCredential()} disabled={Boolean(pending) || !keyName.trim()}><Save size={14} /> {pending ? copy.saving : copy.save}</button></footer>
       </section>
     </div>}
 
@@ -1265,7 +1270,7 @@ export function AccountAgentsPanel({
               <span><Building2 size={16} /></span>
               <div>
                 <strong>{workspace.name}</strong>
-                <small>{membership ? roleLabel(membership.role, locale) : copy.unassigned} · {copy.myRole} {humanRoleLabel(workspace.role, locale)}</small>
+                <small>{membership ? accessProfileLabel(membership.accessProfile, locale) : copy.unassigned} · {copy.myRole} {humanRoleLabel(workspace.role, locale)}</small>
               </div>
               {canManage
                 ? <Link href={membership
@@ -1308,7 +1313,7 @@ export function AccountAgentsPanel({
           : copy.readOnly,
         locale,
         mcpUrl: revealedMcpUrl,
-        role: defaultMembership ? roleLabel(defaultMembership.role, locale) : null,
+        role: defaultMembership ? accessProfileLabel(defaultMembership.accessProfile, locale) : null,
         token: revealedConnection.token,
         workspaceName: defaultWorkspace?.name ?? null,
       });
@@ -1339,17 +1344,6 @@ function activeCredential(credential: AgentCredentialSummary) {
     && (!credential.expiresAt || Date.parse(credential.expiresAt) > Date.now());
 }
 
-function credentialSupportsRole(
-  credential: AgentCredentialSummary,
-  role: AgentWorkspaceRole,
-) {
-  if (!credential.scopes.includes("documents:read")) return false;
-  return role === "viewer" || (
-    credential.scopes.includes("documents:write")
-    && credential.scopes.includes("documents:commit")
-  );
-}
-
 function workspaceMcpUrl(mcpUrl: string, workspaceId: string) {
   try {
     const url = new URL(mcpUrl);
@@ -1369,11 +1363,11 @@ function workspaceAgentCopy(locale: AppLocale) {
       allDocuments: "All documents",
       connectFailed: "Could not connect the agent.",
       permissionSaveFailed: "Could not save workspace permissions.",
-      title: "Agent assignments and permissions",
-      description: "Set up the agent identity, role, document scope, and connection key for this workspace in one flow.",
+      title: "Agent access",
+      description: "Grant an agent access to this workspace, then optionally attach a connection key.",
       connectAgent: "Connect agent",
       identityBoundaryTitle: "Identities and keys are registered once per account.",
-      identityBoundary: "Reuse the same agent and key across workspaces, while setting a separate role and document scope in each workspace.",
+      identityBoundary: "Reuse the same agent across workspaces, while granting separate access and document scope in each workspace. Keys are attached explicitly and are never expanded automatically.",
       emptyTitle: "No agents are connected yet.",
       emptyHint: "Choose an existing agent or register a new one and connect it now.",
       firstConnection: "Connect the first agent",
@@ -1385,7 +1379,7 @@ function workspaceAgentCopy(locale: AppLocale) {
       closeWizard: "Close agent connection",
       progressLabel: "Agent connection steps",
       stepAgent: "Agent",
-      stepAccess: "Role and scope",
+      stepAccess: "Access and scope",
       stepCredential: "Connection key",
       chooseAgent: "Who should be connected to this workspace?",
       chooseAgentHint: "Select an existing agent without registering it again.",
@@ -1397,8 +1391,14 @@ function workspaceAgentCopy(locale: AppLocale) {
       agentName: "Agent name",
       agentPlaceholder: "Example: nyxdoc-builder",
       agentNameHint: "Use a unique, human-readable name. You can change it later.",
-      chooseWork: "Choose what this agent will do in the workspace.",
-      chooseWorkHint: "The role provides base permissions. Document scope covers the selected document and all descendants.",
+      chooseWork: "Choose what this agent may do in the workspace.",
+      chooseWorkHint: "The access profile is the workspace grant. Document scope covers the selected document and all descendants.",
+      reader: "Reader",
+      readerDescription: "Read and search documents and inspect changes",
+      drafter: "Drafter",
+      drafterDescription: "Create and edit shared drafts without saving canonical revisions",
+      writer: "Writer",
+      writerDescription: "Create, edit, and save canonical document revisions",
       viewer: "Viewer",
       viewerDescription: "Read and search documents and inspect changes",
       editor: "Editor",
@@ -1409,7 +1409,7 @@ function workspaceAgentCopy(locale: AppLocale) {
       newAgentScope: "Document scope for the new agent",
       scopeHint: "The default is every document in this workspace.",
       chooseKey: "Choose a connection key for the external agent.",
-      chooseKeyHint: "Keys belong to the account-level agent identity and can be used across assigned workspaces.",
+      chooseKeyHint: "This step only attaches a key to the workspace grant. It never widens the key’s scopes or other bindings.",
       readWrite: "Read and write",
       readOnly: "Read only",
       ipLimited: "IP limited",
@@ -1419,13 +1419,17 @@ function workspaceAgentCopy(locale: AppLocale) {
       createKey: "Create a connection key",
       keyShownOnce: "The raw value is shown only once after creation.",
       keyName: "Key name",
+      existingKeyBoundary: "This key keeps its current scopes. If they are narrower than the workspace grant, the effective authority is reduced.",
+      bindLater: "Attach a key later",
+      bindLaterHint: "Save workspace access now. The agent cannot connect to this workspace until a key or OAuth credential is attached.",
+      accessSavedNoKey: "Workspace access was saved without a connection key. Attach a key from Agent management when the agent is ready to connect.",
       restrictKey: "Limit this key to this workspace",
       restrictKeyHint: "When off, this key can also be used in other workspaces assigned to the agent later.",
       expandExistingKey: "The existing restrictions remain, and only {workspace} is added to the allowed workspaces.",
-      effectiveBoundary: "Effective permissions are limited to what both the connection key ceiling and this workspace role and document scope allow.",
+      effectiveBoundary: "Effective authority is the intersection of the active agent, key scopes, this workspace grant, explicit key binding, and document scope.",
       workspace: "Workspace",
       agent: "Agent",
-      role: "Role",
+      role: "Access profile",
       scope: "Document scope",
       handoffTitle: "Now send this to the agent",
       handoffHint: "Paste it into the agent conversation to provide connection information and verification steps together.",
@@ -1453,16 +1457,16 @@ function workspaceAgentCopy(locale: AppLocale) {
       previous: "Previous",
       next: "Next",
       connecting: "Connecting…",
-      membershipDescription: "Roles are base permission bundles for each workspace. Add or exclude individual permissions below; changes apply immediately after saving.",
-      roleBundle: "Role bundle",
+      membershipDescription: "Workspace access and credential limits are independent. Changing this grant never widens a connection key.",
+      roleBundle: "Access profile",
       agentScope: "Agent document scope",
-      fineTune: "Fine-tune permissions",
+      fineTune: "Customize capabilities",
       inherit: "Role default",
       allow: "Allow additionally",
       deny: "Explicitly exclude",
       humanBoundary: "Agents cannot issue their own keys, add protected permissions, permanently delete resources, or transfer ownership. Those actions remain human-only.",
-      unassignConfirm: "Remove this agent assignment from the workspace? The key itself remains active.",
-      unassign: "Remove assignment",
+      unassignConfirm: "Remove this agent’s access to the workspace? Its identity and keys remain registered.",
+      unassign: "Remove access",
       saving: "Saving…",
       savePermissions: "Save permissions",
     },
@@ -1473,11 +1477,11 @@ function workspaceAgentCopy(locale: AppLocale) {
       allDocuments: "모든 문서",
       connectFailed: "에이전트를 연결하지 못했습니다.",
       permissionSaveFailed: "워크스페이스 권한을 저장하지 못했습니다.",
-      title: "에이전트 배정과 권한",
-      description: "에이전트 등록부터 역할·문서 범위·연결 키까지 이 워크스페이스 안에서 한 번에 설정합니다.",
+      title: "에이전트 접근",
+      description: "에이전트에게 이 워크스페이스 접근 권한을 부여하고, 필요한 경우 연결 키를 붙입니다.",
       connectAgent: "에이전트 연결",
       identityBoundaryTitle: "신원과 키는 계정에 한 번만 등록됩니다.",
-      identityBoundary: "같은 에이전트와 키를 여러 워크스페이스에서 재사용하고, 실제 역할과 문서 범위만 워크스페이스마다 다르게 정할 수 있습니다.",
+      identityBoundary: "같은 에이전트를 여러 워크스페이스에서 재사용하되 접근 권한과 문서 범위는 각각 부여합니다. 키는 명시적으로 연결하며 자동으로 권한을 넓히지 않습니다.",
       emptyTitle: "아직 연결된 에이전트가 없습니다.",
       emptyHint: "기존 에이전트를 고르거나 새로 등록해 바로 연결할 수 있습니다.",
       firstConnection: "첫 에이전트 연결",
@@ -1489,7 +1493,7 @@ function workspaceAgentCopy(locale: AppLocale) {
       closeWizard: "에이전트 연결 닫기",
       progressLabel: "에이전트 연결 단계",
       stepAgent: "에이전트",
-      stepAccess: "역할과 범위",
+      stepAccess: "접근 권한과 범위",
       stepCredential: "연결 키",
       chooseAgent: "누구를 이 워크스페이스에 연결할까요?",
       chooseAgentHint: "이미 등록한 에이전트는 다시 만들 필요 없이 바로 선택할 수 있습니다.",
@@ -1501,8 +1505,14 @@ function workspaceAgentCopy(locale: AppLocale) {
       agentName: "에이전트 이름",
       agentPlaceholder: "예: nyxdoc-builder",
       agentNameHint: "사람이 알아볼 수 있는 고유한 이름을 사용하세요. 나중에 변경할 수 있습니다.",
-      chooseWork: "이 워크스페이스에서 맡을 일을 정해주세요.",
-      chooseWorkHint: "역할은 기본 권한 묶음이고, 문서 범위는 선택한 문서와 모든 하위 문서에 적용됩니다.",
+      chooseWork: "이 워크스페이스에서 허용할 작업을 정해주세요.",
+      chooseWorkHint: "접근 프로필이 워크스페이스 권한이 되고, 문서 범위는 선택한 문서와 모든 하위 문서에 적용됩니다.",
+      reader: "읽기",
+      readerDescription: "문서 읽기·검색·변경 확인",
+      drafter: "초안 작성",
+      drafterDescription: "문서를 만들고 공유 초안을 편집하되 정본은 저장하지 않음",
+      writer: "문서 작업",
+      writerDescription: "문서를 만들고 편집하며 정본 리비전까지 저장",
       viewer: "뷰어",
       viewerDescription: "문서 읽기·검색·변경 확인",
       editor: "에디터",
@@ -1513,7 +1523,7 @@ function workspaceAgentCopy(locale: AppLocale) {
       newAgentScope: "새 에이전트가 접근할 문서 범위",
       scopeHint: "기본값은 이 워크스페이스의 모든 문서입니다.",
       chooseKey: "외부 에이전트가 사용할 연결 키를 정해주세요.",
-      chooseKeyHint: "키는 계정의 에이전트 신원에 속합니다. 같은 키로 여러 워크스페이스를 오갈 수 있습니다.",
+      chooseKeyHint: "이 단계는 키를 워크스페이스 접근 권한에 연결할 뿐입니다. 키의 스코프나 다른 연결 범위를 자동으로 넓히지 않습니다.",
       readWrite: "읽기·쓰기",
       readOnly: "읽기 전용",
       ipLimited: "IP 제한",
@@ -1523,13 +1533,17 @@ function workspaceAgentCopy(locale: AppLocale) {
       createKey: "새 연결 키 만들기",
       keyShownOnce: "원문은 생성 직후 한 번만 표시됩니다.",
       keyName: "키 이름",
+      existingKeyBoundary: "이 키의 현재 스코프는 그대로 유지됩니다. 워크스페이스 권한보다 좁으면 실제 권한도 그만큼 줄어듭니다.",
+      bindLater: "연결 키는 나중에 붙이기",
+      bindLaterHint: "워크스페이스 접근 권한만 먼저 저장합니다. 키나 OAuth 연결을 붙이기 전에는 이 워크스페이스에 접속할 수 없습니다.",
+      accessSavedNoKey: "연결 키 없이 워크스페이스 접근 권한만 저장했습니다. 에이전트가 접속할 준비가 되면 에이전트 관리에서 키를 연결하세요.",
       restrictKey: "이 워크스페이스로 키 사용 범위 제한",
       restrictKeyHint: "끄면 이 에이전트가 앞으로 배정될 다른 워크스페이스에서도 같은 키를 쓸 수 있습니다.",
       expandExistingKey: "선택한 키의 기존 제한은 유지하고, {workspace}만 허용 범위에 추가합니다.",
-      effectiveBoundary: "실제 권한은 연결 키의 상한과 이 워크스페이스 역할·문서 범위가 모두 허용하는 범위로 제한됩니다.",
+      effectiveBoundary: "실제 권한은 활성 에이전트·키 스코프·워크스페이스 접근 권한·명시적 키 연결·문서 범위가 모두 허용하는 교집합입니다.",
       workspace: "워크스페이스",
       agent: "에이전트",
-      role: "역할",
+      role: "접근 프로필",
       scope: "문서 범위",
       handoffTitle: "이제 에이전트에게 전달하세요",
       handoffHint: "사용하는 에이전트의 대화창에 붙여넣으면 연결 정보와 확인 절차를 한 번에 전달합니다.",
@@ -1557,16 +1571,16 @@ function workspaceAgentCopy(locale: AppLocale) {
       previous: "이전",
       next: "다음",
       connecting: "연결 중…",
-      membershipDescription: "역할은 워크스페이스별 기본 권한 묶음입니다. 필요한 경우 아래에서 개별 권한을 추가하거나 제외할 수 있으며, 저장하면 즉시 적용됩니다.",
-      roleBundle: "역할 묶음",
+      membershipDescription: "워크스페이스 접근 권한과 연결 키의 제한은 서로 독립적입니다. 여기서 권한을 바꿔도 키의 범위는 넓어지지 않습니다.",
+      roleBundle: "접근 프로필",
       agentScope: "에이전트가 접근할 문서 범위",
-      fineTune: "세부 권한 조정",
+      fineTune: "기능 권한 사용자 지정",
       inherit: "역할 기본값",
       allow: "추가 허용",
       deny: "명시적 제외",
       humanBoundary: "에이전트 자신의 키 발급, 보호 권한 추가, 영구 삭제, 소유권 이전은 이 역할에 포함되지 않으며 사람만 처리합니다.",
-      unassignConfirm: "이 워크스페이스에서 에이전트 할당을 해제할까요? 키 자체는 유지됩니다.",
-      unassign: "할당 해제",
+      unassignConfirm: "이 워크스페이스에서 에이전트 접근 권한을 제거할까요? 에이전트 신원과 키는 그대로 유지됩니다.",
+      unassign: "접근 제거",
       saving: "저장 중…",
       savePermissions: "권한 저장",
     },
@@ -1577,11 +1591,11 @@ function workspaceAgentCopy(locale: AppLocale) {
       allDocuments: "すべての文書",
       connectFailed: "エージェントを接続できませんでした。",
       permissionSaveFailed: "ワークスペース権限を保存できませんでした。",
-      title: "エージェントの割り当てと権限",
-      description: "エージェントID、役割、文書範囲、接続キーをこのワークスペース内でまとめて設定します。",
+      title: "エージェントアクセス",
+      description: "エージェントにこのワークスペースへのアクセスを付与し、必要に応じて接続キーを関連付けます。",
       connectAgent: "エージェントを接続",
       identityBoundaryTitle: "IDとキーはアカウントへ一度だけ登録します。",
-      identityBoundary: "同じエージェントとキーを複数ワークスペースで再利用し、実際の役割と文書範囲だけを個別に設定できます。",
+      identityBoundary: "同じエージェントを複数ワークスペースで再利用し、アクセス権と文書範囲は個別に付与します。キーは明示的に関連付け、自動拡張しません。",
       emptyTitle: "接続済みのエージェントはありません。",
       emptyHint: "既存のエージェントを選ぶか、新しく登録して接続できます。",
       firstConnection: "最初のエージェントを接続",
@@ -1593,7 +1607,7 @@ function workspaceAgentCopy(locale: AppLocale) {
       closeWizard: "エージェント接続を閉じる",
       progressLabel: "エージェント接続手順",
       stepAgent: "エージェント",
-      stepAccess: "役割と範囲",
+      stepAccess: "アクセスと範囲",
       stepCredential: "接続キー",
       chooseAgent: "このワークスペースへ誰を接続しますか？",
       chooseAgentHint: "登録済みエージェントは再登録せず、そのまま選択できます。",
@@ -1605,8 +1619,14 @@ function workspaceAgentCopy(locale: AppLocale) {
       agentName: "エージェント名",
       agentPlaceholder: "例：nyxdoc-builder",
       agentNameHint: "人が識別できる一意の名前を使用してください。後から変更できます。",
-      chooseWork: "このワークスペースで担当する作業を選んでください。",
-      chooseWorkHint: "役割は基本権限のセットです。文書範囲は選択した文書とすべての子文書へ適用されます。",
+      chooseWork: "このワークスペースで許可する作業を選んでください。",
+      chooseWorkHint: "アクセスプロファイルがワークスペース権限となり、文書範囲は選択した文書とすべての子文書へ適用されます。",
+      reader: "閲覧",
+      readerDescription: "文書の閲覧・検索・変更確認",
+      drafter: "下書き作成",
+      drafterDescription: "文書を作成し共有下書きを編集（正本は保存しない）",
+      writer: "文書作業",
+      writerDescription: "文書を作成・編集し、正本リビジョンを保存",
       viewer: "閲覧者",
       viewerDescription: "文書の閲覧・検索・変更確認",
       editor: "編集者",
@@ -1617,7 +1637,7 @@ function workspaceAgentCopy(locale: AppLocale) {
       newAgentScope: "新しいエージェントの文書アクセス範囲",
       scopeHint: "既定値はこのワークスペースのすべての文書です。",
       chooseKey: "外部エージェントが使用する接続キーを選んでください。",
-      chooseKeyHint: "キーはアカウントのエージェントIDに属し、割り当て済みの複数ワークスペースで使用できます。",
+      chooseKeyHint: "この手順はキーをワークスペース権限へ関連付けるだけです。キーのスコープや他の関連付けを自動的に広げません。",
       readWrite: "読み取り・書き込み",
       readOnly: "読み取り専用",
       ipLimited: "IP制限",
@@ -1627,13 +1647,17 @@ function workspaceAgentCopy(locale: AppLocale) {
       createKey: "新しい接続キーを作成",
       keyShownOnce: "原文は作成直後に一度だけ表示されます。",
       keyName: "キー名",
+      existingKeyBoundary: "このキーの現在のスコープは維持されます。ワークスペース権限より狭い場合、実効権限もその分だけ制限されます。",
+      bindLater: "接続キーは後で関連付ける",
+      bindLaterHint: "ワークスペースアクセスだけを先に保存します。キーまたはOAuth資格情報を付けるまで接続はできません。",
+      accessSavedNoKey: "接続キーなしでワークスペースアクセスを保存しました。準備ができたらエージェント管理からキーを関連付けてください。",
       restrictKey: "このワークスペースにキーの使用範囲を制限",
       restrictKeyHint: "オフにすると、このエージェントが今後割り当てられる他のワークスペースでも同じキーを使用できます。",
       expandExistingKey: "既存の制限を維持し、{workspace}だけを許可範囲へ追加します。",
-      effectiveBoundary: "実効権限は、接続キーの上限とこのワークスペースの役割・文書範囲の両方が許可する範囲に制限されます。",
+      effectiveBoundary: "実効権限は、有効なエージェント、キースコープ、ワークスペース権限、明示的なキー関連付け、文書範囲の共通部分です。",
       workspace: "ワークスペース",
       agent: "エージェント",
-      role: "役割",
+      role: "アクセスプロファイル",
       scope: "文書範囲",
       handoffTitle: "エージェントへ渡してください",
       handoffHint: "エージェントの会話へ貼り付けると、接続情報と確認手順をまとめて渡せます。",
@@ -1661,10 +1685,10 @@ function workspaceAgentCopy(locale: AppLocale) {
       previous: "戻る",
       next: "次へ",
       connecting: "接続中…",
-      membershipDescription: "役割はワークスペースごとの基本権限セットです。必要に応じて個別権限を追加・除外でき、保存後すぐに反映されます。",
-      roleBundle: "役割セット",
+      membershipDescription: "ワークスペースアクセスと接続キーの制限は独立しています。ここで権限を変更してもキーの範囲は広がりません。",
+      roleBundle: "アクセスプロファイル",
       agentScope: "エージェントの文書アクセス範囲",
-      fineTune: "詳細な権限調整",
+      fineTune: "機能権限をカスタマイズ",
       inherit: "役割の既定値",
       allow: "追加で許可",
       deny: "明示的に除外",
@@ -1709,10 +1733,11 @@ export function WorkspaceAgentsPanel({
   const [agents, setAgents] = useState(accountAgents);
   const [memberships, setMemberships] = useState(initialMemberships);
   const [editing, setEditing] = useState<AgentWorkspaceMembershipSummary | null>(null);
-  const [editRole, setEditRole] = useState<AgentWorkspaceRole>("viewer");
+  const [editProfile, setEditProfile] = useState<AgentAccessProfile>("reader");
+  const [editCapabilities, setEditCapabilities] = useState<WorkspacePermission[]>(
+    listAgentProfilePermissions("reader"),
+  );
   const [editRoot, setEditRoot] = useState("");
-  const [editAllow, setEditAllow] = useState<WorkspacePermission[]>([]);
-  const [editDeny, setEditDeny] = useState<WorkspacePermission[]>([]);
   const [pending, setPending] = useState(false);
   const [error, setError] = useState("");
   const [wizardOpen, setWizardOpen] = useState(initiallyOpen);
@@ -1722,14 +1747,13 @@ export function WorkspaceAgentsPanel({
   );
   const [wizardAgentId, setWizardAgentId] = useState(initiallyAvailableAgent?.id ?? "");
   const [wizardNewAgentName, setWizardNewAgentName] = useState("");
-  const [wizardRole, setWizardRole] = useState<AgentWorkspaceRole>("editor");
+  const [wizardProfile, setWizardProfile] = useState<AgentAccessProfile>("writer");
   const [wizardRoot, setWizardRoot] = useState("");
-  const [wizardCredentialMode, setWizardCredentialMode] = useState<"existing" | "new">("new");
+  const [wizardCredentialMode, setWizardCredentialMode] = useState<"existing" | "new" | "later">("new");
   const [wizardCredentialId, setWizardCredentialId] = useState("");
   const [wizardKeyName, setWizardKeyName] = useState(
     initiallyAvailableAgent ? `${initiallyAvailableAgent.displayName} ${copy.keySuffix}` : "",
   );
-  const [wizardRestrictKey, setWizardRestrictKey] = useState(false);
   const [wizardError, setWizardError] = useState("");
   const [wizardResult, setWizardResult] = useState<ConnectAgentToWorkspaceResult | null>(null);
   const [wizardCopied, setWizardCopied] = useState<string | null>(null);
@@ -1744,9 +1768,6 @@ export function WorkspaceAgentsPanel({
   const agentsById = useMemo(() => new Map(agents.map((agent) => [agent.id, agent])), [agents]);
   const wizardSelectedAgent = agentsById.get(wizardAgentId) ?? null;
   const wizardCredentials = (wizardSelectedAgent?.credentials ?? []).filter(activeCredential);
-  const wizardCompatibleCredentials = wizardCredentials.filter(
-    (credential) => credentialSupportsRole(credential, wizardRole),
-  );
   const scopedMcpUrl = workspaceMcpUrl(mcpUrl, workspace.id);
   const wizardTokenValue = wizardResult?.token ?? copy.existingKeyPlaceholder;
   const codexSnippet = `[mcp_servers.nyxdoc]\nurl = "${scopedMcpUrl}"\nbearer_token_env_var = "NYXDOC_TOKEN"`;
@@ -1755,7 +1776,7 @@ export function WorkspaceAgentsPanel({
     transport: "streamable-http",
     headers: { Authorization: `Bearer ${wizardTokenValue}` },
   }, null, 2);
-  const wizardHandoff = wizardResult ? buildAgentConnectionHandoff({
+  const wizardHandoff = wizardResult?.credential ? buildAgentConnectionHandoff({
     agentName: wizardResult.agent.displayName,
     credentialName: wizardResult.credential.name,
     documentScope: wizardResult.membership.rootDocumentTitle
@@ -1763,7 +1784,7 @@ export function WorkspaceAgentsPanel({
       : copy.allDocuments,
     locale,
     mcpUrl: scopedMcpUrl,
-    role: roleLabel(wizardResult.membership.role, locale),
+    role: accessProfileLabel(wizardResult.membership.accessProfile, locale),
     token: wizardResult.token,
     workspaceName: workspace.name,
   }) : "";
@@ -1787,12 +1808,11 @@ export function WorkspaceAgentsPanel({
     setWizardIdentityMode(nextAgent ? "existing" : "new");
     setWizardAgentId(nextAgent?.id ?? "");
     setWizardNewAgentName("");
-    setWizardRole("editor");
+    setWizardProfile("writer");
     setWizardRoot("");
     setWizardCredentialMode("new");
     setWizardCredentialId("");
     setWizardKeyName(nextAgent ? `${nextAgent.displayName} ${copy.keySuffix}` : "");
-    setWizardRestrictKey(false);
     setWizardError("");
     setWizardResult(null);
     setWizardCopied(null);
@@ -1826,12 +1846,9 @@ export function WorkspaceAgentsPanel({
   }
 
   function advanceToCredential() {
-    const compatible = wizardIdentityMode === "existing"
-      ? wizardCompatibleCredentials
-      : [];
-    if (compatible.length) {
+    if (wizardIdentityMode === "existing" && wizardCredentials.length) {
       setWizardCredentialMode("existing");
-      setWizardCredentialId(compatible[0].id);
+      setWizardCredentialId(wizardCredentials[0].id);
     } else {
       setWizardCredentialMode("new");
       setWizardCredentialId("");
@@ -1854,19 +1871,19 @@ export function WorkspaceAgentsPanel({
           agent: wizardIdentityMode === "existing"
             ? { mode: "existing", agentId: wizardAgentId }
             : { mode: "new", displayName: wizardNewAgentName.trim() },
-          role: wizardRole,
+          accessProfile: wizardProfile,
           rootDocumentId: wizardRoot || null,
           credential: wizardCredentialMode === "existing"
             ? { mode: "existing", credentialId: wizardCredentialId }
-            : {
+            : wizardCredentialMode === "new" ? {
               mode: "new",
               name: wizardKeyName.trim(),
-              restrictToWorkspace: wizardRestrictKey,
-            },
+              restrictToWorkspace: true,
+            } : { mode: "later" },
         }),
       });
       const body = await response.json() as ApiBody & Partial<ConnectAgentToWorkspaceResult>;
-      if (!response.ok || !body.agent || !body.membership || !body.credential) {
+      if (!response.ok || !body.agent || !body.membership) {
         throw new Error(requestError(body, copy.connectFailed));
       }
       const result = body as ConnectAgentToWorkspaceResult;
@@ -1903,16 +1920,25 @@ export function WorkspaceAgentsPanel({
 
   function openEditor(membership: AgentWorkspaceMembershipSummary) {
     setEditing(membership);
-    setEditRole(membership.role);
+    setEditProfile(membership.accessProfile);
+    setEditCapabilities(membership.capabilities);
     setEditRoot(membership.rootDocumentId ?? "");
-    setEditAllow(membership.permissionAllow);
-    setEditDeny(membership.permissionDeny);
     setError("");
   }
 
-  function setPermission(permission: WorkspacePermission, value: "inherit" | "allow" | "deny") {
-    setEditAllow((current) => value === "allow" ? [...new Set([...current, permission])] : current.filter((item) => item !== permission));
-    setEditDeny((current) => value === "deny" ? [...new Set([...current, permission])] : current.filter((item) => item !== permission));
+  function selectAccessProfile(profile: AgentAccessProfile) {
+    setEditProfile(profile);
+    if (profile !== "custom") setEditCapabilities(listAgentProfilePermissions(profile));
+  }
+
+  function toggleCapability(permission: WorkspacePermission, checked: boolean) {
+    const base = editProfile === "custom"
+      ? editCapabilities
+      : listAgentProfilePermissions(editProfile);
+    setEditProfile("custom");
+    setEditCapabilities(checked
+      ? [...new Set([...base, permission])]
+      : base.filter((item) => item !== permission));
   }
 
   async function saveMembership(status: "active" | "disabled" = "active") {
@@ -1923,7 +1949,12 @@ export function WorkspaceAgentsPanel({
       const response = await workspaceRequest(`/api/workspace-agents/${editing.agentId}`, {
         method: "PATCH",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ role: editRole, rootDocumentId: editRoot || null, permissionAllow: editAllow, permissionDeny: editDeny, status }),
+        body: JSON.stringify({
+          accessProfile: editProfile,
+          capabilities: editProfile === "custom" ? editCapabilities : undefined,
+          rootDocumentId: editRoot || null,
+          status,
+        }),
       });
       const body = await response.json() as ApiBody & { membership?: AgentWorkspaceMembershipSummary };
       if (!response.ok || !body.membership) throw new Error(requestError(body, copy.permissionSaveFailed));
@@ -1953,7 +1984,7 @@ export function WorkspaceAgentsPanel({
           return <article className={styles.workspaceAgentCard} key={membership.membershipId}>
             <UserAvatar className={styles.agentAvatar} imageUrl={agent.avatarMediaId ? `/api/media/${agent.avatarMediaId}` : null} name={agent.displayName} />
             <div><strong>{agent.displayName}</strong><small>{formatCopy(copy.membershipSummary, {
-              role: roleLabel(membership.role, locale),
+              role: accessProfileLabel(membership.accessProfile, locale),
               scope,
             })}</small><small>{formatCopy(copy.keyPermissionSummary, {
               keys: agent.credentials.filter(activeCredential).length,
@@ -2011,13 +2042,13 @@ export function WorkspaceAgentsPanel({
           <div className={styles.connectionWizardIntro}><strong>{copy.chooseWork}</strong><small>{copy.chooseWorkHint}</small></div>
           <div className={styles.connectionRoleGrid}>
             {([
-              ["viewer", copy.viewer, copy.viewerDescription],
-              ["editor", copy.editor, copy.editorDescription],
-              ["admin", copy.admin, copy.adminDescription],
-            ] as const).map(([role, label, description]) => <label data-selected={wizardRole === role} key={role}>
-              <input type="radio" name="wizard-role" value={role} checked={wizardRole === role} onChange={() => setWizardRole(role)} />
+              ["reader", copy.reader, copy.readerDescription],
+              ["drafter", copy.drafter, copy.drafterDescription],
+              ["writer", copy.writer, copy.writerDescription],
+            ] as const).map(([profile, label, description]) => <label data-selected={wizardProfile === profile} key={profile}>
+              <input type="radio" name="wizard-profile" value={profile} checked={wizardProfile === profile} onChange={() => setWizardProfile(profile)} />
               <span><strong>{label}</strong><small>{description}</small></span>
-              {wizardRole === role && <Check size={16} />}
+              {wizardProfile === profile && <Check size={16} />}
             </label>)}
           </div>
           <div className={styles.connectionWizardScope}><span>{copy.documentScope}</span><DocumentScopePicker ariaLabel={copy.newAgentScope} documents={documents} value={wizardRoot} onChange={setWizardRoot} workspaceName={workspace.name} /><small>{copy.scopeHint}</small></div>
@@ -2027,18 +2058,15 @@ export function WorkspaceAgentsPanel({
           <div className={styles.connectionWizardIntro}><strong>{copy.chooseKey}</strong><small>{copy.chooseKeyHint}</small></div>
           {wizardIdentityMode === "existing" && wizardCredentials.length > 0 && <div className={styles.connectionCredentialList}>
             {wizardCredentials.map((credential) => {
-              const compatible = credentialSupportsRole(credential, wizardRole);
-              const expandsScope = credential.workspaceAllowlist.length > 0
-                && !credential.workspaceAllowlist.includes(workspace.id);
-              return <label data-selected={wizardCredentialMode === "existing" && wizardCredentialId === credential.id} data-disabled={!compatible} key={credential.id}>
-                <input type="radio" name="wizard-credential" disabled={!compatible} checked={wizardCredentialMode === "existing" && wizardCredentialId === credential.id} onChange={() => { setWizardCredentialMode("existing"); setWizardCredentialId(credential.id); }} />
+              return <label data-selected={wizardCredentialMode === "existing" && wizardCredentialId === credential.id} key={credential.id}>
+                <input type="radio" name="wizard-credential" checked={wizardCredentialMode === "existing" && wizardCredentialId === credential.id} onChange={() => { setWizardCredentialMode("existing"); setWizardCredentialId(credential.id); }} />
                 <KeyRound size={17} />
-                <span><strong>{credential.name}</strong><small>{credential.prefix}… · {credential.scopes.includes("documents:write") ? copy.readWrite : copy.readOnly}{credential.ipAllowlist.length ? ` · ${copy.ipLimited}` : ""}{expandsScope ? ` · ${formatCopy(copy.expandScope, { workspace: workspace.name })}` : ""}</small></span>
-                {!compatible ? <em>{copy.inadequateRole}</em> : wizardCredentialMode === "existing" && wizardCredentialId === credential.id ? <Check size={16} /> : null}
+                <span><strong>{credential.name}</strong><small>{credential.prefix}… · {credential.scopes.includes("documents:write") ? copy.readWrite : copy.readOnly}{credential.ipAllowlist.length ? ` · ${copy.ipLimited}` : ""}</small></span>
+                {wizardCredentialMode === "existing" && wizardCredentialId === credential.id ? <Check size={16} /> : null}
               </label>;
             })}
           </div>}
-          {wizardIdentityMode === "existing" && wizardCredentials.length > 0 && wizardCompatibleCredentials.length === 0 && <div className={styles.connectionWizardNotice}>{copy.noCompatibleKey}</div>}
+          {wizardCredentialMode === "existing" && <div className={styles.connectionWizardNotice}>{copy.existingKeyBoundary}</div>}
           <label className={styles.connectionNewCredential} data-selected={wizardCredentialMode === "new"}>
             <input type="radio" name="wizard-credential" checked={wizardCredentialMode === "new"} onChange={() => setWizardCredentialMode("new")} />
             <Plus size={17} />
@@ -2047,9 +2075,13 @@ export function WorkspaceAgentsPanel({
           </label>
           {wizardCredentialMode === "new" && <div className={styles.connectionNewCredentialFields}>
             <label><span>{copy.keyName}</span><input value={wizardKeyName} onChange={(event) => setWizardKeyName(event.target.value)} maxLength={80} /></label>
-            <label className={styles.connectionKeyRestriction}><input type="checkbox" checked={wizardRestrictKey} onChange={(event) => setWizardRestrictKey(event.target.checked)} /><span><strong>{copy.restrictKey}</strong><small>{copy.restrictKeyHint}</small></span></label>
           </div>}
-          {wizardCredentialMode === "existing" && wizardCredentials.find((credential) => credential.id === wizardCredentialId)?.workspaceAllowlist.length !== 0 && !wizardCredentials.find((credential) => credential.id === wizardCredentialId)?.workspaceAllowlist.includes(workspace.id) && <div className={styles.connectionWizardNotice}>{formatCopy(copy.expandExistingKey, { workspace: workspace.name })}</div>}
+          <label className={styles.connectionNewCredential} data-selected={wizardCredentialMode === "later"}>
+            <input type="radio" name="wizard-credential" checked={wizardCredentialMode === "later"} onChange={() => setWizardCredentialMode("later")} />
+            <KeyRound size={17} />
+            <span><strong>{copy.bindLater}</strong><small>{copy.bindLaterHint}</small></span>
+            {wizardCredentialMode === "later" && <Check size={16} />}
+          </label>
           <div className={styles.connectionSecurityNote}><ShieldCheck size={16} /><span>{copy.effectiveBoundary}</span></div>
         </div>}
 
@@ -2057,10 +2089,10 @@ export function WorkspaceAgentsPanel({
           <div className={styles.connectionCompleteSummary}>
             <div><span>{copy.workspace}</span><strong>{workspace.name}</strong></div>
             <div><span>{copy.agent}</span><strong>{wizardResult.agent.displayName}</strong></div>
-            <div><span>{copy.role}</span><strong>{roleLabel(wizardResult.membership.role, locale)}</strong></div>
+            <div><span>{copy.role}</span><strong>{accessProfileLabel(wizardResult.membership.accessProfile, locale)}</strong></div>
             <div><span>{copy.scope}</span><strong>{wizardResult.membership.rootDocumentTitle ? formatCopy(copy.subtree, { title: wizardResult.membership.rootDocumentTitle }) : copy.allDocuments}</strong></div>
           </div>
-          <div className={styles.agentHandoffCard}>
+          {wizardResult.credential ? <><div className={styles.agentHandoffCard}>
             <div className={styles.agentHandoffHeading}><span><Bot size={18} /></span><div><strong>{copy.handoffTitle}</strong><small>{copy.handoffHint}</small></div></div>
             <button type="button" onClick={() => void copyWizardValue(wizardHandoff, "handoff")}><Copy size={15} /> {wizardCopied === "handoff" ? copy.handoffCopied : wizardResult.token ? copy.copyHandoff : copy.copyHandoffWithoutKey}</button>
             {wizardResult.token
@@ -2078,8 +2110,7 @@ export function WorkspaceAgentsPanel({
               <div className={styles.connectionConfigLabel}><strong>{copy.openClawConfig}</strong><button type="button" onClick={() => void copyWizardValue(openClawSnippet, "openclaw")}><Copy size={13} /> {wizardCopied === "openclaw" ? copy.copied : copy.copy}</button></div>
               <pre className={styles.connectionCodeBlock}>{openClawSnippet}</pre>
             </div>
-          </details>
-          {wizardResult.expandedCredentialWorkspaceAllowlist && <div className={styles.connectionWizardNotice}>{formatCopy(copy.expandedAllowlist, { workspace: workspace.name })}</div>}
+          </details></> : <div className={styles.connectionWizardNotice}>{copy.accessSavedNoKey}</div>}
           <button className={styles.doneButton} type="button" onClick={finishWizard}>{copy.done}</button>
         </div>}
 
@@ -2088,7 +2119,7 @@ export function WorkspaceAgentsPanel({
           {wizardStep === "identity" ? <button type="button" onClick={closeWizard} disabled={pending}>{onboardingCompletionHref ? copy.connectLater : copy.cancel}</button> : <button type="button" onClick={() => { setWizardError(""); setWizardStep(wizardStep === "credential" ? "access" : "identity"); }} disabled={pending}>{copy.previous}</button>}
           {wizardStep === "identity" && <button type="button" onClick={advanceToAccess} disabled={pending || (wizardIdentityMode === "existing" ? !wizardAgentId : !wizardNewAgentName.trim())}>{copy.next} <ArrowRight size={14} /></button>}
           {wizardStep === "access" && <button type="button" onClick={advanceToCredential} disabled={pending}>{copy.next} <ArrowRight size={14} /></button>}
-          {wizardStep === "credential" && <button type="button" onClick={() => void connectAgent()} disabled={pending || (wizardCredentialMode === "existing" ? !wizardCredentialId : !wizardKeyName.trim())}>{pending ? copy.connecting : copy.connectAgent} <ArrowRight size={14} /></button>}
+          {wizardStep === "credential" && <button type="button" onClick={() => void connectAgent()} disabled={pending || (wizardCredentialMode === "existing" ? !wizardCredentialId : wizardCredentialMode === "new" ? !wizardKeyName.trim() : false)}>{pending ? copy.connecting : copy.connectAgent} <ArrowRight size={14} /></button>}
         </footer>}
       </section>
     </div>}
@@ -2097,12 +2128,12 @@ export function WorkspaceAgentsPanel({
       <section className={styles.membershipModal} role="dialog" aria-modal="true" aria-labelledby="membership-editor-title">
         <div className={styles.connectionEditIcon}><ShieldCheck size={20} /></div><p>WORKSPACE PERMISSIONS</p><h2 id="membership-editor-title">{agentsById.get(editing.agentId)?.displayName} · {workspace.name}</h2><span>{copy.membershipDescription}</span>
         <div className={styles.connectionEditFields}>
-          <label><span>{copy.roleBundle}</span><select value={editRole} onChange={(event) => setEditRole(event.target.value as AgentWorkspaceRole)}><option value="viewer">{roleLabel("viewer", locale)}</option><option value="editor">{roleLabel("editor", locale)}</option><option value="admin">{roleLabel("admin", locale)}</option></select></label>
+          <label><span>{copy.roleBundle}</span><select value={editProfile} onChange={(event) => selectAccessProfile(event.target.value as AgentAccessProfile)}>{AGENT_ACCESS_PROFILES.map((profile) => <option value={profile} key={profile}>{accessProfileLabel(profile, locale)}</option>)}</select></label>
           <div className={styles.connectionEditField}><span>{copy.documentScope}</span><DocumentScopePicker ariaLabel={copy.agentScope} documents={documents} value={editRoot} onChange={setEditRoot} workspaceName={workspace.name} /></div>
         </div>
         <details className={styles.permissionDetails}><summary>{copy.fineTune}</summary><div className={styles.permissionMatrix}>{delegablePermissions(locale).map((permission) => {
-          const value = editAllow.includes(permission.value) ? "allow" : editDeny.includes(permission.value) ? "deny" : "inherit";
-          return <label key={permission.value}><span><strong>{permission.label}</strong><small>{permission.description}</small></span><select value={value} onChange={(event) => setPermission(permission.value, event.target.value as "inherit" | "allow" | "deny")}><option value="inherit">{copy.inherit}</option><option value="allow">{copy.allow}</option><option value="deny">{copy.deny}</option></select></label>;
+          const checked = editCapabilities.includes(permission.value);
+          return <label key={permission.value}><span><strong>{permission.label}</strong><small>{permission.description}</small></span><input type="checkbox" checked={checked} onChange={(event) => toggleCapability(permission.value, event.target.checked)} /> </label>;
         })}</div><small>{copy.humanBoundary}</small></details>
         {error && <div className={styles.inlineError} role="alert">{error}</div>}
         <footer><button type="button" className={styles.dangerButton} onClick={() => { if (window.confirm(copy.unassignConfirm)) void saveMembership("disabled"); }} disabled={pending}><Trash2 size={14} /> {copy.unassign}</button><span /><button type="button" onClick={() => { setEditing(null); setError(""); }} disabled={pending}>{copy.cancel}</button><button type="button" onClick={() => void saveMembership()} disabled={pending}><Save size={14} /> {pending ? copy.saving : copy.savePermissions}</button></footer>

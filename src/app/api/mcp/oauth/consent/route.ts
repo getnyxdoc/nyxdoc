@@ -2,20 +2,22 @@ import { z } from "zod";
 import { auth } from "@/lib/auth";
 import { sqlite } from "@/lib/db/client";
 import {
+  completeMcpOAuthConsent,
   getMcpOAuthAuthorizationRequest,
   getMcpOAuthClient,
-  provisionMcpOAuthGrant,
+  MCP_OAUTH_ACCESS_PROFILES,
 } from "@/lib/mcp/oauth";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-const consentSchema = z.object({
-  accept: z.boolean(),
+const consentFields = {
   consentCode: z.string().trim().min(1).max(4_096),
-  workspaceIds: z.array(z.string().uuid()).max(100),
-  role: z.enum(["admin", "editor", "viewer"]),
-  agent: z.discriminatedUnion("mode", [
+  workspaceIds: z.array(z.string().uuid()).min(1).max(100),
+  accessProfile: z.enum(MCP_OAUTH_ACCESS_PROFILES),
+};
+
+const agentSchema = z.discriminatedUnion("mode", [
     z.object({
       mode: z.literal("new"),
       displayName: z.string().trim().min(1).max(80),
@@ -24,8 +26,19 @@ const consentSchema = z.object({
       mode: z.literal("existing"),
       agentId: z.string().uuid(),
     }).strict(),
-  ]).optional(),
-}).strict();
+]);
+
+const consentSchema = z.discriminatedUnion("accept", [
+  z.object({
+    accept: z.literal(true),
+    ...consentFields,
+    agent: agentSchema,
+  }).strict(),
+  z.object({
+    accept: z.literal(false),
+    ...consentFields,
+  }).strict(),
+]);
 
 export async function POST(request: Request) {
   const session = await auth.api.getSession({ headers: request.headers });
@@ -51,29 +64,26 @@ export async function POST(request: Request) {
   }
 
   try {
-    if (input.accept) {
-      if (!input.agent) {
-        return Response.json(
-          { error: "Select the agent identity for this OAuth connection." },
-          { status: 400 },
-        );
-      }
-      provisionMcpOAuthGrant(sqlite, {
+    const provisioning = input.accept
+      ? {
         userId: session.user.id,
         clientId: client.clientId,
         clientName: client.name,
         requestedScopes: authorization.scopes,
         workspaceIds: input.workspaceIds,
-        role: input.role,
+        accessProfile: input.accessProfile,
         agent: input.agent,
-      });
-    }
-    const result = await auth.api.oAuthConsent({
-      headers: request.headers,
-      body: {
-        accept: input.accept,
-        consent_code: input.consentCode,
-      },
+      }
+      : null;
+    const result = await completeMcpOAuthConsent(sqlite, {
+      provisioning,
+      providerConsent: () => auth.api.oAuthConsent({
+        headers: request.headers,
+        body: {
+          accept: input.accept,
+          consent_code: input.consentCode,
+        },
+      }),
     });
     return Response.json({ redirectURI: result.redirectURI });
   } catch (error) {

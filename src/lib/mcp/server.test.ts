@@ -1,11 +1,12 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { afterEach, describe, expect, it } from "vitest";
-import { assignAgentToWorkspace } from "@/lib/agents/service";
+import { assignAgentToWorkspace, updateAgentCredential } from "@/lib/agents/service";
 import {
   createCollaborationCommands,
   createStoredCollaborationDocumentProvider,
 } from "@/lib/collaboration/commands";
+import { assignDocument } from "@/lib/collaboration/service";
 import type { NyxDatabase } from "@/lib/db/client";
 import { createDocument } from "@/lib/documents/service";
 import { getDocumentWebUrl } from "@/lib/documents/web-url";
@@ -183,7 +184,7 @@ describe("Nyxdoc MCP server", () => {
         resultVersion: "1",
         operation: "get_capabilities",
         capabilities: {
-          protocolVersion: "4.13.0",
+          protocolVersion: "5.0.0",
           profile: "summary",
           unchanged: false,
           document: {
@@ -284,7 +285,7 @@ describe("Nyxdoc MCP server", () => {
         resultVersion: "1",
         operation: "get_schema",
         name: "document_content",
-        protocolVersion: "4.13.0",
+        protocolVersion: "5.0.0",
         schemaDigest: expect.stringMatching(/^[0-9a-f]{64}$/),
         jsonSchema: {
           description: expect.stringContaining(
@@ -295,10 +296,10 @@ describe("Nyxdoc MCP server", () => {
 
       const unchangedCapabilities = await client.callTool({
         name: "get_capabilities",
-        arguments: { sinceProtocolVersion: "4.13.0" },
+        arguments: { sinceProtocolVersion: "5.0.0" },
       });
       expect(unchangedCapabilities.structuredContent).toMatchObject({
-        capabilities: { protocolVersion: "4.13.0", unchanged: true },
+        capabilities: { protocolVersion: "5.0.0", unchanged: true },
       });
 
       const imageUpload = await client.callTool({
@@ -345,8 +346,8 @@ describe("Nyxdoc MCP server", () => {
         },
         workspaces: [{
           id: workspace.id,
-          membershipId: identity.agentId,
-          role: "admin",
+          grantId: identity.agentId,
+          accessProfile: "custom",
           default: true,
           namespace: { type: "personal", id: user.id },
           effectivePermissions: expect.arrayContaining(["documents.read", "documents.commit"]),
@@ -1612,7 +1613,7 @@ describe("Nyxdoc MCP server", () => {
       });
       expect(context.structuredContent).toMatchObject({
         agent: {
-          role: "editor",
+          accessProfile: "writer",
           allowedActions: expect.arrayContaining(["documents.trash_own"]),
         },
       });
@@ -1834,6 +1835,79 @@ describe("Nyxdoc MCP server", () => {
     }
   });
 
+  it("uses assignment-management capability instead of the legacy role label", async () => {
+    const database = createTestDatabase();
+    databases.push(database);
+    const { user, workspace } = createTestUser(database);
+    const managerToken = createWorkspaceToken(database, {
+      workspaceId: workspace.id,
+      userId: user.id,
+      name: "Capability manager",
+      role: "admin",
+      scopes: ["documents:read"],
+    });
+    const otherToken = createWorkspaceToken(database, {
+      workspaceId: workspace.id,
+      userId: user.id,
+      name: "Other agent",
+      role: "viewer",
+      scopes: ["documents:read"],
+    });
+    const documentId = (database.prepare(
+      "SELECT id FROM documents WHERE workspace_id = ? ORDER BY created_at LIMIT 1",
+    ).get(workspace.id) as { id: string }).id;
+    assignDocument(database, workspace.id, {
+      type: "human",
+      userId: user.id,
+      label: user.name,
+    }, {
+      documentId,
+      agentId: otherToken.summary.agentId,
+      assignmentType: "reviewer",
+    });
+
+    async function listForeignAssignments(role: "admin" | "viewer", capabilities: string[]) {
+      database.prepare(
+        `UPDATE workspace_agents
+         SET role = ?, access_profile = 'custom', capabilities_json = ?
+         WHERE id = ? AND workspace_id = ?`,
+      ).run(role, JSON.stringify(capabilities), managerToken.summary.agentId, workspace.id);
+      const identity = authenticateApiToken(database, `Bearer ${managerToken.token}`);
+      const server = createNyxdocMcpServer(database, identity);
+      const client = new Client({ name: "assignment-capability-test", version: "1.0.0" });
+      const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+      await server.connect(serverTransport);
+      await client.connect(clientTransport);
+      try {
+        return await client.callTool({
+          name: "list_assignments",
+          arguments: { agentId: otherToken.summary.agentId },
+        });
+      } finally {
+        await client.close();
+        await server.close();
+      }
+    }
+
+    const roleOnly = await listForeignAssignments("admin", [
+      "workspace.read",
+      "documents.read",
+      "assignments.read",
+    ]);
+    expect(roleOnly.isError).toBe(true);
+
+    const capabilityGranted = await listForeignAssignments("viewer", [
+      "workspace.read",
+      "documents.read",
+      "assignments.read",
+      "assignments.manage",
+    ]);
+    expect(capabilityGranted.isError).not.toBe(true);
+    expect(capabilityGranted.structuredContent).toMatchObject({
+      assignments: [expect.objectContaining({ agentId: otherToken.summary.agentId })],
+    });
+  });
+
   it("lists and operates on this agent's To-dos across allowed workspaces", async () => {
     const database = createTestDatabase();
     databases.push(database);
@@ -1864,8 +1938,19 @@ describe("Nyxdoc MCP server", () => {
       userId: primary.user.id,
       workspaceId: secondaryWorkspace.id,
       agentId: identity.globalAgentId,
-      role: "admin",
+      accessProfile: "writer",
     }).membershipId;
+    updateAgentCredential(database, {
+      userId: primary.user.id,
+      agentId: identity.globalAgentId,
+      credentialId: identity.id,
+      name: identity.name,
+      scopes: identity.scopes,
+      defaultWorkspaceId: primary.workspace.id,
+      workspaceAllowlist: [primary.workspace.id, secondaryWorkspace.id],
+      ipAllowlist: [],
+      expiresAt: null,
+    });
 
     const collaboration = createCollaborationCommands({
       database,
@@ -2147,8 +2232,19 @@ describe("Nyxdoc MCP server", () => {
       userId: primary.user.id,
       workspaceId: secondaryWorkspace.id,
       agentId: identity.globalAgentId,
-      role: "admin",
+      accessProfile: "writer",
     }).membershipId;
+    updateAgentCredential(database, {
+      userId: primary.user.id,
+      agentId: identity.globalAgentId,
+      credentialId: identity.id,
+      name: identity.name,
+      scopes: identity.scopes,
+      defaultWorkspaceId: primary.workspace.id,
+      workspaceAllowlist: [primary.workspace.id, secondaryWorkspace.id],
+      ipAllowlist: [],
+      expiresAt: null,
+    });
     const collaboration = createCollaborationCommands({
       database,
       provider: createStoredCollaborationDocumentProvider(database),
@@ -2278,7 +2374,7 @@ describe("Nyxdoc MCP server", () => {
         arguments: { workspaceId: secondaryWorkspace.id },
       })).structuredContent).toMatchObject({
         workspace: { id: secondaryWorkspace.id },
-        agent: { membershipId: secondaryMembershipId, role: "admin" },
+        agent: { grantId: secondaryMembershipId, accessProfile: "writer" },
       });
 
       const mismatch = await client.callTool({

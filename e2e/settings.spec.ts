@@ -117,7 +117,7 @@ test("separates global agent identity from workspace assignments", async ({ page
   await page.goto("/dev/settings-e2e");
 
   await expect(page.getByRole("heading", { name: "워크스페이스 설정", exact: true })).toBeVisible();
-  await expect(page.getByRole("heading", { name: "에이전트 배정과 권한", exact: true })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "에이전트 접근", exact: true })).toBeVisible();
   await expect(page.getByText("신원과 키는 계정에 한 번만 등록됩니다.")).toBeVisible();
   await expect(page.getByRole("button", { name: "에이전트 연결", exact: true })).toBeVisible();
   await expect(page.getByRole("heading", { name: "에이전트와 연결 키", exact: true })).toHaveCount(0);
@@ -233,6 +233,7 @@ test("connects identity, workspace permissions, and a credential in one guided f
             prefix: "nyx_live_testkey",
             scopes: ["documents:read", "documents:write", "documents:commit", "changes:read", "revisions:restore"],
             defaultWorkspaceId: "settings-workspace-e2e",
+            workspaceIds: ["settings-workspace-e2e"],
             workspaceAllowlist: [],
             ipAllowlist: [],
             lastUsedAt: null,
@@ -240,6 +241,15 @@ test("connects identity, workspace permissions, and a credential in one guided f
             expiresAt: null,
             revokedAt: null,
             createdAt: "2026-07-18T02:00:00.000Z",
+            bindings: [{
+              id: "binding-test-e2e",
+              grantId: "membership-test-e2e",
+              workspaceId: "settings-workspace-e2e",
+              workspaceName: "James의 워크스페이스",
+              status: "active",
+              createdAt: "2026-07-18T02:00:00.000Z",
+              revokedAt: null,
+            }],
           }],
           memberships: [],
         },
@@ -249,6 +259,11 @@ test("connects identity, workspace permissions, and a credential in one guided f
           workspaceId: "settings-workspace-e2e",
           workspaceName: "James의 워크스페이스",
           role: "editor",
+          accessProfile: "writer",
+          capabilities: ["workspace.read", "agents.read", "documents.read", "documents.create", "documents.update", "documents.commit"],
+          scopeMode: "workspace",
+          policyVersion: 1,
+          revokedAt: null,
           status: "active",
           permissionAllow: [],
           permissionDeny: [],
@@ -264,6 +279,7 @@ test("connects identity, workspace permissions, and a credential in one guided f
           prefix: "nyx_live_testkey",
           scopes: ["documents:read", "documents:write", "documents:commit", "changes:read", "revisions:restore"],
           defaultWorkspaceId: "settings-workspace-e2e",
+          workspaceIds: ["settings-workspace-e2e"],
           workspaceAllowlist: [],
           ipAllowlist: [],
           lastUsedAt: null,
@@ -271,6 +287,24 @@ test("connects identity, workspace permissions, and a credential in one guided f
           expiresAt: null,
           revokedAt: null,
           createdAt: "2026-07-18T02:00:00.000Z",
+          bindings: [{
+            id: "binding-test-e2e",
+            grantId: "membership-test-e2e",
+            workspaceId: "settings-workspace-e2e",
+            workspaceName: "James의 워크스페이스",
+            status: "active",
+            createdAt: "2026-07-18T02:00:00.000Z",
+            revokedAt: null,
+          }],
+        },
+        binding: {
+          id: "binding-test-e2e",
+          grantId: "membership-test-e2e",
+          workspaceId: "settings-workspace-e2e",
+          workspaceName: "James의 워크스페이스",
+          status: "active",
+          createdAt: "2026-07-18T02:00:00.000Z",
+          revokedAt: null,
         },
         token: "nyx_live_one_time_test_key",
         expandedCredentialWorkspaceAllowlist: false,
@@ -283,7 +317,7 @@ test("connects identity, workspace permissions, and a credential in one guided f
   await expect(dialog).toBeVisible();
   await dialog.getByText("test", { exact: true }).click();
   await dialog.getByRole("button", { name: "다음" }).click();
-  await expect(dialog.getByRole("radio", { name: /에디터/ })).toBeChecked();
+  await expect(dialog.getByRole("radio", { name: /문서 작업/ })).toBeChecked();
   await dialog.getByRole("button", { name: "다음" }).click();
   await expect(dialog.getByText("새 연결 키 만들기", { exact: true })).toBeVisible();
   await dialog.getByRole("button", { name: "에이전트 연결", exact: true }).click();
@@ -299,12 +333,12 @@ test("connects identity, workspace permissions, and a credential in one guided f
   await expect(page.getByText(/workspace=settings-workspace-e2e/).first()).toBeVisible();
   expect(connectionRequest).toEqual({
     agent: { mode: "existing", agentId: "agent-test-unassigned-e2e" },
-    role: "editor",
+    accessProfile: "writer",
     rootDocumentId: null,
     credential: {
       mode: "new",
       name: "test 연결 키",
-      restrictToWorkspace: false,
+      restrictToWorkspace: true,
     },
   });
 
@@ -636,7 +670,7 @@ test("keeps organization settings usable on a narrow portrait display", async ({
   expect(metrics.documentWidth).toBeLessThanOrEqual(metrics.viewportWidth + 1);
 });
 
-test("keeps assigned workspaces selectable and exposes the workspace administrator role", async ({ page }) => {
+test("keeps key bindings explicit and saves custom workspace capabilities", async ({ page }) => {
   let permissionUpdate: unknown;
   await page.route("**/api/workspace-agents/agent-gameroom-main-e2e", async (route) => {
     permissionUpdate = route.request().postDataJSON();
@@ -649,7 +683,22 @@ test("keeps assigned workspaces selectable and exposes the workspace administrat
           agentId: "agent-gameroom-main-e2e",
           workspaceId: "settings-workspace-e2e",
           workspaceName: "James의 워크스페이스",
-          role: "admin",
+          role: "viewer",
+          accessProfile: "custom",
+          capabilities: [
+            "workspace.read",
+            "agents.read",
+            "documents.read",
+            "revisions.read",
+            "changes.read",
+            "saved_views.read",
+            "assignments.read",
+            "exports.create",
+            "assignments.manage",
+          ],
+          scopeMode: "workspace",
+          policyVersion: 2,
+          revokedAt: null,
           status: "active",
           permissionAllow: [],
           permissionDeny: [],
@@ -678,33 +727,31 @@ test("keeps assigned workspaces selectable and exposes the workspace administrat
   await gameroomAgent.getByRole("button", { name: "키 만들기" }).click();
   const keyDialog = page.getByRole("dialog", { name: "새 연결 키 만들기" });
   const workspaceSelect = keyDialog.getByLabel("기본 워크스페이스");
-  await expect(workspaceSelect.getByRole("option", { name: "James의 워크스페이스" })).toBeEnabled();
+  const jamesBinding = keyDialog.getByRole("checkbox", { name: "James의 워크스페이스" });
+  const gameroomBinding = keyDialog.getByRole("checkbox", { name: "gameroom" });
+  await expect(jamesBinding).not.toBeChecked();
+  await expect(gameroomBinding).not.toBeChecked();
+  await gameroomBinding.check();
   await expect(workspaceSelect.getByRole("option", { name: "gameroom" })).toBeEnabled();
+  await jamesBinding.check();
+  await expect(workspaceSelect.getByRole("option", { name: "James의 워크스페이스" })).toBeEnabled();
 
   await keyDialog.getByRole("button", { name: "취소" }).click();
   await page.goto("/dev/settings-e2e");
 
-  await page.getByRole("button", { name: "에이전트 연결", exact: true }).click();
-  const connectionDialog = page.getByRole("dialog", { name: "James의 워크스페이스에 에이전트 연결" });
-  await connectionDialog.getByText("test", { exact: true }).click();
-  await connectionDialog.getByRole("button", { name: "다음" }).click();
-  await expect(connectionDialog.getByRole("radio", { name: /워크스페이스 관리자/ })).toBeEnabled();
-  await connectionDialog.getByRole("button", { name: "에이전트 연결 닫기" }).click();
-
   await page.getByRole("button", { name: "권한 설정" }).click();
   const permissionDialog = page.getByRole("dialog", { name: "gameroom-main · James의 워크스페이스" });
-  await permissionDialog.getByLabel("역할 묶음").selectOption("admin");
-  await expect(permissionDialog.getByLabel("역할 묶음")).toHaveValue("admin");
-  await permissionDialog.getByText("세부 권한 조정").click();
-  await expect(permissionDialog.getByText("에이전트 자신의 키 발급, 보호 권한 추가, 영구 삭제, 소유권 이전은 이 역할에 포함되지 않으며 사람만 처리합니다.")).toBeVisible();
+  await permissionDialog.getByLabel("접근 프로필").selectOption("custom");
+  await expect(permissionDialog.getByLabel("접근 프로필")).toHaveValue("custom");
+  await permissionDialog.getByText("기능 권한 사용자 지정").click();
+  await permissionDialog.getByRole("checkbox", { name: /담당 관리/ }).check();
   await permissionDialog.getByRole("button", { name: "권한 저장" }).click();
 
   await expect(permissionDialog).toHaveCount(0);
-  expect(permissionUpdate).toEqual({
-    role: "admin",
+  expect(permissionUpdate).toMatchObject({
+    accessProfile: "custom",
+    capabilities: expect.arrayContaining(["documents.read", "assignments.read", "assignments.manage"]),
     rootDocumentId: null,
-    permissionAllow: [],
-    permissionDeny: [],
     status: "active",
   });
 });

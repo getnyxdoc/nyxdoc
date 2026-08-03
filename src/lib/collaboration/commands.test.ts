@@ -461,7 +461,7 @@ describe("collaboration command engine", () => {
       userId: actor.userId,
       workspaceId: workspace.id,
       agentId: agent.id,
-      role: "editor",
+      accessProfile: "writer",
     });
     const credential = createAgentCredential(database, {
       userId: actor.userId,
@@ -490,10 +490,8 @@ describe("collaboration command engine", () => {
       userId: actor.userId,
       workspaceId: workspace.id,
       agentId: agent.id,
-      role: "editor",
+      accessProfile: "writer",
       rootDocumentId: created.document.id,
-      permissionAllow: [],
-      permissionDeny: [],
     });
 
     await expect(commands.commitWorking({

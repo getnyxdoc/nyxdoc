@@ -478,15 +478,27 @@ function actorDocumentRoot(
   actor: DocumentActor,
 ) {
   if (!actor.tokenId) return null;
-  return (database.prepare(
+  const row = database.prepare(
     `SELECT membership.root_document_id
      FROM agent_credentials credential
      JOIN workspace_agents membership
        ON membership.agent_identity_id = credential.agent_id
-      AND membership.workspace_id = ?
+       AND membership.workspace_id = ?
+     JOIN agent_credential_grant_bindings binding
+       ON binding.credential_id = credential.id
+      AND binding.grant_id = membership.id
+      AND binding.status = 'active'
+      AND binding.revoked_at IS NULL
      WHERE credential.id = ? AND credential.revoked_at IS NULL
-       AND membership.status = 'active'`,
-  ).get(workspaceId, actor.tokenId) as { root_document_id: string | null } | undefined)?.root_document_id ?? null;
+       AND membership.status = 'active' AND membership.revoked_at IS NULL`,
+  ).get(workspaceId, actor.tokenId) as { root_document_id: string | null } | undefined;
+  if (!row) {
+    throw new DocumentServiceError(
+      "FORBIDDEN",
+      "이 연결 키는 현재 워크스페이스의 에이전트 접근 권한에 연결되어 있지 않습니다.",
+    );
+  }
+  return row.root_document_id;
 }
 
 function assertContentDocumentReferences(

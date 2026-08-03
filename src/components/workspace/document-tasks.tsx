@@ -46,7 +46,7 @@ import { defineUiCopy, formatCopy } from "@/lib/i18n/copy";
 import { localeTag, type AppLocale } from "@/lib/i18n/locales";
 import {
   orderedActiveTaskAgents,
-  taskAgentRoleLabel,
+  taskAgentAccessLabel,
 } from "./document-task-options";
 import { DocumentTargetPicker } from "./document-target-picker";
 import styles from "./workspace.module.css";
@@ -953,7 +953,7 @@ export function DocumentTasks({
                           <option value="">{copy.unassignedClaim}</option>
                           {activeAgents.map((agent) => (
                             <option value={agent.id} key={agent.id}>
-                              {agent.displayName} · {taskAgentRoleLabel(agent.role, locale)}
+                              {agent.displayName} · {taskAgentAccessLabel(agent.accessProfile, locale)}
                             </option>
                           ))}
                         </select>
@@ -1107,7 +1107,7 @@ export function DocumentTasks({
                           <option value="">{copy.unassigned}</option>
                           {activeAgents.map((agent) => (
                             <option value={agent.id} key={agent.id}>
-                              {agent.displayName} · {taskAgentRoleLabel(agent.role, locale)}
+                              {agent.displayName} · {taskAgentAccessLabel(agent.accessProfile, locale)}
                             </option>
                           ))}
                         </select>

@@ -3,12 +3,14 @@ import { afterEach, describe, expect, it } from "vitest";
 import { openDatabase, type NyxDatabase } from "@/lib/db/client";
 import {
   APP_MIGRATIONS,
+  appMigrationChecksum,
   getAppMigrationPlan,
   runAppMigrations,
 } from "@/lib/db/migrations";
 import { captureDatabaseFingerprint } from "@/lib/db/integrity";
 import { ensurePersonalWorkspace } from "@/lib/workspaces/bootstrap";
 import { authenticateApiToken, createWorkspaceToken } from "@/lib/tokens/service";
+import { createWorkspace } from "@/lib/workspaces/service";
 import { createTestDatabase, createTestUser } from "@/test/fixture";
 
 const databases: NyxDatabase[] = [];
@@ -40,9 +42,24 @@ function applyThrough(database: NyxDatabase, lastMigrationId: string) {
   const record = database.prepare(
     "INSERT INTO _nyxdoc_migrations (id, applied_at) VALUES (?, '2026-07-15T00:00:00.000Z')",
   );
+  const applied: Array<(typeof APP_MIGRATIONS)[number]> = [];
   for (const migration of APP_MIGRATIONS) {
     database.exec(migration.sql);
     record.run(migration.id);
+    applied.push(migration);
+    const hasChecksumLedger = Boolean(database.prepare(
+      "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = '_nyxdoc_migration_checksums'",
+    ).get());
+    if (hasChecksumLedger) {
+      const recordChecksum = database.prepare(
+        `INSERT OR REPLACE INTO _nyxdoc_migration_checksums
+         (migration_id, checksum_sha256, source_revision, recorded_at)
+         VALUES (?, ?, 'test-fixture', '2026-07-15T00:00:00.000Z')`,
+      );
+      for (const appliedMigration of applied) {
+        recordChecksum.run(appliedMigration.id, appMigrationChecksum(appliedMigration));
+      }
+    }
     if (migration.id === lastMigrationId) return;
   }
   throw new Error(`Unknown migration ${lastMigrationId}.`);
@@ -118,6 +135,8 @@ describe("application migration safety", () => {
       "0036_app_bug_reports",
       "0037_user_workspace_navigation_preferences",
       "0038_navigation_preference_versions",
+      "0039_agent_access_grants_and_bindings",
+      "0040_media_upload_ticket_binding_guards",
     ]);
     expect(after).toEqual(before);
     expect(database.prepare("SELECT COUNT(*) AS count FROM documents").get()).toEqual({ count: 1 });
@@ -178,6 +197,202 @@ describe("application migration safety", () => {
       owner_user_id: "u1",
       organization_id: null,
     }]);
+  });
+
+  it("migrates legacy agent roles and key allowlists into explicit grants and bindings", () => {
+    const database = openDatabase(":memory:");
+    databases.push(database);
+    createUserTable(database);
+    applyThrough(database, "0038_navigation_preference_versions");
+    database.prepare(
+      "INSERT INTO user (id, name, email, emailVerified, createdAt, updatedAt) VALUES ('u1', 'Owner', 'owner@example.com', 1, 1, 1)",
+    ).run();
+    const first = ensurePersonalWorkspace(database, {
+      id: "u1",
+      name: "Owner",
+      email: "owner@example.com",
+    });
+    const second = createWorkspace(database, {
+      id: "u1",
+      name: "Owner",
+      email: "owner@example.com",
+    }, "Second");
+    const third = createWorkspace(database, {
+      id: "u1",
+      name: "Owner",
+      email: "owner@example.com",
+    }, "Third");
+    database.prepare(
+      `INSERT INTO agents
+       (id, owner_user_id, display_name, avatar_media_id, status, created_by_user_id,
+        created_at, updated_at, deleted_at, purge_after, purged_at)
+       VALUES ('agent-1', 'u1', 'Agent', NULL, 'active', 'u1', ?, ?, NULL, NULL, NULL)`,
+    ).run("2026-07-30T00:00:00.000Z", "2026-07-30T00:00:00.000Z");
+    database.prepare(
+      `INSERT INTO agent_ownership
+       (agent_id, owner_type, owner_user_id, organization_id, created_at, updated_at)
+       VALUES ('agent-1', 'personal', 'u1', NULL, ?, ?)`,
+    ).run("2026-07-30T00:00:00.000Z", "2026-07-30T00:00:00.000Z");
+    const insertGrant = database.prepare(
+      `INSERT INTO workspace_agents
+       (id, workspace_id, display_name, avatar_media_id, role, status,
+        created_by_user_id, created_at, updated_at, agent_identity_id,
+        permission_allow_json, permission_deny_json, root_document_id)
+       VALUES (?, ?, 'Agent', NULL, ?, 'active', 'u1', ?, ?, 'agent-1', ?, ?, NULL)`,
+    );
+    insertGrant.run(
+      "grant-1",
+      first.id,
+      "editor",
+      "2026-07-30T00:00:00.000Z",
+      "2026-07-30T00:00:00.000Z",
+      JSON.stringify(["audit.read"]),
+      JSON.stringify(["documents.commit"]),
+    );
+    insertGrant.run(
+      "grant-2",
+      second.id,
+      "viewer",
+      "2026-07-30T00:00:00.000Z",
+      "2026-07-30T00:00:00.000Z",
+      "[]",
+      "[]",
+    );
+    insertGrant.run(
+      "grant-3",
+      third.id,
+      "editor",
+      "2026-07-30T00:00:00.000Z",
+      "2026-07-30T00:00:00.000Z",
+      "[]",
+      "[]",
+    );
+    const insertCredential = database.prepare(
+      `INSERT INTO agent_credentials
+       (id, agent_id, created_by_user_id, name, token_prefix, token_hash,
+        scopes_json, default_workspace_id, workspace_allowlist_json,
+        ip_allowlist_json, last_used_at, last_used_ip, expires_at, revoked_at,
+        created_at, updated_at)
+       VALUES (?, 'agent-1', 'u1', ?, ?, ?, ?, ?, ?, '[]', NULL, NULL, NULL, NULL, ?, ?)`,
+    );
+    insertCredential.run(
+      "credential-all",
+      "Legacy all",
+      "nyx_live_all",
+      "hash-all",
+      JSON.stringify(["documents:read"]),
+      first.id,
+      "[]",
+      "2026-07-30T00:00:00.000Z",
+      "2026-07-30T00:00:00.000Z",
+    );
+    insertCredential.run(
+      "credential-one",
+      "Legacy one",
+      "nyx_live_one",
+      "hash-one",
+      JSON.stringify(["documents:read"]),
+      first.id,
+      JSON.stringify([first.id]),
+      "2026-07-30T00:00:00.000Z",
+      "2026-07-30T00:00:00.000Z",
+    );
+
+    runAppMigrations(database, { sourceRevision: "agent-grant-backfill-test" });
+
+    const grants = database.prepare(
+      `SELECT id, access_profile, capabilities_json, scope_mode, policy_version, revoked_at
+       FROM workspace_agents WHERE agent_identity_id = 'agent-1' ORDER BY id`,
+    ).all() as Array<{
+      id: string;
+      access_profile: string;
+      capabilities_json: string;
+      scope_mode: string;
+      policy_version: number;
+      revoked_at: string | null;
+    }>;
+    expect(grants.map((grant) => ({
+      id: grant.id,
+      profile: grant.access_profile,
+      scope: grant.scope_mode,
+      policyVersion: grant.policy_version,
+      revokedAt: grant.revoked_at,
+    }))).toEqual([
+      { id: "grant-1", profile: "custom", scope: "workspace", policyVersion: 1, revokedAt: null },
+      { id: "grant-2", profile: "reader", scope: "workspace", policyVersion: 1, revokedAt: null },
+      { id: "grant-3", profile: "custom", scope: "workspace", policyVersion: 1, revokedAt: null },
+    ]);
+    const editorCapabilities = JSON.parse(grants[0].capabilities_json) as string[];
+    expect(editorCapabilities).toContain("audit.read");
+    expect(editorCapabilities).not.toContain("documents.commit");
+    expect(editorCapabilities).toContain("revisions.restore");
+    expect(JSON.parse(grants[2].capabilities_json) as string[]).toContain("revisions.restore");
+    expect(database.prepare(
+      `SELECT credential_id, grant_id FROM agent_credential_grant_bindings
+       WHERE status = 'active' ORDER BY credential_id, grant_id`,
+    ).all()).toEqual([
+      { credential_id: "credential-all", grant_id: "grant-1" },
+      { credential_id: "credential-all", grant_id: "grant-2" },
+      { credential_id: "credential-all", grant_id: "grant-3" },
+      { credential_id: "credential-one", grant_id: "grant-1" },
+    ]);
+  });
+
+  it("fails closed with the credential id when an active legacy allowlist is invalid JSON", () => {
+    const database = openDatabase(":memory:");
+    databases.push(database);
+    createUserTable(database);
+    applyThrough(database, "0038_navigation_preference_versions");
+    database.prepare(
+      "INSERT INTO user (id, name, email, emailVerified, createdAt, updatedAt) VALUES ('u1', 'Owner', 'owner@example.com', 1, 1, 1)",
+    ).run();
+    const workspace = ensurePersonalWorkspace(database, {
+      id: "u1",
+      name: "Owner",
+      email: "owner@example.com",
+    });
+    database.prepare(
+      `INSERT INTO agents
+       (id, owner_user_id, display_name, avatar_media_id, status, created_by_user_id,
+        created_at, updated_at, deleted_at, purge_after, purged_at)
+       VALUES ('agent-invalid', 'u1', 'Invalid', NULL, 'active', 'u1', ?, ?, NULL, NULL, NULL)`,
+    ).run("2026-07-30T00:00:00.000Z", "2026-07-30T00:00:00.000Z");
+    database.prepare(
+      `INSERT INTO agent_ownership
+       (agent_id, owner_type, owner_user_id, organization_id, created_at, updated_at)
+       VALUES ('agent-invalid', 'personal', 'u1', NULL, ?, ?)`,
+    ).run("2026-07-30T00:00:00.000Z", "2026-07-30T00:00:00.000Z");
+    database.prepare(
+      `INSERT INTO workspace_agents
+       (id, workspace_id, display_name, avatar_media_id, role, status,
+        created_by_user_id, created_at, updated_at, agent_identity_id,
+        permission_allow_json, permission_deny_json, root_document_id)
+       VALUES ('grant-invalid', ?, 'Invalid', NULL, 'editor', 'active', 'u1', ?, ?,
+        'agent-invalid', '[]', '[]', NULL)`,
+    ).run(workspace.id, "2026-07-30T00:00:00.000Z", "2026-07-30T00:00:00.000Z");
+    database.prepare(
+      `INSERT INTO agent_credentials
+       (id, agent_id, created_by_user_id, name, token_prefix, token_hash,
+        scopes_json, default_workspace_id, workspace_allowlist_json,
+        ip_allowlist_json, last_used_at, last_used_ip, expires_at, revoked_at,
+        created_at, updated_at)
+       VALUES ('credential-invalid-json', 'agent-invalid', 'u1', 'Invalid',
+        'nyx_live_invalid', 'hash-invalid', '["documents:read"]', ?, '{not-json',
+        '[]', NULL, NULL, NULL, NULL, ?, ?)`,
+    ).run(
+      workspace.id,
+      "2026-07-30T00:00:00.000Z",
+      "2026-07-30T00:00:00.000Z",
+    );
+
+    expect(() => runAppMigrations(database, { sourceRevision: "invalid-allowlist-test" }))
+      .toThrow(/0039 invalid workspace_allowlist_json for active credential credential-invalid-json/);
+    expect(database.prepare(
+      "SELECT COUNT(*) AS count FROM _nyxdoc_migrations WHERE id = '0039_agent_access_grants_and_bindings'",
+    ).get()).toEqual({ count: 0 });
+    expect(database.prepare(
+      "SELECT COUNT(*) AS count FROM pragma_table_info('workspace_agents') WHERE name = 'access_profile'",
+    ).get()).toEqual({ count: 0 });
   });
 
   it("backfills stable agent identities without changing legacy token fields", () => {

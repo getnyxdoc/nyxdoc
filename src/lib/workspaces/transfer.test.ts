@@ -9,6 +9,7 @@ import {
   getPublicSharedDocument,
 } from "@/lib/sharing/service";
 import { authenticateApiToken, createWorkspaceToken } from "@/lib/tokens/service";
+import { createAgentCredential } from "@/lib/agents/service";
 import { createTestDatabase, createTestUser } from "@/test/fixture";
 import { createWorkspace } from "@/lib/workspaces/service";
 import {
@@ -223,6 +224,84 @@ describe("workspace tree transfer", () => {
       "SELECT created_at, updated_at FROM workspace_agents WHERE id = ?",
     ).get(credential.summary.agentId)).toEqual(beforeAgent);
     expect(planWorkspaceTreeTransfer(database, input).status).toBe("already_applied");
+  });
+
+  it("moves a canonical bound credential without a legacy workspace token and excludes unbound credentials", () => {
+    const { database, user, source, target } = fixture();
+    const human = {
+      type: "human" as const,
+      userId: user.id,
+      label: user.name,
+      source: "web" as const,
+    };
+    const root = createDocument(database, source.id, human, {
+      title: "canonical transfer",
+      content: { schemaVersion: 2, blocks: [{ id: randomUUID(), type: "p", children: [{ text: "canonical" }] }] },
+    });
+    const bound = createWorkspaceToken(database, {
+      workspaceId: source.id,
+      userId: user.id,
+      name: "bound without legacy projection",
+      role: "editor",
+    });
+    database.prepare(
+      "UPDATE agent_credentials SET default_workspace_id = ?, workspace_allowlist_json = ? WHERE id = ?",
+    ).run(source.id, JSON.stringify([source.id]), bound.summary.id);
+    database.prepare("DELETE FROM workspace_api_tokens WHERE id = ?").run(bound.summary.id);
+
+    const unbound = createAgentCredential(database, {
+      userId: user.id,
+      agentId: bound.summary.agentId,
+      name: "unbound credential",
+      workspaceAllowlist: [],
+    });
+    expect(database.prepare(
+      "SELECT COUNT(*) AS count FROM agent_credential_grant_bindings WHERE credential_id = ?",
+    ).get(unbound.credential.id)).toEqual({ count: 0 });
+
+    const input = {
+      sourceWorkspaceId: source.id,
+      targetWorkspaceId: target.id,
+      rootDocumentId: root.document.id,
+      agentId: bound.summary.agentId,
+    };
+    expect(planWorkspaceTreeTransfer(database, input)).toMatchObject({
+      status: "ready",
+      counts: { documents: 1, credentials: 1, writeReceipts: 0 },
+      blockers: [],
+    });
+
+    applyWorkspaceTreeTransfer(database, input);
+
+    expect(database.prepare(
+      `SELECT grant_entry.workspace_id
+       FROM agent_credential_grant_bindings binding
+       JOIN workspace_agents grant_entry ON grant_entry.id = binding.grant_id
+       WHERE binding.credential_id = ?
+         AND binding.status = 'active' AND binding.revoked_at IS NULL`,
+    ).get(bound.summary.id)).toEqual({ workspace_id: target.id });
+    expect(database.prepare(
+      "SELECT COUNT(*) AS count FROM workspace_api_tokens WHERE id = ?",
+    ).get(bound.summary.id)).toEqual({ count: 0 });
+    expect(database.prepare(
+      "SELECT default_workspace_id, workspace_allowlist_json FROM agent_credentials WHERE id = ?",
+    ).get(bound.summary.id)).toEqual({
+      default_workspace_id: target.id,
+      workspace_allowlist_json: JSON.stringify([target.id]),
+    });
+    expect(database.prepare(
+      "SELECT workspace_id FROM agent_credential_workspace_state WHERE credential_id = ?",
+    ).get(bound.summary.id)).toEqual({ workspace_id: target.id });
+    expect(database.prepare(
+      "SELECT COUNT(*) AS count FROM agent_credential_grant_bindings WHERE credential_id = ?",
+    ).get(unbound.credential.id)).toEqual({ count: 0 });
+    expect(database.prepare(
+      "SELECT default_workspace_id, workspace_allowlist_json FROM agent_credentials WHERE id = ?",
+    ).get(unbound.credential.id)).toEqual({
+      default_workspace_id: null,
+      workspace_allowlist_json: "[]",
+    });
+    expect(assertDatabaseIntegrity(database).tenantBoundaryViolations).toBe(0);
   });
 
   it("blocks a credential whose document boundary would remain in the source workspace", () => {

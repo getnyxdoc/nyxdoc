@@ -2370,6 +2370,271 @@ export const APP_MIGRATIONS: readonly AppMigration[] = [
         ADD COLUMN version INTEGER NOT NULL DEFAULT 1 CHECK (version > 0);
     `,
   },
+  {
+    id: "0039_agent_access_grants_and_bindings",
+    safety: "transform",
+    sql: `
+      CREATE TEMP TABLE _nyxdoc_0039_invalid_credential_allowlists (
+        credential_id TEXT NOT NULL
+      );
+      CREATE TEMP TRIGGER _nyxdoc_0039_fail_invalid_credential_allowlist
+      BEFORE INSERT ON _nyxdoc_0039_invalid_credential_allowlists
+      BEGIN
+        SELECT RAISE(
+          ABORT,
+          '0039 invalid workspace_allowlist_json for active credential ' || NEW.credential_id
+        );
+      END;
+      INSERT INTO _nyxdoc_0039_invalid_credential_allowlists (credential_id)
+      SELECT credential.id
+      FROM agent_credentials credential
+      WHERE credential.revoked_at IS NULL
+        AND CASE
+          WHEN json_valid(credential.workspace_allowlist_json)
+            THEN json_type(credential.workspace_allowlist_json) <> 'array'
+          ELSE 1
+        END;
+      DROP TRIGGER _nyxdoc_0039_fail_invalid_credential_allowlist;
+      DROP TABLE _nyxdoc_0039_invalid_credential_allowlists;
+
+      ALTER TABLE workspace_agents
+        ADD COLUMN access_profile TEXT NOT NULL DEFAULT 'custom'
+        CHECK (access_profile IN ('reader', 'drafter', 'writer', 'custom'));
+      ALTER TABLE workspace_agents
+        ADD COLUMN capabilities_json TEXT NOT NULL DEFAULT '[]'
+        CHECK (json_valid(capabilities_json) AND json_type(capabilities_json) = 'array');
+      ALTER TABLE workspace_agents
+        ADD COLUMN scope_mode TEXT NOT NULL DEFAULT 'workspace'
+        CHECK (scope_mode IN ('workspace', 'document_tree'));
+      ALTER TABLE workspace_agents
+        ADD COLUMN policy_version INTEGER NOT NULL DEFAULT 1 CHECK (policy_version > 0);
+      ALTER TABLE workspace_agents ADD COLUMN revoked_at TEXT;
+
+      UPDATE workspace_agents AS membership
+      SET access_profile = CASE
+            WHEN json_array_length(membership.permission_allow_json) > 0
+              OR json_array_length(membership.permission_deny_json) > 0
+              THEN 'custom'
+            WHEN membership.role = 'viewer' THEN 'reader'
+            -- Legacy editors could restore revisions. The fixed writer profile cannot,
+            -- so preserving the effective legacy grant requires a custom profile.
+            WHEN membership.role = 'editor' THEN 'custom'
+            ELSE 'custom'
+          END,
+          scope_mode = CASE
+            WHEN membership.root_document_id IS NULL THEN 'workspace'
+            ELSE 'document_tree'
+          END,
+          capabilities_json = (
+            SELECT COALESCE(json_group_array(permission), '[]')
+            FROM (
+              SELECT value AS permission
+              FROM json_each(CASE membership.role
+                WHEN 'viewer' THEN '["workspace.read","agents.read","documents.read","revisions.read","changes.read","saved_views.read","assignments.read","tasks.read","exports.create"]'
+                WHEN 'editor' THEN '["workspace.read","agents.read","documents.read","documents.create","documents.update","documents.commit","documents.trash_own","revisions.read","revisions.restore","changes.read","media.upload","saved_views.read","saved_views.manage","assignments.read","tasks.read","tasks.create","tasks.update","exports.create"]'
+                ELSE '["workspace.read","agents.read","documents.read","documents.create","documents.update","documents.commit","documents.trash_own","revisions.read","revisions.restore","changes.read","media.upload","saved_views.read","saved_views.manage","assignments.read","tasks.read","tasks.create","tasks.update","exports.create","members.read","credentials.read","documents.trash","documents.restore","assignments.manage","tasks.manage","admin_requests.read","admin_requests.create","audit.read"]'
+              END)
+              UNION
+              SELECT value FROM json_each(membership.permission_allow_json)
+              EXCEPT
+              SELECT value FROM json_each(membership.permission_deny_json)
+              ORDER BY permission
+            )
+          );
+
+      DROP INDEX workspace_agents_identity_idx;
+      CREATE UNIQUE INDEX workspace_agents_active_identity_idx
+        ON workspace_agents(workspace_id, agent_identity_id)
+        WHERE revoked_at IS NULL;
+      CREATE INDEX workspace_agents_grant_lifecycle_idx
+        ON workspace_agents(agent_identity_id, workspace_id, status, revoked_at);
+
+      CREATE TABLE agent_credential_grant_bindings (
+        id TEXT PRIMARY KEY,
+        credential_id TEXT NOT NULL REFERENCES agent_credentials(id) ON DELETE CASCADE,
+        grant_id TEXT NOT NULL REFERENCES workspace_agents(id) ON DELETE CASCADE,
+        status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'revoked')),
+        created_by_user_id TEXT REFERENCES user(id) ON DELETE SET NULL,
+        created_at TEXT NOT NULL,
+        revoked_at TEXT
+      );
+
+      CREATE UNIQUE INDEX agent_credential_grant_bindings_active_idx
+        ON agent_credential_grant_bindings(credential_id, grant_id)
+        WHERE status = 'active' AND revoked_at IS NULL;
+      CREATE INDEX agent_credential_grant_bindings_grant_idx
+        ON agent_credential_grant_bindings(grant_id, status, credential_id);
+
+      INSERT INTO agent_credential_grant_bindings
+        (id, credential_id, grant_id, status, created_by_user_id, created_at, revoked_at)
+      SELECT
+        'migrated-binding-' || credential.id || '-' || membership.id,
+        credential.id,
+        membership.id,
+        'active',
+        credential.created_by_user_id,
+        credential.created_at,
+        NULL
+      FROM agent_credentials credential
+      JOIN workspace_agents membership
+        ON membership.agent_identity_id = credential.agent_id
+       AND membership.status = 'active'
+       AND membership.revoked_at IS NULL
+      WHERE credential.revoked_at IS NULL
+        AND (
+          json_array_length(credential.workspace_allowlist_json) = 0
+          OR membership.workspace_id IN (
+            SELECT value FROM json_each(credential.workspace_allowlist_json)
+          )
+        );
+
+      CREATE TEMP TABLE _nyxdoc_0039_missing_credential_bindings (
+        credential_id TEXT NOT NULL,
+        grant_id TEXT NOT NULL
+      );
+      CREATE TEMP TRIGGER _nyxdoc_0039_fail_missing_credential_binding
+      BEFORE INSERT ON _nyxdoc_0039_missing_credential_bindings
+      BEGIN
+        SELECT RAISE(
+          ABORT,
+          '0039 missing migrated binding for credential ' || NEW.credential_id
+            || ' and grant ' || NEW.grant_id
+        );
+      END;
+      INSERT INTO _nyxdoc_0039_missing_credential_bindings (credential_id, grant_id)
+      SELECT credential.id, membership.id
+      FROM agent_credentials credential
+      JOIN workspace_agents membership
+        ON membership.agent_identity_id = credential.agent_id
+       AND membership.status = 'active'
+       AND membership.revoked_at IS NULL
+      WHERE credential.revoked_at IS NULL
+        AND (
+          json_array_length(credential.workspace_allowlist_json) = 0
+          OR membership.workspace_id IN (
+            SELECT value FROM json_each(credential.workspace_allowlist_json)
+          )
+        )
+        AND NOT EXISTS (
+          SELECT 1
+          FROM agent_credential_grant_bindings binding
+          WHERE binding.credential_id = credential.id
+            AND binding.grant_id = membership.id
+            AND binding.status = 'active'
+            AND binding.revoked_at IS NULL
+        );
+      DROP TRIGGER _nyxdoc_0039_fail_missing_credential_binding;
+      DROP TABLE _nyxdoc_0039_missing_credential_bindings;
+
+      CREATE TRIGGER agent_credential_grant_binding_boundary_insert
+      BEFORE INSERT ON agent_credential_grant_bindings
+      WHEN NOT EXISTS (
+        SELECT 1
+        FROM agent_credentials credential
+        JOIN workspace_agents grant_entry
+          ON grant_entry.id = NEW.grant_id
+         AND grant_entry.agent_identity_id = credential.agent_id
+        WHERE credential.id = NEW.credential_id
+      )
+      BEGIN SELECT RAISE(ABORT, 'credential binding must belong to the same agent grant'); END;
+
+      CREATE TRIGGER agent_credential_grant_binding_boundary_update
+      BEFORE UPDATE OF credential_id, grant_id ON agent_credential_grant_bindings
+      WHEN NOT EXISTS (
+        SELECT 1
+        FROM agent_credentials credential
+        JOIN workspace_agents grant_entry
+          ON grant_entry.id = NEW.grant_id
+         AND grant_entry.agent_identity_id = credential.agent_id
+        WHERE credential.id = NEW.credential_id
+      )
+      BEGIN SELECT RAISE(ABORT, 'credential binding must belong to the same agent grant'); END;
+    `,
+  },
+  {
+    id: "0040_media_upload_ticket_binding_guards",
+    safety: "schema",
+    sql: `
+      DROP TRIGGER agent_media_upload_ticket_boundary_insert;
+      DROP TRIGGER agent_media_upload_ticket_boundary_update;
+
+      CREATE TRIGGER agent_media_upload_ticket_boundary_insert
+      BEFORE INSERT ON agent_media_upload_tickets
+      WHEN NOT EXISTS (
+        SELECT 1
+        FROM workspace_agents membership
+        JOIN agent_credentials credential
+          ON credential.agent_id = membership.agent_identity_id
+         AND credential.id = NEW.credential_id
+         AND credential.revoked_at IS NULL
+        JOIN agent_credential_grant_bindings binding
+          ON binding.credential_id = credential.id
+         AND binding.grant_id = membership.id
+         AND binding.status = 'active'
+         AND binding.revoked_at IS NULL
+        WHERE membership.id = NEW.workspace_agent_id
+          AND membership.workspace_id = NEW.workspace_id
+          AND membership.status = 'active'
+          AND membership.revoked_at IS NULL
+      ) OR (
+        NEW.document_id IS NOT NULL AND NOT EXISTS (
+          SELECT 1 FROM documents document
+          WHERE document.id = NEW.document_id
+            AND document.workspace_id = NEW.workspace_id
+        )
+      )
+      BEGIN SELECT RAISE(ABORT, 'media upload ticket requires an active credential grant binding'); END;
+
+      CREATE TRIGGER agent_media_upload_ticket_boundary_update
+      BEFORE UPDATE OF credential_id, workspace_agent_id, workspace_id, document_id
+      ON agent_media_upload_tickets
+      WHEN NOT EXISTS (
+        SELECT 1
+        FROM workspace_agents membership
+        JOIN agent_credentials credential
+          ON credential.agent_id = membership.agent_identity_id
+         AND credential.id = NEW.credential_id
+         AND credential.revoked_at IS NULL
+        JOIN agent_credential_grant_bindings binding
+          ON binding.credential_id = credential.id
+         AND binding.grant_id = membership.id
+         AND binding.status = 'active'
+         AND binding.revoked_at IS NULL
+        WHERE membership.id = NEW.workspace_agent_id
+          AND membership.workspace_id = NEW.workspace_id
+          AND membership.status = 'active'
+          AND membership.revoked_at IS NULL
+      ) OR (
+        NEW.document_id IS NOT NULL AND NOT EXISTS (
+          SELECT 1 FROM documents document
+          WHERE document.id = NEW.document_id
+            AND document.workspace_id = NEW.workspace_id
+        )
+      )
+      BEGIN SELECT RAISE(ABORT, 'media upload ticket requires an active credential grant binding'); END;
+
+      CREATE TRIGGER agent_media_upload_ticket_binding_consume
+      BEFORE UPDATE OF consumed_at ON agent_media_upload_tickets
+      WHEN NEW.consumed_at IS NOT NULL AND OLD.consumed_at IS NULL AND NOT EXISTS (
+        SELECT 1
+        FROM workspace_agents membership
+        JOIN agent_credentials credential
+          ON credential.agent_id = membership.agent_identity_id
+         AND credential.id = NEW.credential_id
+         AND credential.revoked_at IS NULL
+        JOIN agent_credential_grant_bindings binding
+          ON binding.credential_id = credential.id
+         AND binding.grant_id = membership.id
+         AND binding.status = 'active'
+         AND binding.revoked_at IS NULL
+        WHERE membership.id = NEW.workspace_agent_id
+          AND membership.workspace_id = NEW.workspace_id
+          AND membership.status = 'active'
+          AND membership.revoked_at IS NULL
+      )
+      BEGIN SELECT RAISE(ABORT, 'media upload ticket binding is no longer active'); END;
+    `,
+  },
 ];
 
 export type AppMigrationPlan = {
