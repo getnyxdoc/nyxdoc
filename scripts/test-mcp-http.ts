@@ -229,7 +229,8 @@ async function main() {
     };
     assert.equal(uploadRequest.upload.method, "PUT");
     assert.equal(uploadRequest.upload.singleUse, true);
-    const uploadResponse = await fetch(uploadRequest.upload.url, {
+    const uploadUrl = internalTestUrl(uploadRequest.upload.url, baseUrl);
+    const uploadResponse = await fetch(uploadUrl, {
       method: "PUT",
       headers: uploadRequest.upload.headers,
       body: Uint8Array.from(png),
@@ -251,7 +252,7 @@ async function main() {
       name: "agent-protocol-smoke.png",
       children: [{ text: "" }],
     });
-    const replayUpload = await fetch(uploadRequest.upload.url, {
+    const replayUpload = await fetch(uploadUrl, {
       method: "PUT",
       headers: uploadRequest.upload.headers,
       body: Uint8Array.from(png),
@@ -336,7 +337,7 @@ async function main() {
     });
     expectSearchResult(searched.structuredContent, createdDocumentId);
 
-    const mediaResponse = await fetch(new URL(uploaded.media.url, baseUrl), {
+    const mediaResponse = await fetch(internalTestUrl(uploaded.media.url, baseUrl), {
       headers: { Authorization: `Bearer ${createdToken.token}` },
     });
     assert.equal(mediaResponse.status, 200);
@@ -356,6 +357,11 @@ async function main() {
     }
     sqlite.prepare("DELETE FROM workspace_agents WHERE id = ?").run(createdToken.summary.agentId);
   }
+}
+
+function internalTestUrl(rawUrl: string, baseUrl: string) {
+  const publicUrl = new URL(rawUrl, baseUrl);
+  return new URL(`${publicUrl.pathname}${publicUrl.search}`, baseUrl);
 }
 
 function expectSearchResult(value: unknown, documentId: string) {

@@ -11,6 +11,8 @@ All notable user-facing changes are recorded here.
   the application so SQLite WAL ownership remains consistent.
 - Align the human-approved administration smoke request with the canonical
   workspace-access update contract.
+- Route release-candidate media smoke requests through the internal gateway
+  while preserving the public upload URL path, query, and authorization.
 
 ## 0.25.6 - 2026-08-04
 
