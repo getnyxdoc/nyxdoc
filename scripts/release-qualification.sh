@@ -136,6 +136,7 @@ temporary="$(mktemp -d "${TMPDIR:-/tmp}/nyxdoc-release-qualification.XXXXXX")"
 run_id="$(date +%s)-$RANDOM"
 fresh_dir="$temporary/fresh"
 upgrade_dir="$temporary/upgrade"
+update_origin="$temporary/update-origin.git"
 artifact_dir="$temporary/artifacts"
 mkdir -p "$artifact_dir"
 browser_evidence_dir="$(dirname -- "$receipt_path")/playwright"
@@ -334,13 +335,19 @@ cleanup() {
   cleanup_directory "$fresh_dir"
   cleanup_directory "$upgrade_dir"
   git -C "$root" worktree remove --force "$fresh_dir" >/dev/null 2>&1 || true
-  git -C "$root" worktree remove --force "$upgrade_dir" >/dev/null 2>&1 || true
   rm -rf "$temporary" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
 
 git -C "$root" worktree add --detach "$fresh_dir" "$candidate_revision" >/dev/null
-git -C "$root" worktree add --detach "$upgrade_dir" "$baseline_ref" >/dev/null
+# The updater intentionally trusts canonical origin tags, not local tags. Build
+# a disposable origin that includes the unpromoted candidate tag so pre-tag
+# rehearsals exercise the same remote-tag path without publishing first. A
+# separate clone also avoids worktrees sharing the caller's remote config.
+git clone --bare --no-local "$root" "$update_origin" >/dev/null
+git -C "$update_origin" update-ref refs/heads/main "$candidate_revision"
+git clone --no-local --no-checkout "$update_origin" "$upgrade_dir" >/dev/null
+git -C "$upgrade_dir" checkout --detach "$baseline_ref" >/dev/null
 
 fresh_volume="nyxdoc_release_${run_id}_fresh"
 fresh_backup="$artifact_dir/fresh-backups"

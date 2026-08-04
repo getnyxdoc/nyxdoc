@@ -87,6 +87,8 @@ async function main() {
       "npm run test:mcp-http",
       "exec -T --user node",
       "scripts/update.sh",
+      "update-origin.git",
+      "git clone --bare --no-local",
       "integrity_check",
       "http://127.0.0.1:${httpPort}",
       "playwright test e2e/vertical --project=chromium",
