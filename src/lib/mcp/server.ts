@@ -1,5 +1,6 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
+import packageJson from "../../../package.json";
 import { workspaceAgentGrantIdSchema } from "@/lib/agents/identifiers";
 import { proposeAdminActionSchema } from "@/lib/admin-requests/schemas";
 import { listAdminActionRequests, proposeAdminAction } from "@/lib/admin-requests/service";
@@ -282,7 +283,7 @@ const handoffTodoSchema = z.object({
 
 const capabilities = {
   protocolVersion: "5.0.0",
-  serverVersion: "0.25.5",
+  serverVersion: packageJson.version,
   workspace: {
     tenantBoundary: true,
     authorizationModel: "global-agent-identity + workspace-grant + credential-binding",

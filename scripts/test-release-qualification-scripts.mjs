@@ -140,17 +140,17 @@ async function main() {
     git(updateSeed, ["commit", "-m", "baseline"]);
     const baselineRevision = git(updateSeed, ["rev-parse", "HEAD"]);
     git(updateSeed, ["tag", "-a", "v0.25.1", "-m", "baseline"]);
-    await writeFile(path.join(updateSeed, "version.txt"), "0.25.8\n");
+    await writeFile(path.join(updateSeed, "version.txt"), "0.25.9\n");
     git(updateSeed, ["add", "version.txt"]);
     git(updateSeed, ["commit", "-m", "candidate"]);
     const candidateRevision = git(updateSeed, ["rev-parse", "HEAD"]);
-    git(updateSeed, ["tag", "-a", "v0.25.8", "-m", "candidate"]);
+    git(updateSeed, ["tag", "-a", "v0.25.9", "-m", "candidate"]);
     git(updateSeed, ["push", "origin", "main", "--tags"]);
     execFileSync("git", ["clone", updateRemote, updateCheckout], { stdio: "ignore" });
 
     // Reproduce Actions' tag checkout shape: the local release tag resolves to
     // the wrong object while origin still has the canonical annotated tag.
-    git(updateCheckout, ["tag", "-f", "v0.25.8", baselineRevision]);
+    git(updateCheckout, ["tag", "-f", "v0.25.9", baselineRevision]);
     const resolution = spawnSync("bash", [
       "-c",
       [
@@ -166,7 +166,7 @@ async function main() {
     assert.equal(resolution.status, 0, resolution.stderr || resolution.stdout);
     assert.equal(
       resolution.stdout.trim().split(/\r?\n/).at(-1),
-      "refs/nyxdoc-update/stable\tv0.25.8",
+      "refs/nyxdoc-update/stable\tv0.25.9",
     );
     assert.equal(
       git(updateCheckout, ["rev-parse", "refs/nyxdoc-update/stable^{commit}"]),
@@ -174,7 +174,7 @@ async function main() {
       "stable update must resolve the canonical origin tag",
     );
     assert.equal(
-      git(updateCheckout, ["rev-parse", "refs/tags/v0.25.8^{commit}"]),
+      git(updateCheckout, ["rev-parse", "refs/tags/v0.25.9^{commit}"]),
       baselineRevision,
       "stable update must not rewrite a local/user tag",
     );

@@ -1,6 +1,7 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { afterEach, describe, expect, it } from "vitest";
+import packageJson from "../../../package.json";
 import { assignAgentToWorkspace, updateAgentCredential } from "@/lib/agents/service";
 import {
   createCollaborationCommands,
@@ -185,6 +186,7 @@ describe("Nyxdoc MCP server", () => {
         operation: "get_capabilities",
         capabilities: {
           protocolVersion: "5.0.0",
+          serverVersion: packageJson.version,
           profile: "summary",
           unchanged: false,
           document: {

@@ -2,6 +2,11 @@
 
 All notable user-facing changes are recorded here.
 
+## 0.25.9 - 2026-08-04
+
+- Derive the MCP server version from package metadata so capability responses
+  cannot drift behind the installed release, with a regression assertion.
+
 ## 0.25.8 - 2026-08-04
 
 - Resolve stable updates from canonical origin tags in a private mirror ref so
