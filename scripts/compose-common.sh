@@ -112,6 +112,38 @@ nyxdoc_source_revision() {
   fi
 }
 
+nyxdoc_resolve_update_target() {
+  local channel="$1"
+  local remote_tag_ref=""
+  local mirror_ref="refs/nyxdoc-update/stable"
+
+  # Fetch branches without auto-following tags. A tag-triggered GitHub Actions
+  # checkout can expose the current annotated release as a local lightweight
+  # tag; a normal `fetch --tags` then aborts with "would clobber existing tag".
+  # Resolve stable releases from origin into a private mirror ref instead, so
+  # local/user tags are neither trusted nor rewritten by the updater.
+  git -C "$NYXDOC_ROOT" fetch --no-tags --prune origin \
+    "+refs/heads/main:refs/remotes/origin/main"
+
+  if [ "$channel" = stable ]; then
+    remote_tag_ref="$(
+      git -C "$NYXDOC_ROOT" ls-remote --exit-code --refs \
+        --sort=-version:refname origin 'refs/tags/v[0-9]*' \
+        | awk 'NR == 1 { print $2 }' || true
+    )"
+    [ -n "$remote_tag_ref" ] \
+      || nyxdoc_die "No stable v* release tag was found on origin."
+
+    git -C "$NYXDOC_ROOT" update-ref -d "$mirror_ref" >/dev/null 2>&1 || true
+    git -C "$NYXDOC_ROOT" fetch --no-tags origin \
+      "${remote_tag_ref}:${mirror_ref}"
+    printf '%s\t%s\n' "$mirror_ref" "${remote_tag_ref#refs/tags/}"
+    return
+  fi
+
+  printf '%s\t%s\n' "origin/main" "origin/main"
+}
+
 nyxdoc_backup_host_path() {
   local configured
   configured="$(nyxdoc_env_get NYXDOC_BACKUP_HOST_PATH)"

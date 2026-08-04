@@ -2,6 +2,14 @@
 
 All notable user-facing changes are recorded here.
 
+## 0.25.8 - 2026-08-04
+
+- Resolve stable updates from canonical origin tags in a private mirror ref so
+  tag-triggered CI checkouts and user-local tags cannot block or redirect the
+  updater.
+- Added a real Git repository regression test for a conflicting local release
+  tag while preserving the user's local tag unchanged.
+
 ## 0.25.7 - 2026-08-04
 
 - Made the isolated MCP HTTP smoke test accept a real workspace membership

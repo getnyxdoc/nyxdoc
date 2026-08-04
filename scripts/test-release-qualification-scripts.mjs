@@ -11,6 +11,8 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const verifier = path.join(root, "scripts", "verify-release-qualification-receipt.mjs");
 const qualification = path.join(root, "scripts", "release-qualification.sh");
 const workflow = path.join(root, ".github", "workflows", "release.yml");
+const composeCommon = path.join(root, "scripts", "compose-common.sh");
+const updateScript = path.join(root, "scripts", "update.sh");
 const image = "ghcr.io/getnyxdoc/nyxdoc@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const revision = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 
@@ -100,6 +102,79 @@ async function main() {
     assert.match(workflowText, /verify-release-qualification-receipt\.mjs/);
     assert.match(workflowText, /playwright install --with-deps chromium/);
     assert.match(workflowText, /imagetools create --prefer-index=false/);
+
+    const composeCommonText = await readFile(composeCommon, "utf8");
+    const updateText = await readFile(updateScript, "utf8");
+    assert.match(composeCommonText, /nyxdoc_resolve_update_target\(\)/);
+    assert.match(composeCommonText, /refs\/nyxdoc-update\/stable/);
+    assert.match(composeCommonText, /fetch --no-tags/);
+    assert.doesNotMatch(updateText, /fetch --tags/);
+    assert.match(updateText, /nyxdoc_resolve_update_target/);
+
+    // Windows Node and WSL Bash use different path and repository ownership
+    // models. The updater is a supported Linux lifecycle script, so exercise
+    // the real cross-repository Git fixture on Linux CI and keep Windows to
+    // the static contract plus shell syntax checks above.
+    if (process.platform !== "win32") {
+    const updateRemote = path.join(temporary, "update-remote.git");
+    const updateSeed = path.join(temporary, "update-seed");
+    const updateCheckout = path.join(temporary, "update-checkout");
+    const git = (cwd, args) => execFileSync("git", args, {
+      cwd,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    }).trim();
+
+    execFileSync("git", ["init", "--bare", "--initial-branch=main", updateRemote], {
+      stdio: "ignore",
+    });
+    execFileSync("git", ["clone", updateRemote, updateSeed], { stdio: "ignore" });
+    git(updateSeed, ["config", "user.name", "Nyxdoc Release Test"]);
+    git(updateSeed, ["config", "user.email", "release-test@example.test"]);
+    await writeFile(path.join(updateSeed, "version.txt"), "0.25.1\n");
+    git(updateSeed, ["add", "version.txt"]);
+    git(updateSeed, ["commit", "-m", "baseline"]);
+    const baselineRevision = git(updateSeed, ["rev-parse", "HEAD"]);
+    git(updateSeed, ["tag", "-a", "v0.25.1", "-m", "baseline"]);
+    await writeFile(path.join(updateSeed, "version.txt"), "0.25.8\n");
+    git(updateSeed, ["add", "version.txt"]);
+    git(updateSeed, ["commit", "-m", "candidate"]);
+    const candidateRevision = git(updateSeed, ["rev-parse", "HEAD"]);
+    git(updateSeed, ["tag", "-a", "v0.25.8", "-m", "candidate"]);
+    git(updateSeed, ["push", "origin", "main", "--tags"]);
+    execFileSync("git", ["clone", updateRemote, updateCheckout], { stdio: "ignore" });
+
+    // Reproduce Actions' tag checkout shape: the local release tag resolves to
+    // the wrong object while origin still has the canonical annotated tag.
+    git(updateCheckout, ["tag", "-f", "v0.25.8", baselineRevision]);
+    const resolution = spawnSync("bash", [
+      "-c",
+      [
+        "source scripts/compose-common.sh",
+        'if command -v wslpath >/dev/null 2>&1; then NYXDOC_ROOT="$(wslpath "$UPDATE_CHECKOUT")"; else NYXDOC_ROOT="$UPDATE_CHECKOUT"; fi',
+        "nyxdoc_resolve_update_target stable",
+      ].join("; "),
+    ], {
+      cwd: root,
+      encoding: "utf8",
+      env: { ...process.env, UPDATE_CHECKOUT: updateCheckout },
+    });
+    assert.equal(resolution.status, 0, resolution.stderr || resolution.stdout);
+    assert.equal(
+      resolution.stdout.trim().split(/\r?\n/).at(-1),
+      "refs/nyxdoc-update/stable\tv0.25.8",
+    );
+    assert.equal(
+      git(updateCheckout, ["rev-parse", "refs/nyxdoc-update/stable^{commit}"]),
+      candidateRevision,
+      "stable update must resolve the canonical origin tag",
+    );
+    assert.equal(
+      git(updateCheckout, ["rev-parse", "refs/tags/v0.25.8^{commit}"]),
+      baselineRevision,
+      "stable update must not rewrite a local/user tag",
+    );
+    }
 
     execFileSync("bash", ["-n", "scripts/release-qualification.sh"], { cwd: root, stdio: "inherit" });
     console.log("Release qualification script contracts passed.");

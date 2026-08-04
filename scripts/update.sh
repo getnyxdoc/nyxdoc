@@ -45,23 +45,18 @@ git -C "$NYXDOC_ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1 \
   || nyxdoc_die "The Git working tree is not clean. Commit, stash, or remove local changes first."
 
 current_revision="$(git -C "$NYXDOC_ROOT" rev-parse HEAD)"
-git -C "$NYXDOC_ROOT" fetch --tags --prune origin
-if [ "$channel" = stable ]; then
-  target_ref="$(git -C "$NYXDOC_ROOT" tag --list 'v[0-9]*' --sort=-v:refname | head -n 1)"
-  [ -n "$target_ref" ] || nyxdoc_die "No stable v* release tag was found on origin."
-else
-  target_ref="origin/main"
-fi
+target_selection="$(nyxdoc_resolve_update_target "$channel")"
+IFS=$'\t' read -r target_ref target_label <<<"$target_selection"
 target_revision="$(git -C "$NYXDOC_ROOT" rev-parse "${target_ref}^{commit}")"
 
 if [ "$current_revision" = "$target_revision" ]; then
-  nyxdoc_info "Already on $target_ref ($target_revision); no update is required."
+  nyxdoc_info "Already on $target_label ($target_revision); no update is required."
   nyxdoc_wait_for_services
   exit 0
 fi
 
 git -C "$NYXDOC_ROOT" merge-base --is-ancestor "$current_revision" "$target_revision" \
-  || nyxdoc_die "Target $target_ref is not a fast-forward descendant of the current revision."
+  || nyxdoc_die "Target $target_label is not a fast-forward descendant of the current revision."
 
 [ -n "$(nyxdoc_compose ps --status running -q app)" ] \
   || nyxdoc_die "The app service must be running so a verified pre-update backup can be created."
