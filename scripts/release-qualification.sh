@@ -343,9 +343,18 @@ git -C "$root" worktree add --detach "$fresh_dir" "$candidate_revision" >/dev/nu
 # The updater intentionally trusts canonical origin tags, not local tags. Build
 # a disposable origin that includes the unpromoted candidate tag so pre-tag
 # rehearsals exercise the same remote-tag path without publishing first. A
-# separate clone also avoids worktrees sharing the caller's remote config.
-git clone --bare --no-local "$root" "$update_origin" >/dev/null
-git -C "$update_origin" update-ref refs/heads/main "$candidate_revision"
+# separate repository also avoids worktrees sharing the caller's remote config.
+# Populate it with a push instead of cloning the source repository: GitHub
+# checkout and local rehearsals may use partial clones, and cloning a promisor
+# repository can fail while trying to copy lazily fetched objects.
+candidate_tag="$(git -C "$root" describe --tags --exact-match --match 'v[0-9]*' "$candidate_revision" 2>/dev/null || true)"
+[[ "$candidate_tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] \
+  || fail "candidate revision must have an exact stable semver tag for update rehearsal"
+git init --bare --initial-branch=main "$update_origin" >/dev/null
+git -C "$root" push "$update_origin" \
+  "$candidate_revision:refs/heads/main" \
+  "$baseline_ref:refs/tags/$baseline_ref" \
+  "refs/tags/$candidate_tag:refs/tags/$candidate_tag" >/dev/null
 git clone --no-local --no-checkout "$update_origin" "$upgrade_dir" >/dev/null
 git -C "$upgrade_dir" checkout --detach "$baseline_ref" >/dev/null
 
