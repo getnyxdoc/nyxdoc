@@ -366,6 +366,22 @@ function tenantBoundaryViolations(database: NyxDatabase) {
               AND (document.id IS NULL OR document.workspace_id <> report.workspace_id)`,
     },
     {
+      name: "app_bug_report_attachment",
+      requirements: [
+        ["app_bug_report_attachments", ["bug_report_id", "workspace_id", "media_id"]],
+        ["app_bug_reports", ["id", "workspace_id", "trigger"]],
+        ["media_assets", ["id", "workspace_id"]],
+      ],
+      sql: `SELECT COUNT(*) AS count
+            FROM app_bug_report_attachments attachment
+            LEFT JOIN app_bug_reports report ON report.id = attachment.bug_report_id
+            LEFT JOIN media_assets media ON media.id = attachment.media_id
+            WHERE report.id IS NULL OR media.id IS NULL
+              OR report.workspace_id <> attachment.workspace_id
+              OR media.workspace_id <> attachment.workspace_id
+              OR report.trigger <> 'manual'`,
+    },
+    {
       name: "organization_personal_agent_approval",
       requirements: [
         ["organization_agent_approvals", ["organization_id", "agent_id"]],

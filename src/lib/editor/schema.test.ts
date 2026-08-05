@@ -104,6 +104,18 @@ describe("Nyxdoc Document AST v2", () => {
     expect(parseNyxdocDocumentV2(richDocument)).toEqual(richDocument);
   });
 
+  it("preserves fractional table column widths produced by the editor", () => {
+    const fractional = structuredClone(richDocument);
+    const table = fractional.blocks.find((block) => block.type === "table");
+    if (!table || table.type !== "table") throw new Error("표 테스트 픽스처가 아닙니다.");
+    table.colSizes = [102.85714285714286, 137.5];
+
+    expect(parseNyxdocDocumentV2(fractional).blocks[1]).toMatchObject({
+      type: "table",
+      colSizes: [102.85714285714286, 137.5],
+    });
+  });
+
   it("projects rich content to deterministic searchable text", () => {
     expect(nyxdocDocumentText(richDocument)).toBe(
       "사람과 에이전트가 함께 읽습니다.\n항목\t담당\n문서\tCodex\n출시 화면",

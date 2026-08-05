@@ -1,17 +1,27 @@
 import { randomUUID } from "node:crypto";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import type { NyxDatabase } from "@/lib/db/client";
 import {
   BugReportError,
   createAppBugReport,
   getAppBugReportByCode,
+  purgeExpiredBugReports,
 } from "@/lib/diagnostics/bug-reports";
 import type { AppBugReportRequest } from "@/lib/diagnostics/schema";
 import { createDocument } from "@/lib/documents/service";
 import { parseNyxdocDocumentV2 } from "@/lib/editor/schema";
+import { storeMediaAsset } from "@/lib/media/service";
 import { createTestDatabase, createTestUser } from "@/test/fixture";
 
 const databases: NyxDatabase[] = [];
+const mediaRoots: string[] = [];
+const PNG_BYTES = Buffer.from(
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+  "base64",
+);
 
 function fixture() {
   const database = createTestDatabase();
@@ -95,25 +105,31 @@ function report(
 
 afterEach(() => {
   while (databases.length) databases.pop()?.close();
+  while (mediaRoots.length) {
+    const mediaRoot = mediaRoots.pop();
+    if (mediaRoot) rmSync(mediaRoot, { force: true, recursive: true });
+  }
 });
 
 describe("app bug reports", () => {
-  it("stores an idempotent bounded report without reading document content", () => {
+  it("stores an idempotent bounded report without reading document content", async () => {
     const { database, document, user, workspace } = fixture();
     const input = report(document.id);
-    const first = createAppBugReport(database, {
+    const first = await createAppBugReport(database, {
       workspaceId: workspace.id,
       documentId: document.id,
       reporterUserId: user.id,
       report: input,
     });
-    const replay = createAppBugReport(database, {
+    const replay = await createAppBugReport(database, {
       workspaceId: workspace.id,
       documentId: document.id,
       reporterUserId: user.id,
       report: input,
     });
-    expect(replay).toEqual(first);
+    expect(replay.reportCode).toBe(first.reportCode);
+    expect(first.createdNew).toBe(true);
+    expect(replay.createdNew).toBe(false);
     expect(first.reportCode).toMatch(/^BUG-\d{8}-[0-9A-F]{12}$/);
 
     const stored = getAppBugReportByCode(database, first.reportCode);
@@ -130,7 +146,7 @@ describe("app bug reports", () => {
       .toEqual({ count: 1 });
   });
 
-  it("deduplicates the same automatic detector fingerprint for fifteen minutes", () => {
+  it("deduplicates the same automatic detector fingerprint for fifteen minutes", async () => {
     const { database, document, user, workspace } = fixture();
     const automatic = report(document.id, {
       trigger: "automatic",
@@ -141,13 +157,13 @@ describe("app bug reports", () => {
       suggestedCategory: undefined,
       events: [],
     });
-    const first = createAppBugReport(database, {
+    const first = await createAppBugReport(database, {
       workspaceId: workspace.id,
       documentId: document.id,
       reporterUserId: user.id,
       report: automatic,
     }, new Date("2026-07-30T00:00:00.000Z"));
-    const duplicate = createAppBugReport(database, {
+    const duplicate = await createAppBugReport(database, {
       workspaceId: workspace.id,
       documentId: document.id,
       reporterUserId: user.id,
@@ -160,36 +176,36 @@ describe("app bug reports", () => {
       .toEqual({ count: 1 });
   });
 
-  it("rate limits repeated manual submissions", () => {
+  it("rate limits repeated manual submissions", async () => {
     const { database, document, user, workspace } = fixture();
     const now = new Date("2026-07-30T00:00:00.000Z");
     for (let index = 0; index < 5; index += 1) {
-      createAppBugReport(database, {
+      await createAppBugReport(database, {
         workspaceId: workspace.id,
         documentId: document.id,
         reporterUserId: user.id,
         report: report(document.id),
       }, now);
     }
-    expect(() => createAppBugReport(database, {
+    await expect(createAppBugReport(database, {
       workspaceId: workspace.id,
       documentId: document.id,
       reporterUserId: user.id,
       report: report(document.id),
-    }, now)).toThrowError(BugReportError);
+    }, now)).rejects.toThrowError(BugReportError);
   });
 
-  it("enforces the document-workspace boundary and hides expired reports", () => {
+  it("enforces the document-workspace boundary and hides expired reports", async () => {
     const { database, document, user, workspace } = fixture();
     const other = createTestUser(database);
-    expect(() => createAppBugReport(database, {
+    await expect(createAppBugReport(database, {
       workspaceId: other.workspace.id,
       documentId: document.id,
       reporterUserId: other.user.id,
       report: report(document.id),
-    })).toThrow(/workspace/);
+    })).rejects.toThrow(/workspace/);
 
-    const stored = createAppBugReport(database, {
+    const stored = await createAppBugReport(database, {
       workspaceId: workspace.id,
       documentId: document.id,
       reporterUserId: user.id,
@@ -200,5 +216,54 @@ describe("app bug reports", () => {
       stored.reportCode,
       new Date("2026-02-01T00:00:01.000Z"),
     )).toBeNull();
+  });
+
+  it("binds explicit images to a manual report and removes them at expiry", async () => {
+    const { database, document, user, workspace } = fixture();
+    const mediaRoot = mkdtempSync(path.join(os.tmpdir(), "nyxdoc-bug-media-test-"));
+    mediaRoots.push(mediaRoot);
+    const media = await storeMediaAsset(database, {
+      bytes: PNG_BYTES,
+      originalFilename: "save-error.png",
+      purpose: "diagnostic",
+      userId: user.id,
+      workspaceId: workspace.id,
+    }, mediaRoot);
+    const stored = await createAppBugReport(database, {
+      workspaceId: workspace.id,
+      documentId: document.id,
+      reporterUserId: user.id,
+      report: report(document.id),
+      attachmentMediaIds: [media.id],
+    }, new Date("2026-01-01T00:00:00.000Z"));
+
+    expect(getAppBugReportByCode(
+      database,
+      stored.reportCode,
+      new Date("2026-01-02T00:00:00.000Z"),
+    )).toMatchObject({
+      attachments: [{
+        mediaId: media.id,
+        mimeType: "image/png",
+        originalFilename: "save-error.png",
+        url: expect.stringContaining(`/bug-reports/${stored.reportCode}/attachments/`),
+      }],
+    });
+    expect(existsSync(path.join(mediaRoot, media.storageKey))).toBe(true);
+
+    await expect(purgeExpiredBugReports(
+      database,
+      new Date("2026-02-01T00:00:01.000Z"),
+      500,
+      mediaRoot,
+    )).resolves.toBe(1);
+    expect(getAppBugReportByCode(
+      database,
+      stored.reportCode,
+      new Date("2026-02-01T00:00:01.000Z"),
+    )).toBeNull();
+    expect(database.prepare("SELECT id FROM media_assets WHERE id = ?").get(media.id))
+      .toBeUndefined();
+    expect(existsSync(path.join(mediaRoot, media.storageKey))).toBe(false);
   });
 });

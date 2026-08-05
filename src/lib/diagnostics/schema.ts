@@ -1,6 +1,15 @@
 import { z } from "zod";
 import type { CaretTraceEvent } from "@/lib/editor/diagnostics";
 
+export const MAX_BUG_REPORT_ATTACHMENTS = 3;
+export const MAX_BUG_REPORT_ATTACHMENT_BYTES = 5 * 1_024 * 1_024;
+export const BUG_REPORT_ATTACHMENT_MIME_TYPES = [
+  "image/png",
+  "image/jpeg",
+  "image/gif",
+  "image/webp",
+] as const;
+
 export const bugReportCategorySchema = z.enum([
   "editor_caret",
   "save_sync",

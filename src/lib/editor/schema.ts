@@ -266,7 +266,11 @@ export const nyxdocTableSchema = z
   .object({
     id: nodeIdSchema,
     type: z.literal("table"),
-    colSizes: z.array(z.number().int().min(40).max(2_000)).max(20).optional(),
+    // Plate distributes a table's available width across its columns and can
+    // legitimately produce fractional pixel widths (for example 720 / 7).
+    // Preserving those values avoids both visible width drift and a server-side
+    // rejection of an otherwise valid shared draft.
+    colSizes: z.array(z.number().finite().min(40).max(2_000)).max(20).optional(),
     marginLeft: z.number().int().min(0).max(2_000).optional(),
     children: z.array(nyxdocTableRowSchema).min(1).max(50),
   })

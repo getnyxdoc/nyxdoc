@@ -298,6 +298,20 @@
 .bugReportField > small { color: #89958f; font-size: 11px; font-weight: 560; line-height: 1.55; }
 .bugReportField > small.bugReportSensitiveWarning { display: flex; align-items: flex-start; gap: 5px; color: #9a664c; }
 .bugReportField > small.bugReportSensitiveWarning svg { flex: 0 0 auto; margin-top: 2px; }
+.bugReportAttachments { display: grid; margin-top: 18px; gap: 8px; }
+.bugReportAttachments > div:first-child { display: flex; align-items: center; justify-content: space-between; gap: 12px; color: var(--ink); font-size: 13px; font-weight: 740; }
+.bugReportAttachments > div:first-child > span em { color: #8a9690; font-size: 11px; font-style: normal; font-weight: 620; }
+.bugReportAttachments > small { color: #89958f; font-size: 11px; line-height: 1.55; }
+.bugReportAttachmentButton { display: inline-flex; min-height: 36px; padding: 0 12px; align-items: center; gap: 6px; border: 1px solid #cedbd5; border-radius: 9px; background: white; color: #466156; cursor: pointer; font-size: 12px; font-weight: 700; white-space: nowrap; }
+.bugReportAttachmentButton:hover { border-color: #80bea7; background: #f4faf7; }
+.bugReportAttachmentButton:has(input:disabled) { opacity: .45; cursor: not-allowed; }
+.bugReportAttachmentButton input { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); clip-path: inset(50%); white-space: nowrap; }
+.bugReportAttachmentGrid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+.bugReportAttachmentGrid article { position: relative; min-width: 0; padding: 6px; border: 1px solid #dce5e0; border-radius: 11px; background: #fbfcfb; }
+.bugReportAttachmentGrid article > img { display: block; width: 100%; height: 86px; object-fit: cover; border-radius: 7px; background: #eef3f0; }
+.bugReportAttachmentGrid article > span { display: block; margin: 6px 2px 1px; overflow: hidden; color: #66766e; font-size: 10px; font-weight: 620; text-overflow: ellipsis; white-space: nowrap; }
+.bugReportAttachmentGrid article > button { position: absolute; top: 10px; right: 10px; display: grid; width: 26px; height: 26px; padding: 0; place-items: center; border: 1px solid rgba(255, 255, 255, .88); border-radius: 50%; background: rgba(31, 49, 42, .78); color: white; cursor: pointer; box-shadow: 0 2px 8px rgba(31, 49, 42, .18); }
+.bugReportAttachmentGrid article > button:disabled { opacity: .45; cursor: wait; }
 .bugReportPrivacy { margin-top: 16px; padding: 12px 14px; border: 1px solid #dcebe5; border-radius: 11px; background: #f3faf7; }
 .bugReportPrivacy strong { display: block; color: #356d58; font-size: 12px; }
 .bugReportPrivacy p { margin: 4px 0 0; color: #688078; font-size: 11px; line-height: 1.65; }
@@ -875,6 +889,7 @@
   .bugReportDialog { max-height: calc(100dvh - 24px); padding: 18px; }
   .bugReportSuccess { padding: 20px 14px; }
   .bugReportSuccess > div { align-items: stretch; flex-direction: column; }
+  .bugReportAttachmentGrid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .shareRecipientComposer { grid-template-columns: minmax(0, 1fr) 86px; }
   .shareCandidateField { grid-column: 1 / -1; }
   .shareRecipientComposer > button { min-width: 62px; }

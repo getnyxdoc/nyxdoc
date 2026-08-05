@@ -99,6 +99,42 @@ function storedDraftFixture() {
 }
 
 describe("shared draft node ID repair", () => {
+  it("projects a Yjs table with fractional column widths without losing data", () => {
+    const colSizes = Array.from({ length: 7 }, () => 102.85714285714286);
+    const table = {
+      id: "fractional-table",
+      type: "table",
+      colSizes,
+      children: [{
+        id: "fractional-row",
+        type: "tr",
+        children: colSizes.map((_, column) => ({
+          id: `fractional-cell-${column}`,
+          type: "td",
+          children: [{
+            id: `fractional-cell-paragraph-${column}`,
+            type: "p",
+            children: [{ text: `열 ${column + 1}` }],
+          }],
+        })),
+      }],
+    };
+    const content = parseNyxdocDocumentV2({
+      schemaVersion: NYXDOC_CONTENT_SCHEMA_VERSION,
+      blocks: [table],
+    });
+    const ydoc = createCollaborationYDoc({
+      title: "소수 열 너비 표",
+      parentDocumentId: null,
+      documentType: null,
+      workflowStatus: "draft",
+      tags: [],
+      content,
+    });
+
+    expect(collaborationDocumentFromYDoc(ydoc).content.blocks[0]).toEqual(content.blocks[0]);
+  });
+
   it("keeps Slate-Yjs runtime IDs in the draft but removes them from canonical reads", () => {
     const ydoc = createCollaborationYDoc({
       title: "런타임 필드 투영",

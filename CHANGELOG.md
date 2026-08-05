@@ -2,6 +2,17 @@
 
 All notable user-facing changes are recorded here.
 
+## 0.25.12 - 2026-08-05
+
+- Allow users to attach up to three explicitly selected PNG, JPEG, GIF, or
+  WebP images to a manual bug report, with private access and the same 30-day
+  retention lifecycle as the report.
+- Preserve valid fractional table column widths produced by the editor so
+  documents containing unevenly divided tables can be saved normally instead
+  of failing with a generic input-validation message.
+- Added migration, retention cleanup, API, browser, and shared-draft regression
+  coverage for diagnostic images and fractional-width tables.
+
 ## 0.25.11 - 2026-08-05
 
 - Open external and internal document links in a new tab from both read and

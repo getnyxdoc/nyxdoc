@@ -770,6 +770,48 @@ test("records a content-free bug code from the global document menu", async ({ p
   expect(serialized).not.toContain("https://");
 });
 
+test("uploads only explicitly selected bug report images as multipart bytes", async ({ page }) => {
+  const png = Buffer.from(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+    "base64",
+  );
+  let requestContentType = "";
+  let requestBody: Buffer | null = null;
+  await page.route("**/api/bug-reports", async (route) => {
+    requestContentType = route.request().headers()["content-type"] ?? "";
+    requestBody = route.request().postDataBuffer();
+    await route.fulfill({
+      status: 201,
+      contentType: "application/json",
+      body: JSON.stringify({
+        report: {
+          code: "BUG-20260805-E2E000000002",
+          createdAt: "2026-08-05T12:00:00.000Z",
+          expiresAt: "2026-09-04T12:00:00.000Z",
+        },
+      }),
+    });
+  });
+
+  await page.goto("/dev/workspace-e2e");
+  await page.getByRole("button", { name: "버그 기록", exact: true }).click();
+  const dialog = page.getByRole("dialog", { name: "문제 기록" });
+  await dialog.locator('input[type="file"]').setInputFiles({
+    name: "save-error.png",
+    mimeType: "image/png",
+    buffer: png,
+  });
+  await expect(dialog.getByAltText("save-error.png")).toBeVisible();
+  await dialog.getByRole("button", { name: "버그 기록", exact: true }).click();
+
+  await expect(dialog.getByText(/BUG-20260805-E2E000000002/)).toBeVisible();
+  expect(requestContentType).toContain("multipart/form-data; boundary=");
+  expect(Buffer.isBuffer(requestBody)).toBe(true);
+  const submittedBody = requestBody as unknown as Buffer;
+  expect(submittedBody.indexOf(png)).toBeGreaterThanOrEqual(0);
+  expect(submittedBody.toString("utf8")).not.toContain("data:image");
+});
+
 test("keeps the top document menu on one line and drag-scrolls it when space is narrow", async ({ page }) => {
   await page.setViewportSize({ width: 900, height: 700 });
   await page.addInitScript(() => {

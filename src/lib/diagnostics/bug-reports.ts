@@ -1,6 +1,10 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import type { NyxDatabase } from "@/lib/db/client";
-import type { AppBugReportRequest } from "@/lib/diagnostics/schema";
+import {
+  MAX_BUG_REPORT_ATTACHMENTS,
+  type AppBugReportRequest,
+} from "@/lib/diagnostics/schema";
+import { removeUnreferencedDiagnosticMedia } from "@/lib/media/service";
 import packageJson from "../../../package.json";
 
 const DEFAULT_RETENTION_DAYS = 30;
@@ -24,6 +28,17 @@ type BugReportRow = {
   expiresAt: string;
   occurrenceCount: number;
   deduplicated?: boolean;
+  createdNew?: boolean;
+};
+
+export type AppBugReportAttachment = {
+  id: string;
+  mediaId: string;
+  mimeType: string;
+  byteSize: number;
+  originalFilename: string | null;
+  storageKey: string;
+  url: string;
 };
 
 export type AppBugReport = BugReportRow & {
@@ -47,11 +62,12 @@ export type AppBugReport = BugReportRow & {
   >;
   firstSeenAt: string;
   lastSeenAt: string;
+  attachments: AppBugReportAttachment[];
 };
 
 export class BugReportError extends Error {
   constructor(
-    readonly code: "RATE_LIMITED" | "TOO_LARGE",
+    readonly code: "INVALID_INPUT" | "RATE_LIMITED" | "TOO_LARGE",
     message: string,
   ) {
     super(message);
@@ -147,45 +163,67 @@ function isReportCodeCollision(error: unknown) {
     && /UNIQUE constraint failed: app_bug_reports\.report_code/.test(error.message);
 }
 
-export function purgeExpiredBugReports(
+export async function purgeExpiredBugReports(
   database: NyxDatabase,
   now = new Date(),
   batchSize = 500,
+  mediaRoot?: string,
 ) {
   let removed = 0;
   for (;;) {
+    const reports = database.prepare(
+      `SELECT id FROM app_bug_reports
+       WHERE expires_at <= ?
+       ORDER BY expires_at
+       LIMIT ?`,
+    ).all(now.toISOString(), batchSize) as Array<{ id: string }>;
+    if (reports.length === 0) return removed;
+    const placeholders = reports.map(() => "?").join(", ");
+    const mediaIds = (database.prepare(
+      `SELECT DISTINCT media_id AS mediaId
+       FROM app_bug_report_attachments
+       WHERE bug_report_id IN (${placeholders})`,
+    ).all(...reports.map((report) => report.id)) as Array<{ mediaId: string }>)
+      .map((row) => row.mediaId);
     const result = database.prepare(
-      `DELETE FROM app_bug_reports
-       WHERE id IN (
-         SELECT id FROM app_bug_reports
-         WHERE expires_at <= ?
-         ORDER BY expires_at
-         LIMIT ?
-       )`,
-    ).run(now.toISOString(), batchSize);
+      `DELETE FROM app_bug_reports WHERE id IN (${placeholders})`,
+    ).run(...reports.map((report) => report.id));
     removed += result.changes;
-    if (result.changes < batchSize) return removed;
+    try {
+      await removeUnreferencedDiagnosticMedia(database, mediaIds, mediaRoot);
+    } catch (error) {
+      console.warn("[bug-report-retention-media-cleanup-failed]", error);
+    }
+    if (reports.length < batchSize) return removed;
   }
 }
 
-export function createAppBugReport(
+export async function createAppBugReport(
   database: NyxDatabase,
   input: {
     workspaceId: string;
     documentId: string | null;
     reporterUserId: string;
     report: AppBugReportRequest;
+    attachmentMediaIds?: string[];
   },
   now = new Date(),
 ) {
-  purgeExpiredBugReports(database, now);
+  await purgeExpiredBugReports(database, now);
+  const attachmentMediaIds = [...new Set(input.attachmentMediaIds ?? [])];
+  if (attachmentMediaIds.length > MAX_BUG_REPORT_ATTACHMENTS) {
+    throw new BugReportError("INVALID_INPUT", "Too many bug report attachments.");
+  }
+  if (attachmentMediaIds.length > 0 && input.report.trigger !== "manual") {
+    throw new BugReportError("INVALID_INPUT", "Automatic reports cannot include attachments.");
+  }
   const replay = existingReport(
     database,
     input.workspaceId,
     input.reporterUserId,
     input.report.clientReportId,
   );
-  if (replay) return replay;
+  if (replay) return { ...replay, createdNew: false };
 
   const createdAt = now.toISOString();
   const expiresAt = new Date(
@@ -226,6 +264,7 @@ export function createAppBugReport(
         occurrenceCount: recent.occurrenceCount + 1,
         expiresAt,
         deduplicated: true,
+        createdNew: false,
       } satisfies BugReportRow;
     }
   }
@@ -252,36 +291,56 @@ export function createAppBugReport(
     const id = randomUUID();
     const code = reportCode(now);
     try {
-      database.prepare(
-        `INSERT INTO app_bug_reports
-         (id, report_code, client_report_id, workspace_id, document_id, reporter_user_id,
-          schema_version, trigger, category, category_source, detector, reason_code,
-          captured_at, description, app_version, source_revision, fingerprint,
-          occurrence_count, first_seen_at, last_seen_at, payload_json, created_at, expires_at)
-         VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?)`,
-      ).run(
-        id,
-        code,
-        input.report.clientReportId,
-        input.workspaceId,
-        input.documentId,
-        input.reporterUserId,
-        trigger,
-        category,
-        categorySource,
-        detector ?? null,
-        reasonCode,
-        capturedAt,
-        description || null,
-        packageJson.version,
-        sourceRevision.slice(0, 120),
-        fingerprint,
-        createdAt,
-        createdAt,
-        payloadJson,
-        createdAt,
-        expiresAt,
-      );
+      database.transaction(() => {
+        if (attachmentMediaIds.length > 0) {
+          const placeholders = attachmentMediaIds.map(() => "?").join(", ");
+          const validCount = Number((database.prepare(
+            `SELECT COUNT(*) AS count FROM media_assets
+             WHERE workspace_id = ? AND id IN (${placeholders})`,
+          ).get(input.workspaceId, ...attachmentMediaIds) as { count: number }).count);
+          if (validCount !== attachmentMediaIds.length) {
+            throw new BugReportError("INVALID_INPUT", "Invalid bug report attachment.");
+          }
+        }
+        database.prepare(
+          `INSERT INTO app_bug_reports
+           (id, report_code, client_report_id, workspace_id, document_id, reporter_user_id,
+            schema_version, trigger, category, category_source, detector, reason_code,
+            captured_at, description, app_version, source_revision, fingerprint,
+            occurrence_count, first_seen_at, last_seen_at, payload_json, created_at, expires_at)
+           VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?)`,
+        ).run(
+          id,
+          code,
+          input.report.clientReportId,
+          input.workspaceId,
+          input.documentId,
+          input.reporterUserId,
+          trigger,
+          category,
+          categorySource,
+          detector ?? null,
+          reasonCode,
+          capturedAt,
+          description || null,
+          packageJson.version,
+          sourceRevision.slice(0, 120),
+          fingerprint,
+          createdAt,
+          createdAt,
+          payloadJson,
+          createdAt,
+          expiresAt,
+        );
+        const attach = database.prepare(
+          `INSERT INTO app_bug_report_attachments
+           (id, bug_report_id, workspace_id, media_id, position, created_at)
+           VALUES (?, ?, ?, ?, ?, ?)`,
+        );
+        attachmentMediaIds.forEach((mediaId, position) => {
+          attach.run(randomUUID(), id, input.workspaceId, mediaId, position, createdAt);
+        });
+      })();
       return {
         id,
         reportCode: code,
@@ -294,6 +353,7 @@ export function createAppBugReport(
         createdAt,
         expiresAt,
         occurrenceCount: 1,
+        createdNew: true,
       } satisfies BugReportRow;
     } catch (error) {
       const concurrentReplay = existingReport(
@@ -302,7 +362,7 @@ export function createAppBugReport(
         input.reporterUserId,
         input.report.clientReportId,
       );
-      if (concurrentReplay) return concurrentReplay;
+      if (concurrentReplay) return { ...concurrentReplay, createdNew: false };
       if (!isReportCodeCollision(error) || attempt === 4) throw error;
     }
   }
@@ -339,8 +399,23 @@ export function getAppBugReportByCode(
   }) | undefined;
   if (!row) return null;
   const { payloadJson, ...report } = row;
+  const attachments = database.prepare(
+    `SELECT attachment.id, attachment.media_id AS mediaId,
+            media.mime_type AS mimeType, media.byte_size AS byteSize,
+            media.original_filename AS originalFilename,
+            media.storage_key AS storageKey
+     FROM app_bug_report_attachments attachment
+     JOIN media_assets media ON media.id = attachment.media_id
+     WHERE attachment.bug_report_id = ?
+     ORDER BY attachment.position`,
+  ).all(row.id) as Array<Omit<AppBugReportAttachment, "url">>;
   return {
     ...report,
     payload: JSON.parse(payloadJson) as AppBugReport["payload"],
+    attachments: attachments.map((attachment) => ({
+      ...attachment,
+      byteSize: Number(attachment.byteSize),
+      url: `/api/bug-reports/${report.reportCode}/attachments/${attachment.id}`,
+    })),
   };
 }

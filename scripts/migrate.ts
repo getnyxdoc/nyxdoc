@@ -33,7 +33,7 @@ async function migrate() {
   const authPending = authMigrations.toBeCreated.length + authMigrations.toBeAdded.length > 0;
   if (!authPending && appPlan.pending.length === 0) {
     runAppMigrations(sqlite, { sourceRevision: process.env.NYXDOC_SOURCE_REVISION });
-    purgeExpiredBugReports(sqlite);
+    await purgeExpiredBugReports(sqlite);
     assertDatabaseIntegrity(sqlite);
     console.log("Nyxdoc database is up to date; no backup generation was required.");
     return;
@@ -82,7 +82,7 @@ async function migrate() {
     const liveAfter = captureDatabaseFingerprint(sqlite, liveBefore);
     assertDatabaseFingerprintEqual(liveBefore, liveAfter);
     assertDatabaseIntegrity(sqlite);
-    purgeExpiredBugReports(sqlite);
+    await purgeExpiredBugReports(sqlite);
     await writeFile(receiptPath, `${JSON.stringify({
       format: "nyxdoc-migration-receipt/v1",
       outcome: "succeeded",

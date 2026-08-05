@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -8,6 +8,7 @@ import {
   MAX_MEDIA_BYTES,
   MediaServiceError,
   readMediaAsset,
+  removeUnreferencedDiagnosticMedia,
   storeMediaAsset,
 } from "@/lib/media/service";
 import { createTestDatabase, createTestUser } from "@/test/fixture";
@@ -64,6 +65,8 @@ describe("workspace media storage", () => {
     expect(media).toMatchObject({
       mimeType: "image/png",
       originalFilename: "clipboard-shot.png",
+      purpose: "content",
+      createdNew: true,
       url: `/api/media/${media.id}`,
     });
     expect(media.url).not.toContain("base64");
@@ -73,6 +76,24 @@ describe("workspace media storage", () => {
         .prepare("SELECT uploaded_by_user_id, byte_size FROM media_assets WHERE id = ?")
         .get(media.id),
     ).toEqual({ uploaded_by_user_id: user.id, byte_size: PNG_BYTES.length });
+  });
+
+  it("removes unreferenced diagnostic images from the database and filesystem", async () => {
+    const { database, mediaRoot, user, workspace } = fixture();
+    const media = await storeMediaAsset(database, {
+      bytes: PNG_BYTES,
+      originalFilename: "bug.png",
+      purpose: "diagnostic",
+      userId: user.id,
+      workspaceId: workspace.id,
+    }, mediaRoot);
+
+    expect(existsSync(path.join(mediaRoot, media.storageKey))).toBe(true);
+    await expect(removeUnreferencedDiagnosticMedia(database, [media.id], mediaRoot))
+      .resolves.toEqual({ removed: 1, failedStorageKeys: [] });
+    expect(database.prepare("SELECT id FROM media_assets WHERE id = ?").get(media.id))
+      .toBeUndefined();
+    expect(existsSync(path.join(mediaRoot, media.storageKey))).toBe(false);
   });
 
   it("deduplicates identical images per workspace and repairs a missing file", async () => {

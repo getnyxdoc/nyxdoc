@@ -138,6 +138,7 @@ describe("application migration safety", () => {
       "0039_agent_access_grants_and_bindings",
       "0040_media_upload_ticket_binding_guards",
       "0041_document_tree_grants_fail_closed",
+      "0042_bug_report_image_attachments",
     ]);
     expect(after).toEqual(before);
     expect(database.prepare("SELECT COUNT(*) AS count FROM documents").get()).toEqual({ count: 1 });
@@ -176,6 +177,9 @@ describe("application migration safety", () => {
     ).get()).toEqual({ count: 0 });
     expect(database.prepare(
       "SELECT COUNT(*) AS count FROM app_bug_reports",
+    ).get()).toEqual({ count: 0 });
+    expect(database.prepare(
+      "SELECT COUNT(*) AS count FROM app_bug_report_attachments",
     ).get()).toEqual({ count: 0 });
     expect(database.prepare(
       "SELECT COUNT(*) AS count FROM user_workspace_navigation_preferences",
@@ -373,7 +377,10 @@ describe("application migration safety", () => {
     });
 
     expect(runAppMigrations(database, { sourceRevision: "document-tree-fail-closed-test" }).appliedIds)
-      .toEqual(["0041_document_tree_grants_fail_closed"]);
+      .toEqual([
+        "0041_document_tree_grants_fail_closed",
+        "0042_bug_report_image_attachments",
+      ]);
     expect(database.prepare(
       "SELECT status, scope_mode, root_document_id, revoked_at FROM workspace_agents WHERE id = ?",
     ).get(created.summary.agentId)).toEqual({

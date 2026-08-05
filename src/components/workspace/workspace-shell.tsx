@@ -1,5 +1,6 @@
 "use client";
 
+import Image from "next/image";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import {
@@ -30,6 +31,7 @@ import {
   FileText,
   FolderTree,
   History,
+  ImagePlus,
   PencilLine,
   RotateCcw,
   Save,
@@ -78,6 +80,9 @@ import {
   suggestBugReportCategory,
 } from "@/lib/diagnostics/app-trace";
 import {
+  BUG_REPORT_ATTACHMENT_MIME_TYPES,
+  MAX_BUG_REPORT_ATTACHMENT_BYTES,
+  MAX_BUG_REPORT_ATTACHMENTS,
   diagnosticCountBucket,
   sanitizeEditorTrace,
   type AppBugReportRequest,
@@ -378,6 +383,11 @@ type BugReportDialogState = {
   snapshot: AppBugReportRequest["snapshot"];
   events: AppBugTraceEvent[];
   editorTrace: EditorBugTraceEvent[];
+  attachments: Array<{
+    id: string;
+    file: File;
+    previewUrl: string;
+  }>;
   status: "editing" | "submitting" | "success" | "error";
   code?: string;
   error?: string;
@@ -1901,8 +1911,63 @@ export function WorkspaceShell({ view }: { view: WorkspaceView }) {
       snapshot: currentBugSnapshot(),
       events,
       editorTrace,
+      attachments: [],
       status: "editing",
       copied: false,
+    });
+  }
+
+  function closeBugReport() {
+    setBugReportDialog((current) => {
+      current?.attachments.forEach((attachment) => URL.revokeObjectURL(attachment.previewUrl));
+      return null;
+    });
+  }
+
+  function addBugReportAttachments(files: FileList | null) {
+    const selected = Array.from(files ?? []);
+    if (selected.length === 0) return;
+    setBugReportDialog((current) => {
+      if (!current || current.status === "submitting" || current.status === "success") {
+        return current;
+      }
+      const available = MAX_BUG_REPORT_ATTACHMENTS - current.attachments.length;
+      if (selected.length > available) {
+        return { ...current, error: copy.bugAttachmentTooMany };
+      }
+      if (selected.some((file) => file.size > MAX_BUG_REPORT_ATTACHMENT_BYTES)) {
+        return { ...current, error: copy.bugAttachmentTooLarge };
+      }
+      if (selected.some((file) => !BUG_REPORT_ATTACHMENT_MIME_TYPES.includes(
+        file.type as (typeof BUG_REPORT_ATTACHMENT_MIME_TYPES)[number],
+      ))) {
+        return { ...current, error: copy.bugAttachmentUnsupported };
+      }
+      return {
+        ...current,
+        error: undefined,
+        attachments: [
+          ...current.attachments,
+          ...selected.map((file) => ({
+            id: globalThis.crypto.randomUUID(),
+            file,
+            previewUrl: URL.createObjectURL(file),
+          })),
+        ],
+      };
+    });
+  }
+
+  function removeBugReportAttachment(id: string) {
+    setBugReportDialog((current) => {
+      if (!current || current.status === "submitting") return current;
+      const removed = current.attachments.find((attachment) => attachment.id === id);
+      if (removed) URL.revokeObjectURL(removed.previewUrl);
+      return {
+        ...current,
+        error: undefined,
+        attachments: current.attachments.filter((attachment) => attachment.id !== id),
+      };
     });
   }
 
@@ -1936,11 +2001,23 @@ export function WorkspaceShell({ view }: { view: WorkspaceView }) {
         : {}),
     } satisfies AppBugReportRequest;
     try {
+      const requestInit: RequestInit = frozen.attachments.length > 0
+        ? (() => {
+            const form = new FormData();
+            form.set("report", JSON.stringify(report));
+            frozen.attachments.forEach((attachment) => {
+              form.append("attachment", attachment.file, attachment.file.name);
+            });
+            return { method: "POST", body: form, cache: "no-store" };
+          })()
+        : {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify(report),
+            cache: "no-store",
+          };
       const response = await workspaceRequest("/api/bug-reports", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify(report),
-        cache: "no-store",
+        ...requestInit,
       });
       const body = await response.json().catch(() => ({})) as BugReportApiBody;
       if (!response.ok || !body.report?.code) {
@@ -2410,7 +2487,7 @@ export function WorkspaceShell({ view }: { view: WorkspaceView }) {
               event.target === event.currentTarget
               && bugReportDialog.status !== "submitting"
             ) {
-              setBugReportDialog(null);
+              closeBugReport();
             }
           }}
         >
@@ -2431,7 +2508,7 @@ export function WorkspaceShell({ view }: { view: WorkspaceView }) {
                 type="button"
                 aria-label={copy.close}
                 disabled={bugReportDialog.status === "submitting"}
-                onClick={() => setBugReportDialog(null)}
+                onClick={closeBugReport}
               >
                 <X size={18} />
               </button>
@@ -2502,6 +2579,53 @@ export function WorkspaceShell({ view }: { view: WorkspaceView }) {
                     {copy.bugSensitiveWarning}
                   </small>
                 </label>
+                <div className={styles.bugReportAttachments}>
+                  <div>
+                    <span>{copy.bugAttachmentsLabel} <em>{copy.optional}</em></span>
+                    <label className={styles.bugReportAttachmentButton}>
+                      <ImagePlus size={15} aria-hidden="true" />
+                      {copy.bugAttachmentsAdd}
+                      <input
+                        type="file"
+                        accept={BUG_REPORT_ATTACHMENT_MIME_TYPES.join(",")}
+                        multiple
+                        disabled={
+                          bugReportDialog.status === "submitting"
+                          || bugReportDialog.attachments.length >= MAX_BUG_REPORT_ATTACHMENTS
+                        }
+                        onChange={(event) => {
+                          addBugReportAttachments(event.target.files);
+                          event.target.value = "";
+                        }}
+                      />
+                    </label>
+                  </div>
+                  <small>{copy.bugAttachmentsDescription}</small>
+                  {bugReportDialog.attachments.length > 0 && (
+                    <div className={styles.bugReportAttachmentGrid}>
+                      {bugReportDialog.attachments.map((attachment) => (
+                        <article key={attachment.id}>
+                          <Image
+                            src={attachment.previewUrl}
+                            alt={attachment.file.name}
+                            width={120}
+                            height={80}
+                            unoptimized
+                          />
+                          <span title={attachment.file.name}>{attachment.file.name}</span>
+                          <button
+                            type="button"
+                            aria-label={`${copy.bugAttachmentRemove}: ${attachment.file.name}`}
+                            disabled={bugReportDialog.status === "submitting"}
+                            onClick={() => removeBugReportAttachment(attachment.id)}
+                          >
+                            <X size={14} />
+                          </button>
+                        </article>
+                      ))}
+                    </div>
+                  )}
+                </div>
                 <div className={styles.bugReportPrivacy}>
                   <strong>{copy.bugPrivacyTitle}</strong>
                   <p>{copy.bugPrivacyDescription}</p>
@@ -2519,7 +2643,7 @@ export function WorkspaceShell({ view }: { view: WorkspaceView }) {
                 type="button"
                 className={styles.dialogCancelButton}
                 disabled={bugReportDialog.status === "submitting"}
-                onClick={() => setBugReportDialog(null)}
+                onClick={closeBugReport}
               >
                 {bugReportDialog.status === "success" ? copy.close : copy.cancel}
               </button>

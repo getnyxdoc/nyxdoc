@@ -30,10 +30,13 @@ type MediaAssetRow = {
   id: string;
   mime_type: MediaAsset["mimeType"];
   original_filename: string | null;
+  purpose: MediaAssetPurpose;
   sha256: string;
   storage_key: string;
   workspace_id: string;
 };
+
+export type MediaAssetPurpose = "content" | "diagnostic";
 
 export type MediaAsset = {
   byteSize: number;
@@ -41,10 +44,15 @@ export type MediaAsset = {
   id: string;
   mimeType: SupportedImage["mimeType"];
   originalFilename: string | null;
+  purpose: MediaAssetPurpose;
   sha256: string;
   storageKey: string;
   url: string;
   workspaceId: string;
+};
+
+export type StoredMediaAsset = MediaAsset & {
+  createdNew: boolean;
 };
 
 export class MediaServiceError extends Error {
@@ -139,6 +147,7 @@ function assetFromRow(row: MediaAssetRow): MediaAsset {
     mimeType: row.mime_type,
     byteSize: Number(row.byte_size),
     originalFilename: row.original_filename,
+    purpose: row.purpose,
     createdAt: row.created_at,
     url: `/api/media/${row.id}`,
   };
@@ -158,7 +167,7 @@ function findAssetByHash(database: NyxDatabase, workspaceId: string, sha256: str
   return database
     .prepare(
       `SELECT id, workspace_id, storage_key, sha256, mime_type, byte_size,
-              original_filename, created_at
+              original_filename, purpose, created_at
        FROM media_assets
        WHERE workspace_id = ? AND sha256 = ?`,
     )
@@ -193,12 +202,13 @@ export async function storeMediaAsset(
     expectedByteSize?: number;
     expectedMimeType?: SupportedImageMimeType;
     expectedSha256?: string;
+    purpose?: MediaAssetPurpose;
     tokenId?: string;
     userId: string;
     workspaceId: string;
   },
   mediaRoot = getMediaRoot(),
-) {
+): Promise<StoredMediaAsset> {
   const bytes = Buffer.from(
     input.bytes instanceof ArrayBuffer
       ? input.bytes
@@ -233,7 +243,7 @@ export async function storeMediaAsset(
   const existing = findAssetByHash(database, input.workspaceId, sha256);
   if (existing) {
     await ensureStoredFile(mediaRoot, existing, bytes);
-    return assetFromRow(existing);
+    return { ...assetFromRow(existing), createdNew: false };
   }
 
   const id = randomUUID();
@@ -251,8 +261,8 @@ export async function storeMediaAsset(
         `INSERT INTO media_assets
          (id, workspace_id, storage_key, sha256, mime_type, byte_size,
           original_filename, uploaded_by_user_id, uploaded_by_token_id,
-          uploaded_by_credential_id, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          uploaded_by_credential_id, purpose, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         id,
@@ -265,6 +275,7 @@ export async function storeMediaAsset(
         input.userId,
         legacyTokenId,
         input.tokenId ?? null,
+        input.purpose ?? "content",
         createdAt,
       );
   } catch (error) {
@@ -272,7 +283,7 @@ export async function storeMediaAsset(
     const raced = findAssetByHash(database, input.workspaceId, sha256);
     if (raced) {
       await ensureStoredFile(mediaRoot, raced, bytes);
-      return assetFromRow(raced);
+      return { ...assetFromRow(raced), createdNew: false };
     }
     throw error;
   }
@@ -285,9 +296,11 @@ export async function storeMediaAsset(
     mimeType: image.mimeType,
     byteSize: bytes.length,
     originalFilename: normalizeFilename(input.originalFilename),
+    purpose: input.purpose ?? "content",
     createdAt,
     url: `/api/media/${id}`,
-  } satisfies MediaAsset;
+    createdNew: true,
+  } satisfies StoredMediaAsset;
 }
 
 export function getMediaAsset(
@@ -301,7 +314,7 @@ export function getMediaAsset(
   const row = database
     .prepare(
       `SELECT id, workspace_id, storage_key, sha256, mime_type, byte_size,
-              original_filename, created_at
+              original_filename, purpose, created_at
        FROM media_assets
        WHERE id = ? AND workspace_id = ?`,
     )
@@ -343,4 +356,80 @@ export async function removeMediaStorageKeys(
     }
   }
   return { removed, failed };
+}
+
+export async function removeUnreferencedDiagnosticMedia(
+  database: NyxDatabase,
+  mediaIds: string[],
+  mediaRoot = getMediaRoot(),
+) {
+  const uniqueIds = [...new Set(mediaIds)].filter((id) => MEDIA_ID_PATTERN.test(id));
+  if (uniqueIds.length === 0) return { removed: 0, failedStorageKeys: [] as string[] };
+
+  const placeholders = uniqueIds.map(() => "?").join(", ");
+  const candidates = database.prepare(
+    `SELECT media.id, media.storage_key AS storageKey
+     FROM media_assets media
+     WHERE media.id IN (${placeholders})
+       AND media.purpose = 'diagnostic'
+       AND NOT EXISTS (
+         SELECT 1 FROM app_bug_report_attachments attachment
+         WHERE attachment.media_id = media.id
+       )
+       AND NOT EXISTS (
+         SELECT 1 FROM document_media_bindings binding
+         WHERE binding.media_id = media.id
+       )
+       AND NOT EXISTS (
+         SELECT 1 FROM document_task_attachments attachment
+         WHERE attachment.media_id = media.id
+       )
+       AND NOT EXISTS (
+         SELECT 1 FROM agents agent WHERE agent.avatar_media_id = media.id
+       )
+       AND NOT EXISTS (
+         SELECT 1 FROM workspace_agents agent WHERE agent.avatar_media_id = media.id
+       )
+       AND NOT EXISTS (
+         SELECT 1 FROM user WHERE image = '/api/media/' || media.id
+       )
+       AND NOT EXISTS (
+         SELECT 1 FROM document_revisions revision
+         WHERE revision.actor_avatar_media_id = media.id
+       )
+       AND NOT EXISTS (
+         SELECT 1 FROM document_events event
+         WHERE event.actor_avatar_media_id = media.id
+       )
+       AND NOT EXISTS (
+         SELECT 1 FROM document_collaboration_states state
+         WHERE state.last_actor_avatar_media_id = media.id
+       )
+       AND NOT EXISTS (
+         SELECT 1 FROM document_draft_contributors contributor
+         WHERE contributor.actor_avatar_media_id = media.id
+       )
+       AND NOT EXISTS (
+         SELECT 1 FROM document_revision_contributors contributor
+         WHERE contributor.actor_avatar_media_id = media.id
+       )`,
+  ).all(...uniqueIds) as Array<{ id: string; storageKey: string }>;
+  if (candidates.length === 0) {
+    return { removed: 0, failedStorageKeys: [] as string[] };
+  }
+
+  database.transaction(() => {
+    const remove = database.prepare(
+      "DELETE FROM media_assets WHERE id = ? AND purpose = 'diagnostic'",
+    );
+    for (const candidate of candidates) remove.run(candidate.id);
+  })();
+  const storage = await removeMediaStorageKeys(
+    candidates.map((candidate) => candidate.storageKey),
+    mediaRoot,
+  );
+  return {
+    removed: candidates.length,
+    failedStorageKeys: storage.failed.map((entry) => entry.storageKey),
+  };
 }

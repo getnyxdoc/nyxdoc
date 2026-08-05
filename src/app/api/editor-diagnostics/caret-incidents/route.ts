@@ -102,7 +102,7 @@ export async function POST(request: Request) {
       events: [],
       editorTrace: sanitizeEditorTrace(input.trace),
     } satisfies AppBugReportRequest;
-    const incident = createAppBugReport(sqlite, {
+    const incident = await createAppBugReport(sqlite, {
       workspaceId: workspace.id,
       documentId: input.documentId,
       reporterUserId: session.user.id,

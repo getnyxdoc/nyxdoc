@@ -2681,6 +2681,63 @@ export const APP_MIGRATIONS: readonly AppMigration[] = [
       END;
     `,
   },
+  {
+    id: "0042_bug_report_image_attachments",
+    safety: "schema",
+    sql: `
+      ALTER TABLE media_assets
+        ADD COLUMN purpose TEXT NOT NULL DEFAULT 'content'
+        CHECK (purpose IN ('content', 'diagnostic'));
+
+      CREATE INDEX media_assets_purpose_created_idx
+        ON media_assets(purpose, created_at);
+
+      CREATE TABLE app_bug_report_attachments (
+        id TEXT PRIMARY KEY,
+        bug_report_id TEXT NOT NULL REFERENCES app_bug_reports(id) ON DELETE CASCADE,
+        workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+        media_id TEXT NOT NULL REFERENCES media_assets(id) ON DELETE CASCADE,
+        position INTEGER NOT NULL CHECK (position >= 0 AND position < 3),
+        created_at TEXT NOT NULL,
+        UNIQUE (bug_report_id, media_id),
+        UNIQUE (bug_report_id, position)
+      );
+
+      CREATE INDEX app_bug_report_attachments_report_idx
+        ON app_bug_report_attachments(bug_report_id, position);
+      CREATE INDEX app_bug_report_attachments_media_idx
+        ON app_bug_report_attachments(workspace_id, media_id, bug_report_id);
+
+      CREATE TRIGGER app_bug_report_attachment_boundary_insert
+      BEFORE INSERT ON app_bug_report_attachments
+      WHEN NOT EXISTS (
+        SELECT 1 FROM app_bug_reports report
+        WHERE report.id = NEW.bug_report_id
+          AND report.workspace_id = NEW.workspace_id
+          AND report.trigger = 'manual'
+      ) OR NOT EXISTS (
+        SELECT 1 FROM media_assets media
+        WHERE media.id = NEW.media_id
+          AND media.workspace_id = NEW.workspace_id
+      )
+      BEGIN SELECT RAISE(ABORT, 'bug report attachment must remain inside its manual report workspace'); END;
+
+      CREATE TRIGGER app_bug_report_attachment_boundary_update
+      BEFORE UPDATE OF bug_report_id, workspace_id, media_id
+      ON app_bug_report_attachments
+      WHEN NOT EXISTS (
+        SELECT 1 FROM app_bug_reports report
+        WHERE report.id = NEW.bug_report_id
+          AND report.workspace_id = NEW.workspace_id
+          AND report.trigger = 'manual'
+      ) OR NOT EXISTS (
+        SELECT 1 FROM media_assets media
+        WHERE media.id = NEW.media_id
+          AND media.workspace_id = NEW.workspace_id
+      )
+      BEGIN SELECT RAISE(ABORT, 'bug report attachment must remain inside its manual report workspace'); END;
+    `,
+  },
 ];
 
 export type AppMigrationPlan = {
