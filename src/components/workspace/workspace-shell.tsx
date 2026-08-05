@@ -60,7 +60,12 @@ import {
   CREATE_WORKSPACE_OPTION_VALUE,
   WorkspaceCreateDialog,
 } from "@/components/workspace/workspace-create-dialog";
-import type { DocumentRevisionSnapshot, DocumentSummary } from "@/lib/documents/types";
+import type {
+  DocumentRevisionSnapshot,
+  DocumentSummary,
+  DocumentTreeDropPosition,
+} from "@/lib/documents/types";
+import { reorderSiblingDocumentSummaries } from "@/lib/documents/tree-order";
 import {
   NYXDOC_MAX_DOCUMENT_TEXT_LENGTH,
   NYXDOC_MAX_TOP_LEVEL_BLOCKS,
@@ -104,6 +109,10 @@ type ApiBody = {
 
 type DocumentListApiBody = {
   documents?: DocumentSummary[];
+};
+
+type DocumentReorderApiBody = DocumentListApiBody & {
+  error?: string;
 };
 
 type CachedNavigationPreference = {
@@ -771,6 +780,46 @@ export function WorkspaceShell({ view }: { view: WorkspaceView }) {
       }
     }, 180);
   }, [bugReports, workspaceRequest]);
+
+  const reorderDocumentInTree = useCallback(async (
+    documentId: string,
+    targetDocumentId: string,
+    position: DocumentTreeDropPosition,
+  ) => {
+    const previousDocuments = documents;
+    const optimisticDocuments = reorderSiblingDocumentSummaries(
+      previousDocuments,
+      documentId,
+      targetDocumentId,
+      position,
+    );
+    if (optimisticDocuments === previousDocuments) return;
+    setDocuments(optimisticDocuments);
+
+    try {
+      const response = await workspaceRequest(
+        `/api/documents/${encodeURIComponent(documentId)}/reorder`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ targetDocumentId, position }),
+        },
+      );
+      const body = await response.json().catch(() => ({})) as DocumentReorderApiBody;
+      if (!response.ok) {
+        throw new Error(body.error || copy.documentReorderFailed);
+      }
+      if (Array.isArray(body.documents)) setDocuments(body.documents);
+      else refreshDocumentList();
+    } catch (error) {
+      setDocuments(previousDocuments);
+      throw new Error(
+        error instanceof Error && error.message
+          ? error.message
+          : copy.documentReorderFailed,
+      );
+    }
+  }, [copy.documentReorderFailed, documents, refreshDocumentList, workspaceRequest]);
 
   useEffect(() => () => {
     if (documentListRefreshTimerRef.current !== null) {
@@ -2169,6 +2218,9 @@ export function WorkspaceShell({ view }: { view: WorkspaceView }) {
             onDelete={view.permissions.canTrashDocuments
               ? (documentId) => openDocumentDialog("delete", documentId)
               : undefined}
+            onReorder={view.permissions.canManageDocumentStructure
+              ? reorderDocumentInTree
+              : undefined}
             onDiagnostic={bugReports.enabled ? recordTreeDiagnostic : undefined}
           />
           {view.permissions.canAccessWorkspaceFeatures && (
@@ -2764,6 +2816,9 @@ export function WorkspaceShell({ view }: { view: WorkspaceView }) {
                   navigationStateKey="editor"
                   onCreateChild={view.permissions.canCreateDocuments ? createFromEditor : undefined}
                   onNavigate={navigateFromEditor}
+                  onReorder={view.permissions.canManageDocumentStructure
+                    ? reorderDocumentInTree
+                    : undefined}
                   onDiagnostic={bugReports.enabled ? recordTreeDiagnostic : undefined}
                 />
               </aside>

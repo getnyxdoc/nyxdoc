@@ -66,6 +66,11 @@ export const agentUpdateDocumentSchema = updateDocumentSchema.and(z.object({
   requestId: requestIdSchema,
 }));
 
+export const reorderDocumentSchema = z.object({
+  targetDocumentId: z.string().uuid(),
+  position: z.enum(["before", "after"]),
+}).strict();
+
 const workingDocumentReplacementFields = {
   title: z.string().min(1).max(200).optional(),
   parentDocumentId: z.string().uuid().nullable().optional(),

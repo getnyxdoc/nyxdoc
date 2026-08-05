@@ -58,9 +58,14 @@
 .sideHeading button:hover { background: var(--mint-soft); }
 .pageTree { display: flex; min-height: 120px; flex: 1 1 auto; flex-direction: column; gap: 2px; overflow-y: auto; }
 .pageTreeBranch { min-width: 0; }
-.pageTreeRow { display: grid; min-height: 38px; padding: 2px 5px 2px 6px; align-items: center; grid-template-columns: 22px minmax(0, 1fr) 27px; border-radius: 9px; color: #687970; transition: background .14s ease, color .14s ease; }
+.pageTreeRow { position: relative; display: grid; min-height: 38px; padding: 2px 5px 2px 6px; align-items: center; grid-template-columns: 22px minmax(0, 1fr) 27px; border-radius: 9px; color: #687970; transition: background .14s ease, color .14s ease, opacity .14s ease, box-shadow .14s ease; }
 .pageTreeRowWithMenu { grid-template-columns: 22px minmax(0, 1fr) 25px 25px; }
 .pageTreeRow:hover { background: #f0f4f1; color: var(--ink); }
+.pageTreeRow[data-reorderable="true"] .pageTreeLink { cursor: grab; }
+.pageTreeRow[data-dragging="true"] { opacity: .42; }
+.pageTreeRow[data-dragging="true"] .pageTreeLink { cursor: grabbing; }
+.pageTreeRow[data-drop-position="before"] { box-shadow: inset 0 2px 0 var(--mint-strong); }
+.pageTreeRow[data-drop-position="after"] { box-shadow: inset 0 -2px 0 var(--mint-strong); }
 .pageTreeActive { background: var(--yellow-soft); color: var(--ink); }
 .pageTreeActive:hover { background: #fff3c5; }
 .pageTreeToggle, .pageTreeAdd, .pageTreeMore { display: grid; width: 24px; height: 24px; padding: 0; place-items: center; border: 0; border-radius: 6px; background: transparent; color: #87948e; cursor: pointer; }
@@ -77,6 +82,7 @@
 .pageTreeMenuDropdown button:hover { background: #f1f5f2; color: var(--ink); }
 .pageTreeMenuDropdown button.pageTreeMenuDanger { color: #a25547; }
 .pageTreeMenuDropdown button.pageTreeMenuDanger:hover { background: var(--coral-soft); color: #93483b; }
+.pageTreeError { margin: 6px 5px; padding: 8px 9px; border: 1px solid #efc3b9; border-radius: 8px; background: var(--coral-soft); color: #965444; font-size: 11px; line-height: 1.45; }
 .trashButton { display: flex; min-height: 38px; margin: 10px 4px 0; padding: 0 9px; align-items: center; gap: 8px; border: 0; border-radius: 9px; background: transparent; color: #7a8981; cursor: pointer; font-family: inherit; font-size: 12px; font-weight: 650; }
 .trashButton:hover { background: #f0f4f1; color: #566a60; }
 .trashButton span { flex: 1; text-align: left; }

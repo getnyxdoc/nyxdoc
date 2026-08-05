@@ -27,6 +27,8 @@ import {
   type DocumentRevisionSnapshot,
   type DocumentSearchResult,
   type DocumentSummary,
+  type DocumentTreeDropPosition,
+  type DocumentTreeReorderResult,
   type DocumentWorkflowStatus,
   type PatchDocumentInput,
   type TrashBatchSummary,
@@ -980,6 +982,106 @@ export function listDocuments(database: NyxDatabase, workspaceId: string): Docum
   for (const root of children.get(null) ?? []) visit(root);
   for (const document of documents.sort(compare)) visit(document);
   return ordered;
+}
+
+export function reorderSiblingDocument(
+  database: NyxDatabase,
+  workspaceId: string,
+  actor: DocumentActor,
+  documentId: string,
+  input: {
+    targetDocumentId: string;
+    position: DocumentTreeDropPosition;
+  },
+): DocumentTreeReorderResult {
+  if (documentId === input.targetDocumentId) {
+    throw new DocumentServiceError("INVALID_INPUT", "문서를 자기 자신을 기준으로 이동할 수 없습니다.");
+  }
+
+  return database.transaction(() => {
+    const selected = database
+      .prepare(
+        `SELECT id, parent_document_id, tree_order, current_revision_id
+         FROM documents
+         WHERE workspace_id = ? AND status = 'active' AND id IN (?, ?)`,
+      )
+      .all(workspaceId, documentId, input.targetDocumentId) as Array<{
+        id: string;
+        parent_document_id: string | null;
+        tree_order: number;
+        current_revision_id: string | null;
+      }>;
+    const source = selected.find((document) => document.id === documentId);
+    const target = selected.find((document) => document.id === input.targetDocumentId);
+    if (!source || !target) {
+      throw new DocumentServiceError("NOT_FOUND", "이동할 문서를 찾을 수 없습니다.");
+    }
+    if (source.parent_document_id !== target.parent_document_id) {
+      throw new DocumentServiceError(
+        "INVALID_INPUT",
+        "같은 상위 문서 아래에 있는 문서끼리만 순서를 바꿀 수 있습니다.",
+      );
+    }
+    if (!source.current_revision_id) {
+      throw new DocumentServiceError("INVALID_INPUT", "저장된 리비전이 없는 문서는 이동할 수 없습니다.");
+    }
+
+    const siblings = database
+      .prepare(
+        `SELECT id, tree_order
+         FROM documents
+         WHERE workspace_id = ? AND status = 'active' AND parent_document_id IS ?
+         ORDER BY tree_order ASC, created_at ASC, id ASC`,
+      )
+      .all(workspaceId, source.parent_document_id) as Array<{
+        id: string;
+        tree_order: number;
+      }>;
+    const previousOrder = siblings.map((document) => document.id);
+    const nextOrder = previousOrder.filter((id) => id !== documentId);
+    const targetIndex = nextOrder.indexOf(input.targetDocumentId);
+    if (targetIndex < 0) {
+      throw new DocumentServiceError("NOT_FOUND", "기준 문서를 찾을 수 없습니다.");
+    }
+    nextOrder.splice(targetIndex + (input.position === "after" ? 1 : 0), 0, documentId);
+
+    const unchanged = previousOrder.every((id, index) => nextOrder[index] === id);
+    if (unchanged) {
+      return {
+        documentId,
+        parentDocumentId: source.parent_document_id,
+        targetDocumentId: input.targetDocumentId,
+        position: input.position,
+        treeOrder: source.tree_order,
+        orderedDocumentIds: nextOrder,
+        eventCursor: null,
+        unchanged: true,
+      };
+    }
+
+    const updateOrder = database.prepare("UPDATE documents SET tree_order = ? WHERE id = ?");
+    nextOrder.forEach((id, index) => updateOrder.run((index + 1) * 100, id));
+    const eventCursor = insertEvent(database, {
+      workspaceId,
+      documentId,
+      revisionId: source.current_revision_id,
+      eventType: "updated",
+      actor,
+      summary: "문서 트리 순서를 변경했습니다.",
+      createdAt: new Date().toISOString(),
+    });
+
+    return {
+      documentId,
+      parentDocumentId: source.parent_document_id,
+      targetDocumentId: input.targetDocumentId,
+      position: input.position,
+      treeOrder: (nextOrder.indexOf(documentId) + 1) * 100,
+      orderedDocumentIds: nextOrder,
+      eventCursor,
+      unchanged: false,
+    };
+  }).immediate();
 }
 
 export type ListDocumentsQuery = {

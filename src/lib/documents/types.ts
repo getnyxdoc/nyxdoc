@@ -142,6 +142,19 @@ export type DocumentMutationResult = {
   normalization?: BlockIdNormalization;
 };
 
+export type DocumentTreeDropPosition = "before" | "after";
+
+export type DocumentTreeReorderResult = {
+  documentId: string;
+  parentDocumentId: string | null;
+  targetDocumentId: string;
+  position: DocumentTreeDropPosition;
+  treeOrder: number;
+  orderedDocumentIds: string[];
+  eventCursor: number | null;
+  unchanged: boolean;
+};
+
 export type DocumentDraftCas = {
   expectedGeneration: number;
   expectedDraftVersion: number;

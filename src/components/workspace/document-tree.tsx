@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import {
+  type DragEvent,
   useEffect,
   useLayoutEffect,
   useMemo,
@@ -12,7 +13,10 @@ import { ChevronDown, ChevronRight, Ellipsis, FileText, PencilLine, Plus, Trash2
 import { useI18n } from "@/lib/i18n/client";
 import { formatCopy } from "@/lib/i18n/copy";
 import { localeTag, type AppLocale } from "@/lib/i18n/locales";
-import type { DocumentSummary } from "@/lib/documents/types";
+import type {
+  DocumentSummary,
+  DocumentTreeDropPosition,
+} from "@/lib/documents/types";
 import styles from "./workspace.module.css";
 
 type DocumentTreeNode = DocumentSummary & {
@@ -49,6 +53,7 @@ export function DocumentTree({
   onNavigate,
   onRename,
   onDelete,
+  onReorder,
   onDiagnostic,
 }: {
   userId: string;
@@ -62,6 +67,11 @@ export function DocumentTree({
   onNavigate?: (documentId: string) => void;
   onRename?: (documentId: string) => void;
   onDelete?: (documentId: string) => void;
+  onReorder?: (
+    documentId: string,
+    targetDocumentId: string,
+    position: DocumentTreeDropPosition,
+  ) => Promise<void>;
   onDiagnostic?: (event: {
     action: "expand" | "collapse" | "navigate" | "active_revealed" | "storage_fallback";
   }) => void;
@@ -78,6 +88,8 @@ export function DocumentTree({
       tree: "Document tree",
       rename: "Rename document",
       delete: "Delete document",
+      dragToReorder: "Drag {title} to reorder it",
+      reorderFailed: "Could not change the document order.",
     },
     ko: {
       collapse: "{title} 접기",
@@ -89,6 +101,8 @@ export function DocumentTree({
       tree: "문서 트리",
       rename: "문서 이름 변경",
       delete: "문서 삭제",
+      dragToReorder: "{title} 문서를 드래그하여 순서 변경",
+      reorderFailed: "문서 순서를 변경하지 못했습니다.",
     },
     ja: {
       collapse: "{title}を折りたたむ",
@@ -100,10 +114,19 @@ export function DocumentTree({
       tree: "文書ツリー",
       rename: "文書名を変更",
       delete: "文書を削除",
+      dragToReorder: "{title}をドラッグして並べ替え",
+      reorderFailed: "文書の順序を変更できませんでした。",
     },
   }[locale];
   const tree = useMemo(() => buildTree(documents, locale), [documents, locale]);
   const [menu, setMenu] = useState<{ documentId: string; top: number; left: number } | null>(null);
+  const [draggingDocumentId, setDraggingDocumentId] = useState<string | null>(null);
+  const [dropTarget, setDropTarget] = useState<{
+    documentId: string;
+    position: DocumentTreeDropPosition;
+  } | null>(null);
+  const [reorderPending, setReorderPending] = useState(false);
+  const [reorderError, setReorderError] = useState("");
   const menuRef = useRef<HTMLDivElement>(null);
   const treeRef = useRef<HTMLElement>(null);
   const storageKey = navigationStateKey
@@ -111,6 +134,10 @@ export function DocumentTree({
     : null;
   const documentIds = useMemo(
     () => new Set(documents.map((document) => document.id)),
+    [documents],
+  );
+  const documentsById = useMemo(
+    () => new Map(documents.map((document) => [document.id, document])),
     [documents],
   );
   const expanded = useMemo(
@@ -195,6 +222,68 @@ export function DocumentTree({
     setMenu((current) => current?.documentId === documentId ? null : { documentId, top, left });
   }
 
+  function clearDragState() {
+    setDraggingDocumentId(null);
+    setDropTarget(null);
+  }
+
+  function startReorder(event: DragEvent<HTMLDivElement>, documentId: string) {
+    if (!onReorder || reorderPending) {
+      event.preventDefault();
+      return;
+    }
+    const target = event.target as Element;
+    if (target.closest("[data-document-tree-action]")) {
+      event.preventDefault();
+      return;
+    }
+    event.dataTransfer.effectAllowed = "move";
+    event.dataTransfer.setData("text/plain", documentId);
+    setDraggingDocumentId(documentId);
+    setDropTarget(null);
+    setReorderError("");
+  }
+
+  function updateDropTarget(event: DragEvent<HTMLDivElement>, targetDocumentId: string) {
+    if (!onReorder || !draggingDocumentId || draggingDocumentId === targetDocumentId) return;
+    const source = documentsById.get(draggingDocumentId);
+    const target = documentsById.get(targetDocumentId);
+    if (!source || !target || source.parentDocumentId !== target.parentDocumentId) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "move";
+    const rect = event.currentTarget.getBoundingClientRect();
+    const position: DocumentTreeDropPosition = event.clientY < rect.top + rect.height / 2
+      ? "before"
+      : "after";
+    setDropTarget((current) => current?.documentId === targetDocumentId && current.position === position
+      ? current
+      : { documentId: targetDocumentId, position });
+
+    const treeElement = treeRef.current;
+    if (!treeElement) return;
+    const treeRect = treeElement.getBoundingClientRect();
+    const edge = 36;
+    if (event.clientY < treeRect.top + edge) treeElement.scrollTop -= 18;
+    else if (event.clientY > treeRect.bottom - edge) treeElement.scrollTop += 18;
+  }
+
+  async function finishReorder(event: DragEvent<HTMLDivElement>, targetDocumentId: string) {
+    event.preventDefault();
+    const sourceDocumentId = draggingDocumentId;
+    const position = dropTarget?.documentId === targetDocumentId ? dropTarget.position : null;
+    clearDragState();
+    if (!onReorder || !sourceDocumentId || !position) return;
+    setReorderPending(true);
+    setReorderError("");
+    try {
+      await onReorder(sourceDocumentId, targetDocumentId, position);
+    } catch (error) {
+      setReorderError(error instanceof Error && error.message ? error.message : copy.reorderFailed);
+    } finally {
+      setReorderPending(false);
+    }
+  }
+
   function renderNode(node: DocumentTreeNode, depth: number) {
     const hasChildren = node.children.length > 0;
     const isExpanded = expanded.has(node.id);
@@ -204,12 +293,22 @@ export function DocumentTree({
         <div
           className={`${styles.pageTreeRow} ${onRename || onDelete ? styles.pageTreeRowWithMenu : ""} ${isActive ? styles.pageTreeActive : ""}`}
           data-active-document={isActive ? "true" : undefined}
+          data-reorderable={onReorder ? "true" : undefined}
+          data-dragging={draggingDocumentId === node.id ? "true" : undefined}
+          data-drop-position={dropTarget?.documentId === node.id ? dropTarget.position : undefined}
+          draggable={Boolean(onReorder) && !reorderPending}
+          aria-grabbed={onReorder ? draggingDocumentId === node.id : undefined}
+          onDragStart={(event) => startReorder(event, node.id)}
+          onDragOver={(event) => updateDropTarget(event, node.id)}
+          onDrop={(event) => void finishReorder(event, node.id)}
+          onDragEnd={clearDragState}
           style={{ paddingLeft: `${6 + depth * 15}px` }}
         >
           {hasChildren ? (
             <button
               type="button"
               className={styles.pageTreeToggle}
+              data-document-tree-action
               onClick={() => toggle(node.id)}
               aria-label={formatCopy(isExpanded ? copy.collapse : copy.expand, { title: node.title })}
               aria-expanded={isExpanded}
@@ -227,7 +326,7 @@ export function DocumentTree({
                 onNavigate(node.id);
               }}
               aria-current={isActive ? "page" : undefined}
-              title={node.title}
+              title={onReorder ? formatCopy(copy.dragToReorder, { title: node.title }) : node.title}
             >
               <FileText size={14} />
               <span>{node.title}</span>
@@ -237,7 +336,7 @@ export function DocumentTree({
               href={`/app?workspace=${encodeURIComponent(workspaceId)}&document=${encodeURIComponent(node.id)}`}
               className={styles.pageTreeLink}
               aria-current={isActive ? "page" : undefined}
-              title={node.title}
+              title={onReorder ? formatCopy(copy.dragToReorder, { title: node.title }) : node.title}
               onClick={() => {
                 rememberScrollPosition();
                 onDiagnostic?.({ action: "navigate" });
@@ -251,6 +350,7 @@ export function DocumentTree({
             <button
               type="button"
               className={styles.pageTreeAdd}
+              data-document-tree-action
               onClick={() => onCreateChild(node.id)}
               aria-label={formatCopy(copy.createChild, { title: node.title })}
               title={copy.createChildTitle}
@@ -263,6 +363,7 @@ export function DocumentTree({
               type="button"
               className={styles.pageTreeMore}
               data-document-menu-trigger
+              data-document-tree-action
               onClick={(event) => toggleMenu(event, node.id)}
               aria-label={formatCopy(copy.menu, { title: node.title })}
               aria-expanded={menu?.documentId === node.id}
@@ -290,6 +391,7 @@ export function DocumentTree({
         onScroll={rememberScrollPosition}
       >
         {tree.map((node) => renderNode(node, 0))}
+        {reorderError && <p className={styles.pageTreeError} role="alert">{reorderError}</p>}
       </nav>
       {menu && (onRename || onDelete) && (
         <div

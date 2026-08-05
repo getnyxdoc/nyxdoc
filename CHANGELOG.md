@@ -2,6 +2,15 @@
 
 All notable user-facing changes are recorded here.
 
+## 0.25.10 - 2026-08-05
+
+- Added Confluence-style drag reordering for documents within the same parent,
+  with optimistic UI feedback and atomic persisted sibling order.
+- Keep document revisions unchanged when only navigation order changes, while
+  publishing a workspace change event so other open clients refresh the tree.
+- Reject cross-parent drag moves and require document-structure permission at
+  both the UI and API boundaries.
+
 ## 0.25.9 - 2026-08-04
 
 - Derive the MCP server version from package metadata so capability responses
