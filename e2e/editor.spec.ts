@@ -275,7 +275,7 @@ test("creates, edits, and removes links without changing their visible text", as
   await expect.poll(async () => JSON.stringify(await editorJson(page))).not.toContain('"type":"a"');
 });
 
-test("inserts friendly internal document links with stable document identity", async ({ page }) => {
+test("inserts friendly internal document links with stable document identity", async ({ context, page }) => {
   const editor = page.getByRole("textbox", { name: "문서 본문" });
   const intro = editor.locator('p[data-slate-node="element"]').nth(0);
   await selectFromStart(page, intro, 4);
@@ -292,6 +292,20 @@ test("inserts friendly internal document links with stable document identity", a
     "href",
     "/app?document=internal-guide-e2e&workspace=workspace-e2e",
   );
+  await expect(reference).toHaveAttribute("target", "_blank");
+  await context.route(
+    "**/app?document=internal-guide-e2e&workspace=workspace-e2e",
+    async (route) => route.fulfill({
+      status: 200,
+      contentType: "text/html",
+      body: "<!doctype html><title>Internal document fixture</title>",
+    }),
+  );
+  const popupPromise = page.waitForEvent("popup");
+  await reference.click();
+  const popup = await popupPromise;
+  await expect(popup).toHaveURL(/\/app\?document=internal-guide-e2e&workspace=workspace-e2e$/);
+  await popup.close();
   await expect.poll(async () => JSON.stringify(await editorJson(page))).toContain(
     '"type":"doc_ref","documentId":"internal-guide-e2e"',
   );

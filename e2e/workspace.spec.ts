@@ -37,8 +37,15 @@ const historicalRevision = {
   },
 };
 
-test("renders an agent-authored raw URL as the public page title in workspace readers and editors", async ({ page }) => {
+test("renders an agent-authored raw URL as the public page title and opens it from readers and editors", async ({ context, page }) => {
   let previewAvailable = true;
+  await context.route("https://learn.chatgpt.com/docs/build-skills", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "text/html",
+      body: "<!doctype html><title>Build skills fixture</title>",
+    });
+  });
   await page.route("**/api/link-preview", async (route) => {
     expect(route.request().headers()["x-nyxdoc-workspace-id"]).toBe("workspace-e2e");
     expect(route.request().postDataJSON()).toEqual({
@@ -71,6 +78,11 @@ test("renders an agent-authored raw URL as the public page title in workspace re
   await expect(
     titledLink.getByText("Build skills | ChatGPT Learn", { exact: true }),
   ).toBeVisible();
+  const readerPopupPromise = page.waitForEvent("popup");
+  await titledLink.click();
+  const readerPopup = await readerPopupPromise;
+  await expect(readerPopup).toHaveURL("https://learn.chatgpt.com/docs/build-skills");
+  await readerPopup.close();
 
   previewAvailable = false;
   await page.reload();
@@ -88,6 +100,20 @@ test("renders an agent-authored raw URL as the public page title in workspace re
     "https://learn.chatgpt.com/docs/build-skills",
   );
   await expect(editorLink).toHaveAttribute("target", "_blank");
+  const editorPopupPromise = page.waitForEvent("popup");
+  await editorLink.click();
+  const editorPopup = await editorPopupPromise;
+  await expect(editorPopup).toHaveURL("https://learn.chatgpt.com/docs/build-skills");
+  await editorPopup.close();
+
+  const modifiedPopupPromise = page.waitForEvent("popup");
+  await editorLink.click({
+    modifiers: [process.platform === "darwin" ? "Meta" : "Control"],
+  });
+  const modifiedPopup = await modifiedPopupPromise;
+  await expect(modifiedPopup).toHaveURL("https://learn.chatgpt.com/docs/build-skills");
+  await modifiedPopup.close();
+
   const editor = page.locator('[data-slate-editor="true"]');
   await editor.click();
   await page.keyboard.press("ArrowRight");

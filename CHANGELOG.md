@@ -2,6 +2,14 @@
 
 All notable user-facing changes are recorded here.
 
+## 0.25.11 - 2026-08-05
+
+- Open external and internal document links in a new tab from both read and
+  edit modes, including normal clicks and Ctrl/Command-clicks inside the rich
+  editor.
+- Added real browser regression coverage for link activation instead of only
+  checking rendered anchor attributes.
+
 ## 0.25.10 - 2026-08-05
 
 - Added Confluence-style drag reordering for documents within the same parent,

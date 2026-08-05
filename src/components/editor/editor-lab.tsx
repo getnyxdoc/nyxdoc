@@ -11,6 +11,7 @@ import {
   type ClipboardEvent as ReactClipboardEvent,
   type FormEvent,
   type KeyboardEvent as ReactKeyboardEvent,
+  type MouseEvent as ReactMouseEvent,
   type ReactNode,
 } from "react";
 import { createPortal } from "react-dom";
@@ -371,6 +372,16 @@ function FlatBlockquoteElement(props: PlateElementProps<TElement>) {
   return <PlateElement {...props} as="blockquote" />;
 }
 
+function openLinkInNewTab(
+  event: ReactMouseEvent<HTMLAnchorElement>,
+  href: string | undefined,
+) {
+  if (!href) return;
+  event.preventDefault();
+  event.stopPropagation();
+  window.open(href, "_blank", "noopener,noreferrer");
+}
+
 function NyxdocLinkElement(props: PlateElementProps<TLinkElement>) {
   const { props: linkProps } = useLink({ element: props.element });
   const element = props.element as NyxdocExternalLinkElement;
@@ -390,6 +401,7 @@ function NyxdocLinkElement(props: PlateElementProps<TLinkElement>) {
         ...linkProps,
         rel: "noopener noreferrer",
         target: "_blank",
+        onClick: (event) => openLinkInNewTab(event, linkProps.href),
         ...(resolvedTitle
           ? {
               "aria-label": resolvedTitle,
@@ -430,13 +442,17 @@ function DocumentReferenceElement(props: PlateElementProps<TElement>) {
   }
   const query = new URLSearchParams({ document: element.documentId });
   if (linkContext.workspaceId) query.set("workspace", linkContext.workspaceId);
+  const href = `/app?${query.toString()}`;
   return (
     <PlateElement
       {...props}
       as="a"
       attributes={{
         ...props.attributes,
-        href: `/app?${query.toString()}`,
+        href,
+        rel: "noopener noreferrer",
+        target: "_blank",
+        onClick: (event) => openLinkInNewTab(event, href),
         "data-nyxdoc-document-id": element.documentId,
       }}
       className={styles.documentReference}
