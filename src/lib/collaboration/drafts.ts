@@ -545,6 +545,107 @@ export function persistCollaborationUpdate(
   return loadCollaborationStateByRoom(database, roomName);
 }
 
+/**
+ * Advances a shared draft onto a canonical metadata-only revision without
+ * committing the draft body. The visible working snapshot is supplied by the
+ * caller with the same metadata change already applied, while the committed
+ * snapshot is rebuilt from the new canonical revision. Draft contributors and
+ * committedDraftVersion deliberately remain unchanged because their body edits
+ * are still pending an explicit save.
+ */
+export function rebaseCollaborationStateAfterCanonicalMetadataCommit(
+  database: NyxDatabase,
+  roomName: string,
+  workingYDoc: Y.Doc,
+  canonical: DocumentDetail,
+  actor: DraftActor,
+  cas: DocumentDraftCas,
+) {
+  const room = parseCollaborationRoomName(roomName);
+  requireActiveCollaborationDocument(database, room.workspaceId, room.documentId);
+  if (
+    canonical.id !== room.documentId
+    || canonical.workspaceId !== room.workspaceId
+  ) {
+    throw new DocumentServiceError(
+      "INVALID_INPUT",
+      "공유 초안과 정본 문서가 일치하지 않습니다.",
+    );
+  }
+
+  repairCollaborationYDocNodeIds(workingYDoc);
+  const working = collaborationDocumentFromYDoc(workingYDoc);
+  if (working.parentDocumentId !== canonical.parentDocumentId) {
+    throw new DocumentServiceError(
+      "INVALID_INPUT",
+      "공유 초안과 정본의 이동 위치가 일치하지 않습니다.",
+    );
+  }
+  const workingState = Buffer.from(Y.encodeStateAsUpdate(workingYDoc));
+  const committedState = Buffer.from(Y.encodeStateAsUpdate(createCollaborationYDoc({
+    ...metadataFromDocument(canonical),
+    content: canonical.content,
+  })));
+  const current = collaborationStateRow(database, room.workspaceId, room.documentId);
+  if (
+    !current
+    || Number(current.generation) !== cas.expectedGeneration
+    || Number(current.draft_version) !== cas.expectedDraftVersion
+    || Number(current.base_revision_number) !== cas.expectedBaseRevision
+  ) {
+    throw new DocumentServiceError(
+      "DRAFT_VERSION_CONFLICT",
+      "공유 초안이 이미 변경되거나 다른 세대로 교체되었습니다. 최신 작업본을 다시 읽어주세요.",
+      {
+        expectedGeneration: cas.expectedGeneration,
+        currentGeneration: current ? Number(current.generation) : null,
+        expectedDraftVersion: cas.expectedDraftVersion,
+        currentDraftVersion: current ? Number(current.draft_version) : null,
+        expectedBaseRevision: cas.expectedBaseRevision,
+        currentBaseRevision: current ? Number(current.base_revision_number) : null,
+      },
+    );
+  }
+
+  const now = new Date().toISOString();
+  const nextDraftVersion = Number(current.draft_version)
+    + (current.yjs_state.equals(workingState) ? 0 : 1);
+  const updated = database.prepare(
+    `UPDATE document_collaboration_states
+     SET yjs_state = ?, committed_yjs_state = ?,
+         base_revision_id = ?, base_revision_number = ?,
+         draft_version = ?, updated_at = ?, committed_at = ?,
+         last_actor_type = ?, last_actor_principal_id = ?, last_actor_label = ?,
+         last_actor_avatar_media_id = ?
+     WHERE workspace_id = ? AND document_id = ? AND generation = ?
+       AND draft_version = ? AND base_revision_number = ?`,
+  ).run(
+    workingState,
+    committedState,
+    canonical.revisionId,
+    canonical.revisionNumber,
+    nextDraftVersion,
+    now,
+    now,
+    actor.type,
+    actor.principalId ?? actor.userId ?? null,
+    actor.label,
+    actor.avatarMediaId ?? null,
+    room.workspaceId,
+    room.documentId,
+    cas.expectedGeneration,
+    cas.expectedDraftVersion,
+    cas.expectedBaseRevision,
+  );
+  if (updated.changes !== 1) {
+    throw new DocumentServiceError(
+      "DRAFT_VERSION_CONFLICT",
+      "공유 초안이 이미 변경되거나 다른 세대로 교체되었습니다. 최신 작업본을 다시 읽어주세요.",
+    );
+  }
+  return loadCollaborationStateByRoom(database, roomName);
+}
+
 export function workingDocumentFromYDoc(
   database: NyxDatabase,
   roomName: string,

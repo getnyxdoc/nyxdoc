@@ -22,6 +22,7 @@ import { createCollaborationCommands } from "@/lib/collaboration/commands";
 import type {
   ArchiveWorkingTreeRequest,
   CommitWorkingDocumentRequest,
+  MoveWorkingDocumentTreeRequest,
   PatchWorkingDocumentRequest,
   ReadWorkingDocumentRequest,
   ReplaceAndCommitWorkingDocumentRequest,
@@ -106,6 +107,8 @@ function internalRequestContext(value: unknown) {
     workspaceId: diagnosticIdentifier(input.workspaceId),
     documentId: diagnosticIdentifier(input.documentId),
     requestId: diagnosticIdentifier(input.requestId),
+    targetDocumentId: diagnosticIdentifier(input.targetDocumentId),
+    position: diagnosticIdentifier(input.position),
     expectedDraftVersion: Number.isInteger(input.expectedDraftVersion)
       ? input.expectedDraftVersion
       : undefined,
@@ -506,6 +509,39 @@ function parsePatchRequest(value: unknown): PatchWorkingDocumentRequest {
   };
 }
 
+function parseMoveWorkingDocumentTreeRequest(
+  value: unknown,
+): MoveWorkingDocumentTreeRequest {
+  const input = requireRecord(value);
+  const position = input.position === "before"
+    || input.position === "inside"
+    || input.position === "after"
+    ? input.position
+    : (() => {
+        throw new DocumentServiceError("INVALID_INPUT", "문서 이동 위치가 올바르지 않습니다.");
+      })();
+  return {
+    roomName: requireString(input.roomName, "roomName"),
+    actor: parseDraftActor(input.actor),
+    expectedGeneration: optionalInteger(input.expectedGeneration, "expectedGeneration")
+      ?? (() => {
+        throw new DocumentServiceError("INVALID_INPUT", "expectedGeneration 값이 필요합니다.");
+      })(),
+    expectedDraftVersion: optionalInteger(input.expectedDraftVersion, "expectedDraftVersion")
+      ?? (() => {
+        throw new DocumentServiceError("INVALID_INPUT", "expectedDraftVersion 값이 필요합니다.");
+      })(),
+    expectedBaseRevision: optionalInteger(input.expectedBaseRevision, "expectedBaseRevision")
+      ?? (() => {
+        throw new DocumentServiceError("INVALID_INPUT", "expectedBaseRevision 값이 필요합니다.");
+      })(),
+    requestId: requireString(input.requestId, "requestId"),
+    targetDocumentId: requireString(input.targetDocumentId, "targetDocumentId"),
+    position,
+    summary: typeof input.summary === "string" ? input.summary : undefined,
+  };
+}
+
 function parseCommitRequest(value: unknown): CommitWorkingDocumentRequest {
   const input = requireRecord(value);
   const synchronizationFence = input.synchronizationFence === undefined
@@ -721,6 +757,10 @@ async function handleInternalRequest(request: IncomingMessage, response: ServerR
         ? await collaborationCommands.replaceWorking(parseReplaceRequest(body))
         : path === "/internal/drafts/replace-and-commit"
           ? await collaborationCommands.replaceAndCommitWorking(parseReplaceAndCommitRequest(body))
+        : path === "/internal/drafts/move-tree"
+          ? await collaborationCommands.moveWorkingDocumentTree(
+              parseMoveWorkingDocumentTreeRequest(body),
+            )
         : path === "/internal/drafts/patch"
           ? await collaborationCommands.patchWorking(parsePatchRequest(body))
           : path === "/internal/drafts/commit"

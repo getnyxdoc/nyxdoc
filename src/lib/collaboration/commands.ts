@@ -10,6 +10,7 @@ import {
   persistCollaborationUpdate,
   persistCollaborationYDoc,
   prepareCollaborationIdempotency,
+  rebaseCollaborationStateAfterCanonicalMetadataCommit,
   recordCollaborationRequest,
   replaceWorkingDocument,
   replayCollaborationRequest,
@@ -25,6 +26,8 @@ import type {
   CommitWorkingDocumentRequest,
   CommitWorkingDocumentResponse,
   DraftMutationState,
+  MoveWorkingDocumentTreeRequest,
+  MoveWorkingDocumentTreeResponse,
   PatchWorkingDocumentRequest,
   ReadWorkingDocumentRequest,
   ReplaceAndCommitWorkingDocumentRequest,
@@ -38,6 +41,7 @@ import {
   archiveDocument,
   getDocument,
   getDocumentRevisionSnapshot,
+  reorderDocumentTree,
   requireDocumentMoveAuthorization,
   updateDocument,
 } from "@/lib/documents/service";
@@ -511,6 +515,131 @@ export function createCollaborationCommands(input: {
     return observeDraftMutation(response, response.workingDocument, false);
   }
 
+  async function moveWorkingDocumentTree(
+    request: MoveWorkingDocumentTreeRequest,
+  ): Promise<MoveWorkingDocumentTreeResponse> {
+    const state = loadCollaborationStateByRoom(database, request.roomName);
+    const idempotency = prepareCollaborationIdempotency({
+      workspaceId: state.workspaceId,
+      documentId: state.documentId,
+      actor: request.actor,
+      operation: "move_document_tree",
+      requestId: request.requestId,
+      payload: request,
+    });
+    const replayed = replayCollaborationRequest<MoveWorkingDocumentTreeResponse>(
+      database,
+      idempotency,
+    );
+    if (replayed) {
+      return provider.withDocument(request.roomName, (document) =>
+        observeDraftMutation(
+          replayed,
+          workingDocumentFromYDoc(database, request.roomName, document),
+          true,
+        ));
+    }
+
+    const response = await provider.withDocument(request.roomName, (document) => {
+      // Flush accepted live edits before taking the structural move CAS. The
+      // move commits only canonical metadata; it never commits this draft body.
+      persistCollaborationYDoc(database, request.roomName, document);
+      const observed = workingDocumentFromYDoc(database, request.roomName, document);
+      assertDestructiveCas(observed, request);
+      assertCanonicalBase(observed);
+      const target = getDocument(database, observed.workspaceId, request.targetDocumentId);
+      const destinationParentDocumentId = request.position === "inside"
+        ? target.id
+        : target.parentDocumentId;
+      if (observed.parentDocumentId === destinationParentDocumentId) {
+        throw new DocumentServiceError(
+          "INVALID_INPUT",
+          "같은 상위 문서 안의 순서 변경에는 구조 초안 재배치가 필요하지 않습니다.",
+        );
+      }
+      requireDraftMoveAuthorization(observed, destinationParentDocumentId, request.actor);
+
+      const candidate = collaborationYDocFromState(Y.encodeStateAsUpdate(document));
+      replaceWorkingDocument(candidate, {
+        parentDocumentId: destinationParentDocumentId,
+      }, {
+        context: { actor: request.actor, recordedByEndpoint: true },
+      });
+
+      const moved = database.transaction(() => {
+        const before = workingDocumentFromYDoc(database, request.roomName, document);
+        assertDestructiveCas(before, request);
+        const lockedCanonical = assertCanonicalBase(before);
+        const lockedTarget = getDocument(
+          database,
+          before.workspaceId,
+          request.targetDocumentId,
+        );
+        const lockedParentDocumentId = request.position === "inside"
+          ? lockedTarget.id
+          : lockedTarget.parentDocumentId;
+        if (lockedParentDocumentId !== destinationParentDocumentId) {
+          throw new DocumentServiceError(
+            "REVISION_CONFLICT",
+            "이동 기준 문서의 위치가 바뀌었습니다. 최신 문서 트리를 다시 확인해주세요.",
+          );
+        }
+        requireDraftMoveAuthorization(before, lockedParentDocumentId, request.actor);
+
+        const canonicalMove = updateDocument(
+          database,
+          before.workspaceId,
+          documentActorFromDraftActor(request.actor),
+          before.documentId,
+          {
+            baseRevision: lockedCanonical.revisionNumber,
+            parentDocumentId: lockedParentDocumentId,
+            summary: request.summary,
+          },
+        );
+        rebaseCollaborationStateAfterCanonicalMetadataCommit(
+          database,
+          request.roomName,
+          candidate,
+          canonicalMove.document,
+          request.actor,
+          request,
+        );
+        const tree = reorderDocumentTree(
+          database,
+          before.workspaceId,
+          documentActorFromDraftActor(request.actor),
+          before.documentId,
+          {
+            targetDocumentId: request.targetDocumentId,
+            position: request.position,
+          },
+        );
+        const value: MoveWorkingDocumentTreeResponse = {
+          ...canonicalMove,
+          document: getDocument(database, before.workspaceId, before.documentId),
+          tree,
+          workingDocument: workingDocumentFromYDoc(
+            database,
+            request.roomName,
+            candidate,
+          ),
+        };
+        recordCollaborationRequest(database, idempotency, value);
+        return value;
+      }).immediate();
+
+      const candidateDelta = Y.encodeStateAsUpdate(candidate, Y.encodeStateVector(document));
+      Y.applyUpdate(document, candidateDelta, {
+        context: { actor: request.actor, recordedByEndpoint: true },
+      });
+      broadcastCanonicalCommit(document, moved, request.actor);
+      broadcastDraftStatus(provider, document, moved.workingDocument);
+      return moved;
+    });
+    return observeDraftMutation(response, response.workingDocument, false);
+  }
+
   async function patchWorking(
     request: PatchWorkingDocumentRequest,
   ): Promise<WorkingDocumentResponse> {
@@ -740,6 +869,7 @@ export function createCollaborationCommands(input: {
     readWorking,
     replaceWorking,
     replaceAndCommitWorking,
+    moveWorkingDocumentTree,
     patchWorking,
     commitWorking,
     resetWorking,

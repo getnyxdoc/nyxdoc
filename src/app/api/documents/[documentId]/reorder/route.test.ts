@@ -4,7 +4,7 @@ const mocks = vi.hoisted(() => ({
   requireWorkspaceSession: vi.fn(),
   requireHumanWorkspacePermission: vi.fn(),
   readWorkingDocument: vi.fn(),
-  replaceAndCommitWorkingDocumentThroughGateway: vi.fn(),
+  moveWorkingDocumentTreeThroughGateway: vi.fn(),
   humanDocumentActor: vi.fn(),
   getDocument: vi.fn(),
   reorderDocumentTree: vi.fn(),
@@ -20,7 +20,7 @@ vi.mock("@/lib/authz/permissions", () => ({
 }));
 vi.mock("@/lib/collaboration/gateway", () => ({
   readWorkingDocument: mocks.readWorkingDocument,
-  replaceAndCommitWorkingDocumentThroughGateway: mocks.replaceAndCommitWorkingDocumentThroughGateway,
+  moveWorkingDocumentTreeThroughGateway: mocks.moveWorkingDocumentTreeThroughGateway,
 }));
 vi.mock("@/lib/db/client", () => ({ sqlite: {} }));
 vi.mock("@/lib/documents/actors", () => ({
@@ -66,11 +66,24 @@ describe("document reorder route", () => {
     mocks.readWorkingDocument.mockResolvedValue({
       workingDocument: {
         roomName: "nyxdoc:workspace-1:document-1:g1",
+        generation: 1,
         draftVersion: 4,
+        baseRevisionNumber: 2,
         hasUncommittedChanges: false,
       },
     });
-    mocks.replaceAndCommitWorkingDocumentThroughGateway.mockResolvedValue({});
+    mocks.moveWorkingDocumentTreeThroughGateway.mockResolvedValue({
+      tree: {
+        documentId,
+        parentDocumentId: targetDocumentId,
+        targetDocumentId,
+        position: "inside",
+        treeOrder: 200,
+        orderedDocumentIds: ["existing-child", documentId],
+        eventCursor: 10,
+        unchanged: false,
+      },
+    });
     mocks.reorderDocumentTree.mockReturnValue({
       documentId,
       targetDocumentId,
@@ -135,27 +148,26 @@ describe("document reorder route", () => {
       "user-1",
       "documents.commit",
     );
-    expect(mocks.replaceAndCommitWorkingDocumentThroughGateway).toHaveBeenCalledWith(
+    expect(mocks.moveWorkingDocumentTreeThroughGateway).toHaveBeenCalledWith(
       expect.objectContaining({
         actor: expect.objectContaining({ source: "web", userId: "user-1" }),
+        expectedGeneration: 1,
         expectedDraftVersion: 4,
-        replacement: { parentDocumentId: targetDocumentId },
+        expectedBaseRevision: 2,
+        targetDocumentId,
+        position: "inside",
       }),
     );
-    expect(mocks.reorderDocumentTree).toHaveBeenCalledWith(
-      {},
-      "workspace-1",
-      expect.objectContaining({ source: "web", userId: "user-1" }),
-      documentId,
-      { targetDocumentId, position: "inside" },
-    );
+    expect(mocks.reorderDocumentTree).not.toHaveBeenCalled();
   });
 
-  it("refuses a cross-parent move while the shared draft has uncommitted changes", async () => {
+  it("preserves a dirty draft while delegating a cross-parent move", async () => {
     mocks.readWorkingDocument.mockResolvedValue({
       workingDocument: {
         roomName: "nyxdoc:workspace-1:document-1:g1",
+        generation: 3,
         draftVersion: 5,
+        baseRevisionNumber: 7,
         hasUncommittedChanges: true,
       },
     });
@@ -166,11 +178,18 @@ describe("document reorder route", () => {
       body: JSON.stringify({ targetDocumentId, position: "inside" }),
     }), { params: Promise.resolve({ documentId }) });
 
-    expect(response.status).toBe(500);
+    expect(response.status).toBe(200);
+    expect(mocks.moveWorkingDocumentTreeThroughGateway).toHaveBeenCalledWith(expect.objectContaining({
+      expectedGeneration: 3,
+      expectedDraftVersion: 5,
+      expectedBaseRevision: 7,
+      targetDocumentId,
+      position: "inside",
+    }));
     await expect(response.json()).resolves.toMatchObject({
-      error: expect.stringContaining("저장하지 않은 초안"),
+      documentId,
+      targetDocumentId,
     });
-    expect(mocks.replaceAndCommitWorkingDocumentThroughGateway).not.toHaveBeenCalled();
     expect(mocks.reorderDocumentTree).not.toHaveBeenCalled();
   });
 });

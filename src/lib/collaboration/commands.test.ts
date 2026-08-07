@@ -380,6 +380,255 @@ describe("collaboration command engine", () => {
     });
   });
 
+  it("moves a document tree atomically while preserving an uncommitted draft body", async () => {
+    const { database, workspace, actor, created, commands } = fixture();
+    const parent = createDocument(database, workspace.id, actor, {
+      title: "새 상위 문서",
+      content: parseNyxdocDocumentV2({
+        schemaVersion: 2,
+        blocks: [{ id: "parent-body", type: "p", children: [{ text: "상위 문서" }] }],
+      }),
+    });
+    const canonicalBefore = getDocument(database, workspace.id, created.document.id);
+    const initial = await commands.readWorking({
+      workspaceId: workspace.id,
+      documentId: created.document.id,
+    });
+    const edited = await commands.replaceWorking({
+      roomName: initial.workingDocument.roomName,
+      actor,
+      requestId: "dirty-tree-move-edit-001",
+      expectedDraftVersion: initial.workingDocument.draftVersion,
+      replacement: {
+        content: parseNyxdocDocumentV2({
+          schemaVersion: 2,
+          blocks: [{ id: "initial", type: "p", children: [{ text: "아직 저장하지 않은 본문" }] }],
+        }),
+      },
+    });
+    const moveInput = {
+      roomName: edited.workingDocument.roomName,
+      actor,
+      requestId: "dirty-tree-move-001",
+      expectedGeneration: edited.workingDocument.generation,
+      expectedDraftVersion: edited.workingDocument.draftVersion,
+      expectedBaseRevision: edited.workingDocument.baseRevisionNumber,
+      targetDocumentId: parent.document.id,
+      position: "inside" as const,
+      summary: "더티 초안을 보존한 채 문서 위치를 옮겼습니다.",
+    };
+
+    const moved = await commands.moveWorkingDocumentTree(moveInput);
+
+    expect(moved.document).toMatchObject({
+      parentDocumentId: parent.document.id,
+      revisionNumber: 2,
+    });
+    expect(moved.tree).toMatchObject({
+      documentId: created.document.id,
+      parentDocumentId: parent.document.id,
+      targetDocumentId: parent.document.id,
+      position: "inside",
+    });
+    expect(moved.workingDocument).toMatchObject({
+      parentDocumentId: parent.document.id,
+      baseRevisionNumber: 2,
+      draftVersion: edited.workingDocument.draftVersion + 1,
+      committedDraftVersion: edited.workingDocument.committedDraftVersion,
+      hasUncommittedChanges: true,
+    });
+    expect(moved.workingDocument.content.blocks[0].children[0]).toMatchObject({
+      text: "아직 저장하지 않은 본문",
+    });
+    const revisionTwo = getDocumentRevisionSnapshotByNumber(
+      database,
+      workspace.id,
+      created.document.id,
+      2,
+    );
+    expect(revisionTwo.parentDocumentId).toBe(parent.document.id);
+    expect(revisionTwo.content).toEqual(canonicalBefore.content);
+    expect(revisionTwo.content.blocks[0].children[0]).toMatchObject({ text: "정본 1" });
+    expect(listDocumentRevisions(database, workspace.id, created.document.id)).toHaveLength(2);
+
+    const replayed = await commands.moveWorkingDocumentTree(moveInput);
+    expect(replayed).toMatchObject({
+      document: { revisionNumber: 2 },
+      mutationState: {
+        replayed: true,
+        receipt: { hasUncommittedChanges: true },
+        current: { hasUncommittedChanges: true },
+      },
+    });
+    expect(listDocumentRevisions(database, workspace.id, created.document.id)).toHaveLength(2);
+
+    const committed = await commands.commitWorking({
+      roomName: moved.workingDocument.roomName,
+      actor,
+      requestId: "dirty-tree-move-commit-001",
+      expectedDraftVersion: moved.workingDocument.draftVersion,
+      summary: "보존된 본문 초안을 명시적으로 저장했습니다.",
+    });
+    expect(committed.document).toMatchObject({
+      parentDocumentId: parent.document.id,
+      revisionNumber: 3,
+    });
+    expect(committed.document.content.blocks[0].children[0]).toMatchObject({
+      text: "아직 저장하지 않은 본문",
+    });
+    expect(committed.workingDocument.hasUncommittedChanges).toBe(false);
+  });
+
+  it("moves a clean document tree without creating a dirty draft", async () => {
+    const { database, workspace, actor, created, commands } = fixture();
+    const parent = createDocument(database, workspace.id, actor, {
+      title: "깨끗한 이동 대상",
+      content: parseNyxdocDocumentV2({
+        schemaVersion: 2,
+        blocks: [{ id: "clean-parent", type: "p", children: [{ text: "상위 문서" }] }],
+      }),
+    });
+    const initial = await commands.readWorking({
+      workspaceId: workspace.id,
+      documentId: created.document.id,
+    });
+
+    const moved = await commands.moveWorkingDocumentTree({
+      roomName: initial.workingDocument.roomName,
+      actor,
+      requestId: "clean-tree-move-001",
+      expectedGeneration: initial.workingDocument.generation,
+      expectedDraftVersion: initial.workingDocument.draftVersion,
+      expectedBaseRevision: initial.workingDocument.baseRevisionNumber,
+      targetDocumentId: parent.document.id,
+      position: "inside",
+    });
+
+    expect(moved.document).toMatchObject({
+      parentDocumentId: parent.document.id,
+      revisionNumber: 2,
+    });
+    expect(moved.workingDocument).toMatchObject({
+      parentDocumentId: parent.document.id,
+      baseRevisionNumber: 2,
+      draftVersion: initial.workingDocument.draftVersion + 1,
+      committedDraftVersion: initial.workingDocument.committedDraftVersion,
+      hasUncommittedChanges: false,
+    });
+    expect(moved.workingDocument.content).toEqual(initial.workingDocument.content);
+  });
+
+  it("rejects a stale tree move without changing the canonical tree", async () => {
+    const { database, workspace, actor, created, commands } = fixture();
+    const parent = createDocument(database, workspace.id, actor, {
+      title: "이동 대상",
+      content: parseNyxdocDocumentV2({
+        schemaVersion: 2,
+        blocks: [{ id: "stale-parent", type: "p", children: [{ text: "상위 문서" }] }],
+      }),
+    });
+    const initial = await commands.readWorking({
+      workspaceId: workspace.id,
+      documentId: created.document.id,
+    });
+    const changed = await commands.replaceWorking({
+      roomName: initial.workingDocument.roomName,
+      actor,
+      requestId: "stale-tree-edit-001",
+      expectedDraftVersion: initial.workingDocument.draftVersion,
+      replacement: { title: "동시에 바뀐 초안 제목" },
+    });
+
+    await expect(commands.moveWorkingDocumentTree({
+      roomName: initial.workingDocument.roomName,
+      actor,
+      requestId: "stale-tree-move-001",
+      expectedGeneration: initial.workingDocument.generation,
+      expectedDraftVersion: initial.workingDocument.draftVersion,
+      expectedBaseRevision: initial.workingDocument.baseRevisionNumber,
+      targetDocumentId: parent.document.id,
+      position: "inside",
+    })).rejects.toMatchObject({
+      code: "DRAFT_VERSION_CONFLICT",
+    });
+
+    expect(getDocument(database, workspace.id, created.document.id)).toMatchObject({
+      parentDocumentId: null,
+      revisionNumber: 1,
+    });
+    expect(listDocumentRevisions(database, workspace.id, created.document.id)).toHaveLength(1);
+    const after = await commands.readWorking({
+      workspaceId: workspace.id,
+      documentId: created.document.id,
+    });
+    expect(after.workingDocument).toMatchObject({
+      title: "동시에 바뀐 초안 제목",
+      parentDocumentId: null,
+      draftVersion: changed.workingDocument.draftVersion,
+      baseRevisionNumber: 1,
+      hasUncommittedChanges: true,
+    });
+  });
+
+  it("rolls back the canonical revision and draft rebase when tree ordering fails", async () => {
+    const { database, workspace, actor, created, commands } = fixture();
+    const parent = createDocument(database, workspace.id, actor, {
+      title: "롤백 상위 문서",
+      content: parseNyxdocDocumentV2({
+        schemaVersion: 2,
+        blocks: [{ id: "rollback-parent", type: "p", children: [{ text: "상위 문서" }] }],
+      }),
+    });
+    const anchor = createDocument(database, workspace.id, actor, {
+      title: "롤백 기준 문서",
+      parentDocumentId: parent.document.id,
+      content: parseNyxdocDocumentV2({
+        schemaVersion: 2,
+        blocks: [{ id: "rollback-anchor", type: "p", children: [{ text: "기준 문서" }] }],
+      }),
+    });
+    const initial = await commands.readWorking({
+      workspaceId: workspace.id,
+      documentId: created.document.id,
+    });
+    database.exec(`
+      CREATE TRIGGER force_tree_move_failure
+      BEFORE UPDATE OF tree_order ON documents
+      WHEN NEW.id = '${created.document.id}'
+      BEGIN
+        SELECT RAISE(ABORT, 'forced tree move failure');
+      END;
+    `);
+
+    await expect(commands.moveWorkingDocumentTree({
+      roomName: initial.workingDocument.roomName,
+      actor,
+      requestId: "rollback-tree-move-001",
+      expectedGeneration: initial.workingDocument.generation,
+      expectedDraftVersion: initial.workingDocument.draftVersion,
+      expectedBaseRevision: initial.workingDocument.baseRevisionNumber,
+      targetDocumentId: anchor.document.id,
+      position: "after",
+    })).rejects.toThrow("forced tree move failure");
+
+    expect(getDocument(database, workspace.id, created.document.id)).toMatchObject({
+      parentDocumentId: null,
+      revisionNumber: 1,
+    });
+    expect(listDocumentRevisions(database, workspace.id, created.document.id)).toHaveLength(1);
+    const after = await commands.readWorking({
+      workspaceId: workspace.id,
+      documentId: created.document.id,
+    });
+    expect(after.workingDocument).toMatchObject({
+      parentDocumentId: null,
+      baseRevisionNumber: 1,
+      draftVersion: initial.workingDocument.draftVersion,
+      committedDraftVersion: initial.workingDocument.committedDraftVersion,
+      hasUncommittedChanges: false,
+    });
+  });
+
   it("rejects destructive reset and restore requests with stale draft, generation, or base revision", async () => {
     const { database, workspace, actor, created, commands } = fixture();
     const initial = ensureCollaborationState(database, workspace.id, created.document.id);

@@ -1021,7 +1021,18 @@ async function renderMutationToolResult(
   }
 }
 
-const gatewayCollaborationCommands: CollaborationCommands = {
+type McpCollaborationCommands = Pick<
+  CollaborationCommands,
+  | "readWorking"
+  | "replaceWorking"
+  | "replaceAndCommitWorking"
+  | "patchWorking"
+  | "commitWorking"
+  | "resetWorking"
+  | "archiveWorkingTree"
+>;
+
+const gatewayCollaborationCommands: McpCollaborationCommands = {
   readWorking: readWorkingDocument,
   replaceWorking: replaceWorkingDocumentThroughGateway,
   replaceAndCommitWorking: replaceAndCommitWorkingDocumentThroughGateway,
@@ -1034,7 +1045,7 @@ const gatewayCollaborationCommands: CollaborationCommands = {
 export function createNyxdocMcpServer(
   database: NyxDatabase,
   identity: ApiTokenIdentity,
-  collaboration: CollaborationCommands = gatewayCollaborationCommands,
+  collaboration: McpCollaborationCommands = gatewayCollaborationCommands,
 ) {
   const server = new McpServer(
     { name: "nyxdoc", version: capabilities.serverVersion },

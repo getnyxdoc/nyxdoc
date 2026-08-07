@@ -5,6 +5,8 @@ import type {
   CommitWorkingDocumentRequest,
   CommitWorkingDocumentResponse,
   CollaborationErrorResponse,
+  MoveWorkingDocumentTreeRequest,
+  MoveWorkingDocumentTreeResponse,
   PatchWorkingDocumentRequest,
   ReadWorkingDocumentRequest,
   ReplaceAndCommitWorkingDocumentRequest,
@@ -86,6 +88,15 @@ export function replaceAndCommitWorkingDocumentThroughGateway(
 ) {
   return collaborationRequest<ReplaceAndCommitWorkingDocumentResponse>(
     "/internal/drafts/replace-and-commit",
+    input,
+  );
+}
+
+export function moveWorkingDocumentTreeThroughGateway(
+  input: MoveWorkingDocumentTreeRequest,
+) {
+  return collaborationRequest<MoveWorkingDocumentTreeResponse>(
+    "/internal/drafts/move-tree",
     input,
   );
 }

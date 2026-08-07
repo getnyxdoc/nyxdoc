@@ -2,6 +2,18 @@
 
 All notable user-facing changes are recorded here.
 
+## 0.25.17 - 2026-08-07
+
+- Allow documents with an uncommitted shared draft to move across parents
+  without implicitly saving or discarding the draft body.
+- Commit only the canonical parent metadata, rebase the shared draft onto that
+  structural revision, and preserve its dirty state until the user explicitly
+  saves the document.
+- Make cross-parent metadata, sibling ordering, draft rebasing, and retry
+  receipts one atomic operation with stale-state and rollback protection.
+- Exclude retained diagnostic source snapshots from production TypeScript and
+  ESLint project traversal so release checks validate the active source tree.
+
 ## 0.25.16 - 2026-08-07
 
 - Use native mouse movement as the desktop document-tree drag path while

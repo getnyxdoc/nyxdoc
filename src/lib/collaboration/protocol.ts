@@ -3,6 +3,8 @@ import type {
   DocumentDraftCas,
   DocumentMutationResult,
   DocumentPatchOperation,
+  DocumentTreeDropPosition,
+  DocumentTreeReorderResult,
 } from "@/lib/documents/types";
 import type {
   ArchiveDocumentInput,
@@ -46,6 +48,15 @@ export type PatchWorkingDocumentRequest = {
   operations: DocumentPatchOperation[];
 };
 
+export type MoveWorkingDocumentTreeRequest = DocumentDraftCas & {
+  roomName: string;
+  actor: DraftActor;
+  requestId: string;
+  targetDocumentId: string;
+  position: DocumentTreeDropPosition;
+  summary?: string;
+};
+
 export type CommitWorkingDocumentRequest = {
   roomName: string;
   actor: DraftActor;
@@ -77,6 +88,11 @@ export type CommitWorkingDocumentResponse = DocumentMutationResult & {
   mutationState?: DraftMutationState;
 };
 export type ReplaceAndCommitWorkingDocumentResponse = CommitWorkingDocumentResponse;
+export type MoveWorkingDocumentTreeResponse = DocumentMutationResult & {
+  tree: DocumentTreeReorderResult;
+  workingDocument: WorkingDocument;
+  mutationState?: DraftMutationState;
+};
 export type ResetWorkingDocumentResponse = {
   roomName: string;
   workingDocument: WorkingDocument;
