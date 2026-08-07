@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import {
-  type DragEvent,
+  type PointerEvent as ReactPointerEvent,
   useEffect,
   useLayoutEffect,
   useMemo,
@@ -129,6 +129,11 @@ export function DocumentTree({
   const [reorderError, setReorderError] = useState("");
   const menuRef = useRef<HTMLDivElement>(null);
   const treeRef = useRef<HTMLElement>(null);
+  const dropTargetRef = useRef<{
+    documentId: string;
+    position: DocumentTreeDropPosition;
+  } | null>(null);
+  const suppressNavigationRef = useRef(false);
   const storageKey = navigationStateKey
     ? `nyxdoc:document-tree:${userId}:${workspaceId}:${navigationStateKey}`
     : null;
@@ -223,34 +228,23 @@ export function DocumentTree({
   }
 
   function clearDragState() {
+    dropTargetRef.current = null;
     setDraggingDocumentId(null);
     setDropTarget(null);
   }
 
-  function startReorder(event: DragEvent<HTMLDivElement>, documentId: string) {
-    if (!onReorder || reorderPending) {
-      event.preventDefault();
-      return;
-    }
-    const target = event.target as Element;
-    if (target.closest("[data-document-tree-action]")) {
-      event.preventDefault();
-      return;
-    }
-    event.dataTransfer.effectAllowed = "move";
-    event.dataTransfer.setData("text/plain", documentId);
-    setDraggingDocumentId(documentId);
-    setDropTarget(null);
-    setReorderError("");
-  }
-
-  function updateDropTarget(event: DragEvent<HTMLDivElement>, targetDocumentId: string) {
-    if (!onReorder || !draggingDocumentId || draggingDocumentId === targetDocumentId) return;
-    const source = documentsById.get(draggingDocumentId);
+  function resolveDropTarget(
+    sourceDocumentId: string,
+    targetDocumentId: string,
+    clientY: number,
+    targetElement: HTMLElement,
+  ) {
+    if (!onReorder || sourceDocumentId === targetDocumentId) return null;
+    const source = documentsById.get(sourceDocumentId);
     const target = documentsById.get(targetDocumentId);
-    if (!source || !target) return;
-    const rect = event.currentTarget.getBoundingClientRect();
-    const verticalRatio = (event.clientY - rect.top) / Math.max(rect.height, 1);
+    if (!source || !target) return null;
+    const rect = targetElement.getBoundingClientRect();
+    const verticalRatio = (clientY - rect.top) / Math.max(rect.height, 1);
     const position: DocumentTreeDropPosition = verticalRatio < 0.27
       ? "before"
       : verticalRatio > 0.73
@@ -262,42 +256,106 @@ export function DocumentTree({
     let ancestorId = destinationParentDocumentId;
     const visited = new Set<string>();
     while (ancestorId && !visited.has(ancestorId)) {
-      if (ancestorId === source.id) return;
+      if (ancestorId === source.id) return null;
       visited.add(ancestorId);
       ancestorId = documentsById.get(ancestorId)?.parentDocumentId ?? null;
     }
-    event.preventDefault();
-    event.dataTransfer.dropEffect = "move";
-    setDropTarget((current) => current?.documentId === targetDocumentId && current.position === position
-      ? current
-      : { documentId: targetDocumentId, position });
+    return { documentId: targetDocumentId, position };
+  }
 
+  function autoScrollTree(clientY: number) {
     const treeElement = treeRef.current;
     if (!treeElement) return;
     const treeRect = treeElement.getBoundingClientRect();
     const edge = 36;
-    if (event.clientY < treeRect.top + edge) treeElement.scrollTop -= 18;
-    else if (event.clientY > treeRect.bottom - edge) treeElement.scrollTop += 18;
+    if (clientY < treeRect.top + edge) treeElement.scrollTop -= 18;
+    else if (clientY > treeRect.bottom - edge) treeElement.scrollTop += 18;
   }
 
-  async function finishReorder(event: DragEvent<HTMLDivElement>, targetDocumentId: string) {
-    event.preventDefault();
-    const sourceDocumentId = draggingDocumentId;
-    const position = dropTarget?.documentId === targetDocumentId ? dropTarget.position : null;
+  async function commitReorder(
+    sourceDocumentId: string,
+    target: { documentId: string; position: DocumentTreeDropPosition } | null,
+  ) {
     clearDragState();
-    if (!onReorder || !sourceDocumentId || !position) return;
+    if (!onReorder || !target) return;
     setReorderPending(true);
     setReorderError("");
     try {
-      await onReorder(sourceDocumentId, targetDocumentId, position);
-      if (position === "inside" && !expanded.has(targetDocumentId)) {
-        onExpandedDocumentIdsChange([...expanded, targetDocumentId]);
+      await onReorder(sourceDocumentId, target.documentId, target.position);
+      if (target.position === "inside" && !expanded.has(target.documentId)) {
+        onExpandedDocumentIdsChange([...expanded, target.documentId]);
       }
     } catch (error) {
       setReorderError(error instanceof Error && error.message ? error.message : copy.reorderFailed);
     } finally {
       setReorderPending(false);
     }
+  }
+
+  function startPointerReorder(
+    event: ReactPointerEvent<HTMLDivElement>,
+    documentId: string,
+  ) {
+    if (!onReorder || reorderPending || !event.isPrimary || event.button !== 0) return;
+    const target = event.target as Element;
+    if (target.closest("[data-document-tree-action]")) return;
+
+    const pointerId = event.pointerId;
+    const startX = event.clientX;
+    const startY = event.clientY;
+    let active = false;
+
+    const removeListeners = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", finish);
+      window.removeEventListener("pointercancel", cancel);
+    };
+    const move = (moveEvent: PointerEvent) => {
+      if (moveEvent.pointerId !== pointerId) return;
+      if (!active && Math.hypot(moveEvent.clientX - startX, moveEvent.clientY - startY) < 6) return;
+      if (!active) {
+        active = true;
+        suppressNavigationRef.current = true;
+        setDraggingDocumentId(documentId);
+        setDropTarget(null);
+        setReorderError("");
+      }
+      moveEvent.preventDefault();
+      const targetElement = document
+        .elementFromPoint(moveEvent.clientX, moveEvent.clientY)
+        ?.closest<HTMLElement>("[data-document-id]");
+      const nextTarget = targetElement
+        ? resolveDropTarget(documentId, targetElement.dataset.documentId ?? "", moveEvent.clientY, targetElement)
+        : null;
+      dropTargetRef.current = nextTarget;
+      setDropTarget((current) => current && nextTarget
+        && current.documentId === nextTarget.documentId
+        && current.position === nextTarget.position
+        ? current
+        : nextTarget);
+      autoScrollTree(moveEvent.clientY);
+    };
+    const finish = (finishEvent: PointerEvent) => {
+      if (finishEvent.pointerId !== pointerId) return;
+      removeListeners();
+      if (!active) return;
+      finishEvent.preventDefault();
+      const finalTarget = dropTargetRef.current;
+      window.setTimeout(() => {
+        suppressNavigationRef.current = false;
+      }, 0);
+      void commitReorder(documentId, finalTarget);
+    };
+    const cancel = (cancelEvent: PointerEvent) => {
+      if (cancelEvent.pointerId !== pointerId) return;
+      removeListeners();
+      suppressNavigationRef.current = false;
+      clearDragState();
+    };
+
+    window.addEventListener("pointermove", move, { passive: false });
+    window.addEventListener("pointerup", finish, { passive: false });
+    window.addEventListener("pointercancel", cancel);
   }
 
   function renderNode(node: DocumentTreeNode, depth: number) {
@@ -313,12 +371,8 @@ export function DocumentTree({
           data-reorderable={onReorder ? "true" : undefined}
           data-dragging={draggingDocumentId === node.id ? "true" : undefined}
           data-drop-position={dropTarget?.documentId === node.id ? dropTarget.position : undefined}
-          draggable={Boolean(onReorder) && !reorderPending}
           aria-grabbed={onReorder ? draggingDocumentId === node.id : undefined}
-          onDragStart={(event) => startReorder(event, node.id)}
-          onDragOver={(event) => updateDropTarget(event, node.id)}
-          onDrop={(event) => void finishReorder(event, node.id)}
-          onDragEnd={clearDragState}
+          onPointerDown={(event) => startPointerReorder(event, node.id)}
           style={{ paddingLeft: `${6 + depth * 15}px` }}
         >
           {hasChildren ? (
@@ -338,6 +392,7 @@ export function DocumentTree({
               type="button"
               className={`${styles.pageTreeLink} ${styles.pageTreeNavigationButton}`}
               onClick={() => {
+                if (suppressNavigationRef.current) return;
                 rememberScrollPosition();
                 onDiagnostic?.({ action: "navigate" });
                 onNavigate(node.id);
@@ -352,9 +407,14 @@ export function DocumentTree({
             <Link
               href={`/app?workspace=${encodeURIComponent(workspaceId)}&document=${encodeURIComponent(node.id)}`}
               className={styles.pageTreeLink}
+              draggable={false}
               aria-current={isActive ? "page" : undefined}
               title={onReorder ? formatCopy(copy.dragToReorder, { title: node.title }) : node.title}
-              onClick={() => {
+              onClick={(event) => {
+                if (suppressNavigationRef.current) {
+                  event.preventDefault();
+                  return;
+                }
                 rememberScrollPosition();
                 onDiagnostic?.({ action: "navigate" });
               }}

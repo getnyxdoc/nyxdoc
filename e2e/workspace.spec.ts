@@ -1123,14 +1123,23 @@ test("moves a document branch inside another document from the tree", async ({ p
   const tree = page.getByRole("navigation", { name: "문서 트리" }).first();
   const source = tree.locator('[data-document-id="document-navigation-06"]');
   const target = tree.locator('[data-document-id="document-navigation-01"]');
+  const sourceBox = await source.boundingBox();
   const targetBox = await target.boundingBox();
+  expect(sourceBox).not.toBeNull();
   expect(targetBox).not.toBeNull();
-  await source.dragTo(target, {
-    targetPosition: {
-      x: Math.min(120, Math.max(20, (targetBox?.width ?? 200) / 2)),
-      y: (targetBox?.height ?? 38) / 2,
-    },
-  });
+  const sourcePoint = {
+    x: (sourceBox?.x ?? 0) + Math.min(120, Math.max(20, (sourceBox?.width ?? 200) / 2)),
+    y: (sourceBox?.y ?? 0) + (sourceBox?.height ?? 38) / 2,
+  };
+  const targetPoint = {
+    x: (targetBox?.x ?? 0) + Math.min(120, Math.max(20, (targetBox?.width ?? 200) / 2)),
+    y: (targetBox?.y ?? 0) + (targetBox?.height ?? 38) / 2,
+  };
+  await page.mouse.move(sourcePoint.x, sourcePoint.y);
+  await page.mouse.down();
+  await page.mouse.move(sourcePoint.x + 10, sourcePoint.y, { steps: 4 });
+  await page.mouse.move(targetPoint.x, targetPoint.y, { steps: 12 });
+  await page.mouse.up();
 
   await expect.poll(() => moveBody).toEqual({
     targetDocumentId: "document-navigation-01",

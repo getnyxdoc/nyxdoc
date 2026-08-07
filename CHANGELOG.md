@@ -2,6 +2,16 @@
 
 All notable user-facing changes are recorded here.
 
+## 0.25.15 - 2026-08-07
+
+- Changed document-tree movement from browser-native HTML drag events to
+  pointer-based dragging so pressing and moving a row works consistently in
+  embedded browsers as well as Chrome and Edge.
+- Prevented a document title link from intercepting the drag as a browser link
+  drag, while preserving ordinary clicks for document navigation.
+- Kept before, inside, and after placement feedback, cross-parent moves, and
+  automatic destination expansion under the same pointer interaction.
+
 ## 0.25.14 - 2026-08-07
 
 - Fixed stable updates from an older official digest-pinned deployment so the
