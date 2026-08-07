@@ -48,15 +48,31 @@ current_revision="$(git -C "$NYXDOC_ROOT" rev-parse HEAD)"
 target_selection="$(nyxdoc_resolve_update_target "$channel")"
 IFS=$'\t' read -r target_ref target_label <<<"$target_selection"
 target_revision="$(git -C "$NYXDOC_ROOT" rev-parse "${target_ref}^{commit}")"
+source_changed=false
+update_image_override="${NYXDOC_UPDATE_IMAGE:-}"
 
-if [ "$current_revision" = "$target_revision" ]; then
-  nyxdoc_info "Already on $target_label ($target_revision); no update is required."
-  nyxdoc_wait_for_services
-  exit 0
+if [ "$current_revision" != "$target_revision" ]; then
+  source_changed=true
+  git -C "$NYXDOC_ROOT" merge-base --is-ancestor "$current_revision" "$target_revision" \
+    || nyxdoc_die "Target $target_label is not a fast-forward descendant of the current revision."
+else
+  current_version="$(nyxdoc_package_version)"
+  current_image="$(nyxdoc_env_get NYXDOC_IMAGE)"
+  if $build_local || [[ "$current_image" == nyxdoc-app:* ]]; then
+    desired_image="nyxdoc-app:${current_version}"
+  else
+    desired_image="$(nyxdoc_select_update_image \
+      "$current_image" "$current_version" "$update_image_override")"
+  fi
+
+  if ! $build_local && [ "$current_image" = "$desired_image" ]; then
+    nyxdoc_info "Already on $target_label ($target_revision) with $desired_image; no update is required."
+    nyxdoc_wait_for_services
+    exit 0
+  fi
+
+  nyxdoc_info "Source is already on $target_label, but the configured image requires reconciliation."
 fi
-
-git -C "$NYXDOC_ROOT" merge-base --is-ancestor "$current_revision" "$target_revision" \
-  || nyxdoc_die "Target $target_label is not a fast-forward descendant of the current revision."
 
 [ -n "$(nyxdoc_compose ps --status running -q app)" ] \
   || nyxdoc_die "The app service must be running so a verified pre-update backup can be created."
@@ -77,7 +93,9 @@ on_exit() {
 }
 trap on_exit EXIT
 
-git -C "$NYXDOC_ROOT" checkout --detach "$target_revision"
+if $source_changed; then
+  git -C "$NYXDOC_ROOT" checkout --detach "$target_revision"
+fi
 version="$(nyxdoc_package_version)"
 source_revision="$(nyxdoc_source_revision)"
 current_image="$(nyxdoc_env_get NYXDOC_IMAGE)"
@@ -89,13 +107,9 @@ if $build_local || [[ "$current_image" == nyxdoc-app:* ]]; then
   nyxdoc_compose config --quiet
   nyxdoc_compose build --build-arg "SOURCE_REVISION=$source_revision"
 else
-  case "$current_image" in
-    ""|ghcr.io/getnyxdoc/nyxdoc:*)
-      image="ghcr.io/getnyxdoc/nyxdoc:${version}"
-      nyxdoc_env_set NYXDOC_IMAGE "$image"
-      ;;
-    *) image="$current_image" ;;
-  esac
+  image="$(nyxdoc_select_update_image \
+    "$current_image" "$version" "$update_image_override")"
+  nyxdoc_env_set NYXDOC_IMAGE "$image"
   nyxdoc_info "Pulling $image."
   nyxdoc_compose config --quiet
   nyxdoc_compose pull app collaboration gateway
@@ -107,5 +121,5 @@ nyxdoc_compose ps
 failed=false
 trap - EXIT
 
-nyxdoc_info "Updated $current_revision -> $source_revision using channel $channel."
+nyxdoc_info "Updated $current_revision -> $source_revision using $image on channel $channel."
 [ -z "$backup_generation" ] || nyxdoc_info "Pre-update verified backup: $backup_generation"

@@ -104,6 +104,29 @@ nyxdoc_package_version() {
   printf '%s\n' "$version"
 }
 
+nyxdoc_select_update_image() {
+  local current_image="${1:-}"
+  local version="${2:-}"
+  local override_image="${3:-}"
+
+  [ -n "$version" ] || nyxdoc_die "An update version is required to select an image."
+
+  if [ -n "$override_image" ]; then
+    printf '%s\n' "$override_image"
+    return
+  fi
+
+  case "$current_image" in
+    ""|ghcr.io/getnyxdoc/nyxdoc:*|ghcr.io/getnyxdoc/nyxdoc@sha256:*)
+      printf 'ghcr.io/getnyxdoc/nyxdoc:%s\n' "$version"
+      ;;
+    *)
+      # Preserve explicitly configured third-party or locally mirrored images.
+      printf '%s\n' "$current_image"
+      ;;
+  esac
+}
+
 nyxdoc_source_revision() {
   if command -v git >/dev/null 2>&1 && git -C "$NYXDOC_ROOT" rev-parse --verify HEAD >/dev/null 2>&1; then
     git -C "$NYXDOC_ROOT" rev-parse HEAD

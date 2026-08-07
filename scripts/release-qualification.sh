@@ -393,7 +393,7 @@ baseline_schema="$(database_integrity "$upgrade_dir")"
 checks["historical-install"]="passed"
 
 set_env "$upgrade_dir/.env.production" NYXDOC_IMAGE "$candidate_image"
-(cd "$upgrade_dir" && ./scripts/update.sh)
+(cd "$upgrade_dir" && NYXDOC_UPDATE_IMAGE="$candidate_image" ./scripts/update.sh)
 updated_revision="$(git -C "$upgrade_dir" rev-parse HEAD)"
 [ "$updated_revision" = "$candidate_revision" ] \
   || fail "historical update checked out ${updated_revision}, not the release candidate revision"

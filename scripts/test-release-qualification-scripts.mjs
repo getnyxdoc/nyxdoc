@@ -114,6 +114,45 @@ async function main() {
     assert.match(composeCommonText, /fetch --no-tags/);
     assert.doesNotMatch(updateText, /fetch --tags/);
     assert.match(updateText, /nyxdoc_resolve_update_target/);
+    assert.match(updateText, /nyxdoc_select_update_image/);
+    assert.match(updateText, /Source is already on .*configured image requires reconciliation/);
+    assert.match(shell, /NYXDOC_UPDATE_IMAGE="\$candidate_image" \.\/scripts\/update\.sh/);
+
+    const shellQuote = (value) => `'${value.replaceAll("'", "'\\''")}'`;
+    const selectUpdateImage = (currentImage, version, overrideImage = "") => execFileSync(
+      "bash",
+      [
+        "-c",
+        `source scripts/compose-common.sh; nyxdoc_select_update_image ${shellQuote(currentImage)} ${shellQuote(version)} ${shellQuote(overrideImage)}`,
+      ],
+      { cwd: root, encoding: "utf8" },
+    ).trim();
+    assert.equal(
+      selectUpdateImage(
+        "ghcr.io/getnyxdoc/nyxdoc@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "0.25.14",
+      ),
+      "ghcr.io/getnyxdoc/nyxdoc:0.25.14",
+      "an official pinned release digest must advance to the selected stable version",
+    );
+    assert.equal(
+      selectUpdateImage("ghcr.io/getnyxdoc/nyxdoc:0.25.13", "0.25.14"),
+      "ghcr.io/getnyxdoc/nyxdoc:0.25.14",
+    );
+    assert.equal(
+      selectUpdateImage("registry.example.test/nyxdoc:managed", "0.25.14"),
+      "registry.example.test/nyxdoc:managed",
+      "an explicitly configured custom image must remain unchanged",
+    );
+    assert.equal(
+      selectUpdateImage(
+        "ghcr.io/getnyxdoc/nyxdoc:0.25.13",
+        "0.25.14",
+        image,
+      ),
+      image,
+      "release qualification must be able to pin the immutable candidate digest",
+    );
 
     // Windows Node and WSL Bash use different path and repository ownership
     // models. The updater is a supported Linux lifecycle script, so exercise
@@ -180,7 +219,13 @@ async function main() {
     );
     }
 
-    execFileSync("bash", ["-n", "scripts/release-qualification.sh"], { cwd: root, stdio: "inherit" });
+    for (const script of [
+      "scripts/compose-common.sh",
+      "scripts/update.sh",
+      "scripts/release-qualification.sh",
+    ]) {
+      execFileSync("bash", ["-n", script], { cwd: root, stdio: "inherit" });
+    }
     console.log("Release qualification script contracts passed.");
   } finally {
     await rm(temporary, { recursive: true, force: true });

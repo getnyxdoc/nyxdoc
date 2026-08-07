@@ -2,6 +2,17 @@
 
 All notable user-facing changes are recorded here.
 
+## 0.25.14 - 2026-08-07
+
+- Fixed stable updates from an older official digest-pinned deployment so the
+  updater advances the container image together with the source revision
+  instead of reporting success while continuing to run the previous image.
+- Reconcile an out-of-date official image even when the source checkout is
+  already on the target release, allowing an interrupted or partial update to
+  be repaired safely with the same one-line update command.
+- Keep release qualification pinned to its exact immutable candidate digest
+  while continuing to preserve explicitly configured third-party images.
+
 ## 0.25.13 - 2026-08-07
 
 - Extended document-tree drag and drop from sibling-only reordering to
