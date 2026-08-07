@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import {
+  type MouseEvent as ReactMouseEvent,
   type PointerEvent as ReactPointerEvent,
   useEffect,
   useLayoutEffect,
@@ -134,6 +135,7 @@ export function DocumentTree({
     position: DocumentTreeDropPosition;
   } | null>(null);
   const suppressNavigationRef = useRef(false);
+  const dragInputRef = useRef<"mouse" | "pointer" | null>(null);
   const storageKey = navigationStateKey
     ? `nyxdoc:document-tree:${userId}:${workspaceId}:${navigationStateKey}`
     : null;
@@ -296,10 +298,18 @@ export function DocumentTree({
     event: ReactPointerEvent<HTMLDivElement>,
     documentId: string,
   ) {
-    if (!onReorder || reorderPending || !event.isPrimary || event.button !== 0) return;
+    if (
+      event.pointerType === "mouse"
+      || dragInputRef.current
+      || !onReorder
+      || reorderPending
+      || !event.isPrimary
+      || event.button !== 0
+    ) return;
     const target = event.target as Element;
     if (target.closest("[data-document-tree-action]")) return;
 
+    dragInputRef.current = "pointer";
     const pointerId = event.pointerId;
     const startX = event.clientX;
     const startY = event.clientY;
@@ -338,6 +348,7 @@ export function DocumentTree({
     const finish = (finishEvent: PointerEvent) => {
       if (finishEvent.pointerId !== pointerId) return;
       removeListeners();
+      dragInputRef.current = null;
       if (!active) return;
       finishEvent.preventDefault();
       const finalTarget = dropTargetRef.current;
@@ -349,6 +360,7 @@ export function DocumentTree({
     const cancel = (cancelEvent: PointerEvent) => {
       if (cancelEvent.pointerId !== pointerId) return;
       removeListeners();
+      dragInputRef.current = null;
       suppressNavigationRef.current = false;
       clearDragState();
     };
@@ -356,6 +368,63 @@ export function DocumentTree({
     window.addEventListener("pointermove", move, { passive: false });
     window.addEventListener("pointerup", finish, { passive: false });
     window.addEventListener("pointercancel", cancel);
+  }
+
+  function startMouseReorder(
+    event: ReactMouseEvent<HTMLDivElement>,
+    documentId: string,
+  ) {
+    if (dragInputRef.current || !onReorder || reorderPending || event.button !== 0) return;
+    const target = event.target as Element;
+    if (target.closest("[data-document-tree-action]")) return;
+
+    dragInputRef.current = "mouse";
+    const startX = event.clientX;
+    const startY = event.clientY;
+    let active = false;
+
+    const removeListeners = () => {
+      window.removeEventListener("mousemove", move);
+      window.removeEventListener("mouseup", finish);
+    };
+    const move = (moveEvent: MouseEvent) => {
+      if (!active && Math.hypot(moveEvent.clientX - startX, moveEvent.clientY - startY) < 6) return;
+      if (!active) {
+        active = true;
+        suppressNavigationRef.current = true;
+        setDraggingDocumentId(documentId);
+        setDropTarget(null);
+        setReorderError("");
+      }
+      moveEvent.preventDefault();
+      const targetElement = document
+        .elementFromPoint(moveEvent.clientX, moveEvent.clientY)
+        ?.closest<HTMLElement>("[data-document-id]");
+      const nextTarget = targetElement
+        ? resolveDropTarget(documentId, targetElement.dataset.documentId ?? "", moveEvent.clientY, targetElement)
+        : null;
+      dropTargetRef.current = nextTarget;
+      setDropTarget((current) => current && nextTarget
+        && current.documentId === nextTarget.documentId
+        && current.position === nextTarget.position
+        ? current
+        : nextTarget);
+      autoScrollTree(moveEvent.clientY);
+    };
+    const finish = (finishEvent: MouseEvent) => {
+      removeListeners();
+      dragInputRef.current = null;
+      if (!active) return;
+      finishEvent.preventDefault();
+      const finalTarget = dropTargetRef.current;
+      window.setTimeout(() => {
+        suppressNavigationRef.current = false;
+      }, 0);
+      void commitReorder(documentId, finalTarget);
+    };
+
+    window.addEventListener("mousemove", move, { passive: false });
+    window.addEventListener("mouseup", finish, { passive: false });
   }
 
   function renderNode(node: DocumentTreeNode, depth: number) {
@@ -373,6 +442,7 @@ export function DocumentTree({
           data-drop-position={dropTarget?.documentId === node.id ? dropTarget.position : undefined}
           aria-grabbed={onReorder ? draggingDocumentId === node.id : undefined}
           onPointerDown={(event) => startPointerReorder(event, node.id)}
+          onMouseDown={(event) => startMouseReorder(event, node.id)}
           style={{ paddingLeft: `${6 + depth * 15}px` }}
         >
           {hasChildren ? (

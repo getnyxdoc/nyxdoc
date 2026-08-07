@@ -2,6 +2,16 @@
 
 All notable user-facing changes are recorded here.
 
+## 0.25.16 - 2026-08-07
+
+- Use native mouse movement as the desktop document-tree drag path while
+  retaining pointer events for touch and pen input, covering embedded browser
+  controllers that do not emit a complete pointer-event sequence.
+- Keep the same movement threshold, before/inside/after placement rules,
+  navigation suppression, and automatic tree scrolling across both input
+  paths.
+- Exercise the desktop mouse path in Chrome and Edge browser regression tests.
+
 ## 0.25.15 - 2026-08-07
 
 - Changed document-tree movement from browser-native HTML drag events to
