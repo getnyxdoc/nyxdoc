@@ -984,7 +984,7 @@ export function listDocuments(database: NyxDatabase, workspaceId: string): Docum
   return ordered;
 }
 
-export function reorderSiblingDocument(
+export function reorderDocumentTree(
   database: NyxDatabase,
   workspaceId: string,
   actor: DocumentActor,
@@ -1016,10 +1016,13 @@ export function reorderSiblingDocument(
     if (!source || !target) {
       throw new DocumentServiceError("NOT_FOUND", "이동할 문서를 찾을 수 없습니다.");
     }
-    if (source.parent_document_id !== target.parent_document_id) {
+    const destinationParentDocumentId = input.position === "inside"
+      ? target.id
+      : target.parent_document_id;
+    if (source.parent_document_id !== destinationParentDocumentId) {
       throw new DocumentServiceError(
         "INVALID_INPUT",
-        "같은 상위 문서 아래에 있는 문서끼리만 순서를 바꿀 수 있습니다.",
+        "문서의 상위 위치가 아직 이동 대상과 일치하지 않습니다.",
       );
     }
     if (!source.current_revision_id) {
@@ -1033,23 +1036,27 @@ export function reorderSiblingDocument(
          WHERE workspace_id = ? AND status = 'active' AND parent_document_id IS ?
          ORDER BY tree_order ASC, created_at ASC, id ASC`,
       )
-      .all(workspaceId, source.parent_document_id) as Array<{
+      .all(workspaceId, destinationParentDocumentId) as Array<{
         id: string;
         tree_order: number;
       }>;
     const previousOrder = siblings.map((document) => document.id);
     const nextOrder = previousOrder.filter((id) => id !== documentId);
-    const targetIndex = nextOrder.indexOf(input.targetDocumentId);
-    if (targetIndex < 0) {
-      throw new DocumentServiceError("NOT_FOUND", "기준 문서를 찾을 수 없습니다.");
+    if (input.position === "inside") {
+      nextOrder.push(documentId);
+    } else {
+      const targetIndex = nextOrder.indexOf(input.targetDocumentId);
+      if (targetIndex < 0) {
+        throw new DocumentServiceError("NOT_FOUND", "기준 문서를 찾을 수 없습니다.");
+      }
+      nextOrder.splice(targetIndex + (input.position === "after" ? 1 : 0), 0, documentId);
     }
-    nextOrder.splice(targetIndex + (input.position === "after" ? 1 : 0), 0, documentId);
 
     const unchanged = previousOrder.every((id, index) => nextOrder[index] === id);
     if (unchanged) {
       return {
         documentId,
-        parentDocumentId: source.parent_document_id,
+        parentDocumentId: destinationParentDocumentId,
         targetDocumentId: input.targetDocumentId,
         position: input.position,
         treeOrder: source.tree_order,
@@ -1073,7 +1080,7 @@ export function reorderSiblingDocument(
 
     return {
       documentId,
-      parentDocumentId: source.parent_document_id,
+      parentDocumentId: destinationParentDocumentId,
       targetDocumentId: input.targetDocumentId,
       position: input.position,
       treeOrder: (nextOrder.indexOf(documentId) + 1) * 100,

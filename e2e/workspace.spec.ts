@@ -1073,6 +1073,79 @@ test("keeps document tree width, expansion, and scroll across a document shell r
   );
 });
 
+test("moves a document branch inside another document from the tree", async ({ page }) => {
+  let moveBody: unknown = null;
+  const targetDocument = {
+    id: "document-navigation-01",
+    title: "탐색 상태 검증 문서 01",
+    slug: "navigation-1",
+    status: "active",
+    parentDocumentId: null,
+    treeOrder: 100,
+    revisionId: "revision-navigation-1",
+    revisionNumber: 1,
+    documentType: "test",
+    workflowStatus: "draft",
+    tags: [],
+    createdAt: "2026-07-14T00:00:00.000Z",
+    updatedAt: "2026-07-14T01:00:00.000Z",
+  };
+  const movedDocument = {
+    ...targetDocument,
+    id: "document-navigation-06",
+    title: "탐색 상태 검증 문서 06",
+    slug: "navigation-6",
+    parentDocumentId: targetDocument.id,
+    treeOrder: 600,
+    revisionId: "revision-navigation-6-moved",
+    revisionNumber: 2,
+  };
+  await page.route("**/api/documents/document-navigation-06/reorder", async (route) => {
+    moveBody = route.request().postDataJSON();
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        documentId: movedDocument.id,
+        parentDocumentId: targetDocument.id,
+        targetDocumentId: targetDocument.id,
+        position: "inside",
+        treeOrder: movedDocument.treeOrder,
+        orderedDocumentIds: [movedDocument.id],
+        eventCursor: 21,
+        unchanged: false,
+        documents: [targetDocument, movedDocument],
+      }),
+    });
+  });
+
+  await page.goto("/dev/workspace-e2e");
+  const tree = page.getByRole("navigation", { name: "문서 트리" }).first();
+  const source = tree.locator('[data-document-id="document-navigation-06"]');
+  const target = tree.locator('[data-document-id="document-navigation-01"]');
+  const targetBox = await target.boundingBox();
+  expect(targetBox).not.toBeNull();
+  await source.dragTo(target, {
+    targetPosition: {
+      x: Math.min(120, Math.max(20, (targetBox?.width ?? 200) / 2)),
+      y: (targetBox?.height ?? 38) / 2,
+    },
+  });
+
+  await expect.poll(() => moveBody).toEqual({
+    targetDocumentId: "document-navigation-01",
+    position: "inside",
+  });
+  await expect(page.getByRole("button", { name: "탐색 상태 검증 문서 01 접기" }))
+    .toHaveAttribute("aria-expanded", "true");
+  await expect(tree.getByText("탐색 상태 검증 문서 06", { exact: true })).toBeVisible();
+  const [targetIndent, sourceIndent] = await Promise.all([
+    target.evaluate((element) => Number.parseFloat((element as HTMLElement).style.paddingLeft)),
+    source.evaluate((element) => Number.parseFloat((element as HTMLElement).style.paddingLeft)),
+  ]);
+  expect(sourceIndent).toBeGreaterThan(targetIndent);
+});
+
 test("lets a user collapse the active document path and only reveals a newly active path", async ({ page }) => {
   await page.goto("/dev/workspace-e2e?active=document-navigation-02");
 

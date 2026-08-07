@@ -88,8 +88,8 @@ export function DocumentTree({
       tree: "Document tree",
       rename: "Rename document",
       delete: "Delete document",
-      dragToReorder: "Drag {title} to reorder it",
-      reorderFailed: "Could not change the document order.",
+      dragToReorder: "Drag {title} to move or reorder it",
+      reorderFailed: "Could not move the document.",
     },
     ko: {
       collapse: "{title} 접기",
@@ -101,8 +101,8 @@ export function DocumentTree({
       tree: "문서 트리",
       rename: "문서 이름 변경",
       delete: "문서 삭제",
-      dragToReorder: "{title} 문서를 드래그하여 순서 변경",
-      reorderFailed: "문서 순서를 변경하지 못했습니다.",
+      dragToReorder: "{title} 문서를 드래그하여 이동 또는 순서 변경",
+      reorderFailed: "문서를 이동하지 못했습니다.",
     },
     ja: {
       collapse: "{title}を折りたたむ",
@@ -114,8 +114,8 @@ export function DocumentTree({
       tree: "文書ツリー",
       rename: "文書名を変更",
       delete: "文書を削除",
-      dragToReorder: "{title}をドラッグして並べ替え",
-      reorderFailed: "文書の順序を変更できませんでした。",
+      dragToReorder: "{title}をドラッグして移動または並べ替え",
+      reorderFailed: "文書を移動できませんでした。",
     },
   }[locale];
   const tree = useMemo(() => buildTree(documents, locale), [documents, locale]);
@@ -248,13 +248,26 @@ export function DocumentTree({
     if (!onReorder || !draggingDocumentId || draggingDocumentId === targetDocumentId) return;
     const source = documentsById.get(draggingDocumentId);
     const target = documentsById.get(targetDocumentId);
-    if (!source || !target || source.parentDocumentId !== target.parentDocumentId) return;
+    if (!source || !target) return;
+    const rect = event.currentTarget.getBoundingClientRect();
+    const verticalRatio = (event.clientY - rect.top) / Math.max(rect.height, 1);
+    const position: DocumentTreeDropPosition = verticalRatio < 0.27
+      ? "before"
+      : verticalRatio > 0.73
+        ? "after"
+        : "inside";
+    const destinationParentDocumentId = position === "inside"
+      ? target.id
+      : target.parentDocumentId;
+    let ancestorId = destinationParentDocumentId;
+    const visited = new Set<string>();
+    while (ancestorId && !visited.has(ancestorId)) {
+      if (ancestorId === source.id) return;
+      visited.add(ancestorId);
+      ancestorId = documentsById.get(ancestorId)?.parentDocumentId ?? null;
+    }
     event.preventDefault();
     event.dataTransfer.dropEffect = "move";
-    const rect = event.currentTarget.getBoundingClientRect();
-    const position: DocumentTreeDropPosition = event.clientY < rect.top + rect.height / 2
-      ? "before"
-      : "after";
     setDropTarget((current) => current?.documentId === targetDocumentId && current.position === position
       ? current
       : { documentId: targetDocumentId, position });
@@ -277,6 +290,9 @@ export function DocumentTree({
     setReorderError("");
     try {
       await onReorder(sourceDocumentId, targetDocumentId, position);
+      if (position === "inside" && !expanded.has(targetDocumentId)) {
+        onExpandedDocumentIdsChange([...expanded, targetDocumentId]);
+      }
     } catch (error) {
       setReorderError(error instanceof Error && error.message ? error.message : copy.reorderFailed);
     } finally {
@@ -293,6 +309,7 @@ export function DocumentTree({
         <div
           className={`${styles.pageTreeRow} ${onRename || onDelete ? styles.pageTreeRowWithMenu : ""} ${isActive ? styles.pageTreeActive : ""}`}
           data-active-document={isActive ? "true" : undefined}
+          data-document-id={node.id}
           data-reorderable={onReorder ? "true" : undefined}
           data-dragging={draggingDocumentId === node.id ? "true" : undefined}
           data-drop-position={dropTarget?.documentId === node.id ? dropTarget.position : undefined}

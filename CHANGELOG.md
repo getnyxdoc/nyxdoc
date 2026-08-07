@@ -2,6 +2,18 @@
 
 All notable user-facing changes are recorded here.
 
+## 0.25.13 - 2026-08-07
+
+- Extended document-tree drag and drop from sibling-only reordering to
+  Confluence-style placement before, inside, or after another document while
+  preserving the moved document's complete child subtree.
+- Record cross-parent moves as canonical structural revisions through the
+  shared-draft pipeline, and refuse to move a document with an uncommitted
+  draft so content is never committed implicitly.
+- Added cycle prevention, explicit inside-drop feedback, automatic expansion
+  of the destination document, and browser regression coverage for moving a
+  top-level document under another document.
+
 ## 0.25.12 - 2026-08-05
 
 - Allow users to attach up to three explicitly selected PNG, JPEG, GIF, or

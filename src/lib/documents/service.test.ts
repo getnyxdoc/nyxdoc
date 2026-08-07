@@ -17,7 +17,7 @@ import {
   patchDocument,
   purgeTrashedDocument,
   queryDocuments,
-  reorderSiblingDocument,
+  reorderDocumentTree,
   restoreDocumentRevision,
   restoreTrashedDocument,
   searchDocumentContents,
@@ -383,7 +383,7 @@ describe("document command service", () => {
     ).get(two.document.id);
     const cursorBefore = getChanges(database, workspace.id, 0, 100).headCursor;
 
-    const result = reorderSiblingDocument(database, workspace.id, actor, two.document.id, {
+    const result = reorderDocumentTree(database, workspace.id, actor, two.document.id, {
       targetDocumentId: zero.document.id,
       position: "before",
     });
@@ -417,10 +417,48 @@ describe("document command service", () => {
       eventType: "updated",
     }]);
 
-    expect(() => reorderSiblingDocument(database, workspace.id, actor, two.document.id, {
+    expect(() => reorderDocumentTree(database, workspace.id, actor, two.document.id, {
       targetDocumentId: parent.document.id,
       position: "after",
     })).toThrowError(expect.objectContaining({ code: "INVALID_INPUT" }));
+  });
+
+  it("appends an existing child when it is dropped inside its parent", () => {
+    const { database, user, workspace } = fixture();
+    const actor = { type: "human" as const, userId: user.id, label: user.name, source: "web" as const };
+    const parent = createDocument(database, workspace.id, actor, {
+      title: "07. NyxDoc 문서 운영",
+      content: textContent([{ text: "상위 문서" }]),
+    });
+    const first = createDocument(database, workspace.id, actor, {
+      title: "07-1",
+      parentDocumentId: parent.document.id,
+      content: textContent([{ text: "첫째" }]),
+    });
+    const second = createDocument(database, workspace.id, actor, {
+      title: "07-2",
+      parentDocumentId: parent.document.id,
+      content: textContent([{ text: "둘째" }]),
+    });
+    const revisionCountBefore = database.prepare(
+      "SELECT COUNT(*) AS count FROM document_revisions WHERE document_id = ?",
+    ).get(first.document.id);
+
+    const result = reorderDocumentTree(database, workspace.id, actor, first.document.id, {
+      targetDocumentId: parent.document.id,
+      position: "inside",
+    });
+
+    expect(result).toMatchObject({
+      parentDocumentId: parent.document.id,
+      position: "inside",
+      treeOrder: 200,
+      unchanged: false,
+    });
+    expect(result.orderedDocumentIds).toEqual([second.document.id, first.document.id]);
+    expect(database.prepare(
+      "SELECT COUNT(*) AS count FROM document_revisions WHERE document_id = ?",
+    ).get(first.document.id)).toEqual(revisionCountBefore);
   });
 
   it("clamps future change cursors to the workspace head without losing later events", () => {

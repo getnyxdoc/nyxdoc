@@ -65,6 +65,7 @@
 .pageTreeRow[data-dragging="true"] { opacity: .42; }
 .pageTreeRow[data-dragging="true"] .pageTreeLink { cursor: grabbing; }
 .pageTreeRow[data-drop-position="before"] { box-shadow: inset 0 2px 0 var(--mint-strong); }
+.pageTreeRow[data-drop-position="inside"] { background: var(--mint-soft); box-shadow: inset 0 0 0 2px var(--mint-strong); color: var(--ink); }
 .pageTreeRow[data-drop-position="after"] { box-shadow: inset 0 -2px 0 var(--mint-strong); }
 .pageTreeActive { background: var(--yellow-soft); color: var(--ink); }
 .pageTreeActive:hover { background: #fff3c5; }

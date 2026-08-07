@@ -142,7 +142,7 @@ export type DocumentMutationResult = {
   normalization?: BlockIdNormalization;
 };
 
-export type DocumentTreeDropPosition = "before" | "after";
+export type DocumentTreeDropPosition = "before" | "inside" | "after";
 
 export type DocumentTreeReorderResult = {
   documentId: string;

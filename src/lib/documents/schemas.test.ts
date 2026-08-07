@@ -4,6 +4,7 @@ import {
   agentUpdateDocumentSchema,
   createDocumentSchema,
   discardWorkingDocumentSchema,
+  reorderDocumentSchema,
   restoreDocumentRevisionSchema,
   restoreWorkingRevisionSchema,
   updateDocumentSchema,
@@ -81,5 +82,13 @@ describe("canonical document API schemas", () => {
       expectedGeneration: cas.expectedGeneration,
       expectedDraftVersion: cas.expectedDraftVersion,
     });
+  });
+
+  it("accepts before, inside, and after positions for document tree moves", () => {
+    const targetDocumentId = "7dcc9c33-5e68-41e4-af95-5933df3718d7";
+    for (const position of ["before", "inside", "after"] as const) {
+      expect(reorderDocumentSchema.parse({ targetDocumentId, position }))
+        .toEqual({ targetDocumentId, position });
+    }
   });
 });

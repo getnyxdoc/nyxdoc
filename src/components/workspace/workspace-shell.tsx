@@ -67,7 +67,7 @@ import type {
   DocumentSummary,
   DocumentTreeDropPosition,
 } from "@/lib/documents/types";
-import { reorderSiblingDocumentSummaries } from "@/lib/documents/tree-order";
+import { moveDocumentSummaryInTree } from "@/lib/documents/tree-order";
 import {
   NYXDOC_MAX_DOCUMENT_TEXT_LENGTH,
   NYXDOC_MAX_TOP_LEVEL_BLOCKS,
@@ -797,7 +797,7 @@ export function WorkspaceShell({ view }: { view: WorkspaceView }) {
     position: DocumentTreeDropPosition,
   ) => {
     const previousDocuments = documents;
-    const optimisticDocuments = reorderSiblingDocumentSummaries(
+    const optimisticDocuments = moveDocumentSummaryInTree(
       previousDocuments,
       documentId,
       targetDocumentId,
