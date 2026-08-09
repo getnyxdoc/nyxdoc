@@ -1,6 +1,6 @@
 {
   "name": "nyxdoc",
-  "version": "0.25.17",
+  "version": "0.25.18",
   "description": "An agent-native document system for people and their external agents.",
   "private": true,
   "license": "MIT",
@@ -28,6 +28,9 @@
     "test:watch": "vitest",
     "test:editor-e2e": "playwright test",
     "test:release-browser": "playwright test e2e/vertical",
+    "test:lifecycle-cli": "node scripts/test-lifecycle-cli.mjs",
+    "test:lifecycle-shell": "bash scripts/test-lifecycle-shell.sh",
+    "test:update-image-revision": "bash scripts/test-update-image-revision.sh",
     "test:agent-connect-http": "tsx scripts/test-agent-connect-http.ts",
     "test:mcp-http": "tsx scripts/test-mcp-http.ts",
     "test:mcp-oauth-http": "tsx scripts/test-mcp-oauth-http.ts",
@@ -48,7 +51,7 @@
     "@ariakit/react": "0.4.32",
     "@hocuspocus/provider": "^3.4.4",
     "@hocuspocus/server": "^3.4.4",
-    "@modelcontextprotocol/sdk": "^1.29.0",
+    "@modelcontextprotocol/sdk": "^1.30.0",
     "@platejs/basic-nodes": "53.0.0",
     "@platejs/basic-styles": "53.0.0",
     "@platejs/code-block": "^53.0.0",
@@ -66,13 +69,13 @@
     "better-auth": "^1.6.23",
     "better-sqlite3": "^12.11.1",
     "lucide-react": "^1.24.0",
-    "next": "16.2.10",
+    "next": "16.3.0",
     "nodemailer": "^9.0.3",
     "platejs": "53.2.4",
     "react": "19.2.4",
     "react-dom": "19.2.4",
     "remark-gfm": "^4.0.1",
-    "sharp": "0.34.5",
+    "sharp": "0.35.3",
     "ws": "^8.21.1",
     "y-indexeddb": "^9.0.12",
     "yjs": "^13.6.31",
@@ -89,12 +92,12 @@
     "@types/ws": "^8.18.1",
     "concurrently": "^10.0.3",
     "eslint": "^9",
-    "eslint-config-next": "16.2.10",
+    "eslint-config-next": "16.3.0",
     "tsx": "^4.23.0",
     "typescript": "^5",
     "vitest": "^4.1.10"
   },
   "overrides": {
-    "postcss": "8.5.16"
+    "postcss": "8.5.23"
   }
 }

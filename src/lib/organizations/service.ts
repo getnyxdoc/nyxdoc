@@ -646,19 +646,29 @@ export function updateOrganizationMemberRole(
     actorLabel: string;
   },
 ) {
-  const current = assertCanChangeMember(
-    database,
-    input.organizationId,
-    input.userId,
-    input.targetUserId,
-    input.role,
-  );
   const now = new Date().toISOString();
   database.transaction(() => {
-    database.prepare(
+    // This validation must share the same write transaction as the update. In
+    // particular, two owners may otherwise both observe two owners before
+    // either role update begins and simultaneously leave the organization with
+    // no owner.
+    const current = assertCanChangeMember(
+      database,
+      input.organizationId,
+      input.userId,
+      input.targetUserId,
+      input.role,
+    );
+    const result = database.prepare(
       `UPDATE organization_members SET role = ?, updated_at = ?
        WHERE organization_id = ? AND user_id = ?`,
     ).run(input.role, now, input.organizationId, input.targetUserId);
+    if (result.changes !== 1) {
+      throw new OrganizationServiceError(
+        "CONFLICT",
+        "조직 멤버 상태가 바뀌었습니다. 새로고침 후 다시 시도해주세요.",
+      );
+    }
     recordOrganizationAuditEvent(database, {
       organizationId: input.organizationId,
       action: "organization.member_role_updated",
@@ -684,14 +694,17 @@ export function removeOrganizationMember(
     actorLabel: string;
   },
 ) {
-  const current = assertCanChangeMember(
-    database,
-    input.organizationId,
-    input.userId,
-    input.targetUserId,
-  );
   const now = new Date().toISOString();
   database.transaction(() => {
+    // Keep the permission, target, and owner-count checks in this immediate
+    // transaction. A concurrent owner removal must be serialized before any
+    // dependent grants or memberships are revoked.
+    const current = assertCanChangeMember(
+      database,
+      input.organizationId,
+      input.userId,
+      input.targetUserId,
+    );
     const revokedPersonalAgentApprovals = database.prepare(
       `UPDATE organization_agent_approvals
        SET revoked_at = ?
@@ -731,9 +744,15 @@ export function removeOrganizationMember(
          WHERE owner_type = 'organization' AND organization_id = ?
        )`,
     ).run(input.targetUserId, input.organizationId);
-    database.prepare(
+    const result = database.prepare(
       "DELETE FROM organization_members WHERE organization_id = ? AND user_id = ?",
     ).run(input.organizationId, input.targetUserId);
+    if (result.changes !== 1) {
+      throw new OrganizationServiceError(
+        "CONFLICT",
+        "조직 멤버 상태가 바뀌었습니다. 새로고침 후 다시 시도해주세요.",
+      );
+    }
     recordOrganizationAuditEvent(database, {
       organizationId: input.organizationId,
       action: "organization.member_removed",
@@ -809,24 +828,7 @@ export function createOrganizationInvitation(
     expiresInDays?: number;
   },
 ) {
-  const actorRole = requireOrganizationPermission(
-    database,
-    input.organizationId,
-    input.userId,
-    "members.manage",
-  );
-  if (actorRole !== "owner" && input.role === "admin") {
-    throw new OrganizationServiceError("FORBIDDEN", "조직 소유자만 관리자를 초대할 수 있습니다.");
-  }
   const email = normalizeEmail(input.email);
-  if (email) {
-    const existing = database.prepare(
-      `SELECT 1 FROM organization_members member
-       JOIN user account ON account.id = member.user_id
-       WHERE member.organization_id = ? AND lower(account.email) = ?`,
-    ).get(input.organizationId, email);
-    if (existing) throw new OrganizationServiceError("CONFLICT", "이미 조직에 참여한 사용자입니다.");
-  }
   const expiresInDays = input.expiresInDays ?? 7;
   if (!Number.isInteger(expiresInDays) || expiresInDays < 1 || expiresInDays > 30) {
     throw new OrganizationServiceError("INVALID_INPUT", "초대 유효기간은 1일 이상 30일 이하여야 합니다.");
@@ -837,6 +839,27 @@ export function createOrganizationInvitation(
   const now = new Date();
   const expiresAt = new Date(now.getTime() + expiresInDays * 24 * 60 * 60 * 1_000);
   database.transaction(() => {
+    // This is deliberately the first database operation. A manager can be
+    // demoted or removed between the request entering this service and the
+    // write lock being acquired, so authorization must be evaluated only
+    // after BEGIN IMMEDIATE has serialized the change.
+    const actorRole = requireOrganizationPermission(
+      database,
+      input.organizationId,
+      input.userId,
+      "members.manage",
+    );
+    if (actorRole !== "owner" && input.role === "admin") {
+      throw new OrganizationServiceError("FORBIDDEN", "조직 소유자만 관리자를 초대할 수 있습니다.");
+    }
+    if (email) {
+      const existing = database.prepare(
+        `SELECT 1 FROM organization_members member
+         JOIN user account ON account.id = member.user_id
+         WHERE member.organization_id = ? AND lower(account.email) = ?`,
+      ).get(input.organizationId, email);
+      if (existing) throw new OrganizationServiceError("CONFLICT", "이미 조직에 참여한 사용자입니다.");
+    }
     if (email) {
       database.prepare(
         `UPDATE organization_invitations SET revoked_at = ?
@@ -873,9 +896,18 @@ export function createOrganizationInvitation(
     });
   }).immediate();
   return {
-    invitation: listOrganizationInvitations(database, input.organizationId, input.userId).find(
-      (invitation) => invitation.id === id,
-    )!,
+    invitation: {
+      id,
+      email,
+      role: input.role,
+      prefix: rawToken.slice(0, 16),
+      status: "active" as const,
+      createdByLabel: input.actorLabel,
+      createdAt: now.toISOString(),
+      expiresAt: expiresAt.toISOString(),
+      acceptedAt: null,
+      revokedAt: null,
+    },
     token: rawToken,
     url: `${getAuthBaseUrl().replace(/\/$/, "")}/organization-invite?invite=${encodeURIComponent(rawToken)}`,
   };
@@ -997,9 +1029,9 @@ export function revokeOrganizationInvitation(
     invitationId: string;
   },
 ) {
-  requireOrganizationPermission(database, input.organizationId, input.userId, "members.manage");
   const now = new Date().toISOString();
   database.transaction(() => {
+    requireOrganizationPermission(database, input.organizationId, input.userId, "members.manage");
     const result = database.prepare(
       `UPDATE organization_invitations SET revoked_at = ?
        WHERE id = ? AND organization_id = ?
@@ -1176,10 +1208,10 @@ export function deleteOrganizationTeam(
   database: NyxDatabase,
   input: { organizationId: string; userId: string; actorLabel: string; teamId: string },
 ) {
-  requireOrganizationPermission(database, input.organizationId, input.userId, "teams.manage");
-  const current = requireTeam(database, input.organizationId, input.teamId);
   const now = new Date().toISOString();
   database.transaction(() => {
+    requireOrganizationPermission(database, input.organizationId, input.userId, "teams.manage");
+    const current = requireTeam(database, input.organizationId, input.teamId);
     database.prepare(
       "DELETE FROM teams WHERE id = ? AND organization_id = ?",
     ).run(input.teamId, input.organizationId);
@@ -1206,14 +1238,14 @@ export function addOrganizationTeamMember(
     targetUserId: string;
   },
 ) {
-  requireOrganizationPermission(database, input.organizationId, input.userId, "teams.manage");
-  requireTeam(database, input.organizationId, input.teamId);
-  const member = database.prepare(
-    "SELECT 1 FROM organization_members WHERE organization_id = ? AND user_id = ?",
-  ).get(input.organizationId, input.targetUserId);
-  if (!member) throw new OrganizationServiceError("INVALID_INPUT", "조직 멤버만 팀에 추가할 수 있습니다.");
   const now = new Date().toISOString();
   database.transaction(() => {
+    requireOrganizationPermission(database, input.organizationId, input.userId, "teams.manage");
+    requireTeam(database, input.organizationId, input.teamId);
+    const member = database.prepare(
+      "SELECT 1 FROM organization_members WHERE organization_id = ? AND user_id = ?",
+    ).get(input.organizationId, input.targetUserId);
+    if (!member) throw new OrganizationServiceError("INVALID_INPUT", "조직 멤버만 팀에 추가할 수 있습니다.");
     const result = database.prepare(
       `INSERT INTO team_members
        (id, organization_id, team_id, user_id, added_by_user_id, created_at)
@@ -1256,10 +1288,10 @@ export function removeOrganizationTeamMember(
     targetUserId: string;
   },
 ) {
-  requireOrganizationPermission(database, input.organizationId, input.userId, "teams.manage");
-  requireTeam(database, input.organizationId, input.teamId);
   const now = new Date().toISOString();
   database.transaction(() => {
+    requireOrganizationPermission(database, input.organizationId, input.userId, "teams.manage");
+    requireTeam(database, input.organizationId, input.teamId);
     const result = database.prepare(
       `DELETE FROM team_members
        WHERE organization_id = ? AND team_id = ? AND user_id = ?`,
@@ -1417,16 +1449,20 @@ export function upsertOrganizationWorkspaceTeamGrant(
     role: "admin" | "editor" | "viewer";
   },
 ) {
-  requireOrganizationPermission(database, input.organizationId, input.userId, "workspaces.manage");
-  requireOrganizationWorkspace(database, input.organizationId, input.workspaceId);
-  requireTeam(database, input.organizationId, input.teamId);
-  const current = database.prepare(
-    `SELECT id, access_role FROM workspace_team_grants
-     WHERE workspace_id = ? AND team_id = ?`,
-  ).get(input.workspaceId, input.teamId) as { id: string; access_role: string } | undefined;
-  const id = current?.id ?? randomUUID();
   const now = new Date().toISOString();
-  database.transaction(() => {
+  return database.transaction(() => {
+    requireOrganizationPermission(database, input.organizationId, input.userId, "workspaces.manage");
+    requireOrganizationWorkspace(database, input.organizationId, input.workspaceId);
+    const team = requireTeam(database, input.organizationId, input.teamId);
+    const current = database.prepare(
+      `SELECT id, access_role, created_at FROM workspace_team_grants
+       WHERE workspace_id = ? AND team_id = ?`,
+    ).get(input.workspaceId, input.teamId) as {
+      id: string;
+      access_role: "admin" | "editor" | "viewer";
+      created_at: string;
+    } | undefined;
+    const id = current?.id ?? randomUUID();
     database.prepare(
       `INSERT INTO workspace_team_grants
        (id, organization_id, workspace_id, team_id, access_role,
@@ -1456,10 +1492,16 @@ export function upsertOrganizationWorkspaceTeamGrant(
       metadata: { teamId: input.teamId, before: current?.access_role ?? null, after: input.role },
       createdAt: now,
     });
+    return {
+      id,
+      workspaceId: input.workspaceId,
+      teamId: input.teamId,
+      teamName: team.name,
+      role: input.role,
+      createdAt: current?.created_at ?? now,
+      updatedAt: now,
+    } satisfies OrganizationWorkspaceGrant;
   }).immediate();
-  return listOrganizationWorkspaceGrants(database, input.organizationId, input.userId).find(
-    (grant) => grant.workspaceId === input.workspaceId && grant.teamId === input.teamId,
-  )!;
 }
 
 export function removeOrganizationWorkspaceTeamGrant(
@@ -1472,10 +1514,10 @@ export function removeOrganizationWorkspaceTeamGrant(
     teamId: string;
   },
 ) {
-  requireOrganizationPermission(database, input.organizationId, input.userId, "workspaces.manage");
-  requireOrganizationWorkspace(database, input.organizationId, input.workspaceId);
   const now = new Date().toISOString();
   database.transaction(() => {
+    requireOrganizationPermission(database, input.organizationId, input.userId, "workspaces.manage");
+    requireOrganizationWorkspace(database, input.organizationId, input.workspaceId);
     const result = database.prepare(
       `DELETE FROM workspace_team_grants
        WHERE organization_id = ? AND workspace_id = ? AND team_id = ?`,
@@ -1507,17 +1549,17 @@ export function upsertOrganizationWorkspaceMemberGrant(
     role: "admin" | "editor" | "viewer";
   },
 ) {
-  requireOrganizationPermission(database, input.organizationId, input.userId, "workspaces.manage");
-  requireOrganizationWorkspace(database, input.organizationId, input.workspaceId);
-  const member = database.prepare(
-    "SELECT 1 FROM organization_members WHERE organization_id = ? AND user_id = ?",
-  ).get(input.organizationId, input.targetUserId);
-  if (!member) throw new OrganizationServiceError("INVALID_INPUT", "조직 멤버만 워크스페이스에 배정할 수 있습니다.");
-  const current = database.prepare(
-    "SELECT id, access_role FROM workspace_members WHERE workspace_id = ? AND user_id = ?",
-  ).get(input.workspaceId, input.targetUserId) as { id: string; access_role: string | null } | undefined;
   const now = new Date().toISOString();
   database.transaction(() => {
+    requireOrganizationPermission(database, input.organizationId, input.userId, "workspaces.manage");
+    requireOrganizationWorkspace(database, input.organizationId, input.workspaceId);
+    const member = database.prepare(
+      "SELECT 1 FROM organization_members WHERE organization_id = ? AND user_id = ?",
+    ).get(input.organizationId, input.targetUserId);
+    if (!member) throw new OrganizationServiceError("INVALID_INPUT", "조직 멤버만 워크스페이스에 배정할 수 있습니다.");
+    const current = database.prepare(
+      "SELECT id, access_role FROM workspace_members WHERE workspace_id = ? AND user_id = ?",
+    ).get(input.workspaceId, input.targetUserId) as { id: string; access_role: string | null } | undefined;
     database.prepare(
       `INSERT INTO workspace_members
        (id, workspace_id, user_id, role, access_role, created_at)
@@ -1548,10 +1590,10 @@ export function removeOrganizationWorkspaceMemberGrant(
     targetUserId: string;
   },
 ) {
-  requireOrganizationPermission(database, input.organizationId, input.userId, "workspaces.manage");
-  requireOrganizationWorkspace(database, input.organizationId, input.workspaceId);
   const now = new Date().toISOString();
   database.transaction(() => {
+    requireOrganizationPermission(database, input.organizationId, input.userId, "workspaces.manage");
+    requireOrganizationWorkspace(database, input.organizationId, input.workspaceId);
     const result = database.prepare(
       "DELETE FROM workspace_members WHERE workspace_id = ? AND user_id = ? AND role <> 'owner'",
     ).run(input.workspaceId, input.targetUserId);

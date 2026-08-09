@@ -28,8 +28,11 @@ export function moveDocumentSummaryInTree(
 
   const originalIndex = new Map(documents.map((document, index) => [document.id, index]));
   const parentOverrides = new Map([[documentId, destinationParentDocumentId]]);
-  const parentOf = (document: DocumentSummary) => parentOverrides.get(document.id)
-    ?? document.parentDocumentId;
+  // `null` is the explicit workspace-root parent. A nullish fallback would
+  // silently replace that intended move with the document's previous parent.
+  const parentOf = (document: DocumentSummary) => parentOverrides.has(document.id)
+    ? (parentOverrides.get(document.id) ?? null)
+    : document.parentDocumentId;
   const sortedSiblings = (parentDocumentId: string | null) => documents
     .filter((document) => parentOf(document) === parentDocumentId)
     .sort((left, right) =>

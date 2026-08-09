@@ -67,8 +67,14 @@ document work.
 
 ## Quick start with Docker Compose
 
-The supported production path is Linux and Docker Compose. Node.js 24 is used
-for local development.
+The supported self-hosting path is Linux, Docker Engine, and Docker Compose v2.
+The lifecycle scripts are Bash/Linux scripts: macOS and Windows Docker Desktop
+are useful for local development, but are not supported targets for install,
+update, uninstall, backup recovery, or production operation. Use a Linux host
+or VM for those commands. Node.js 24 is used for local development.
+
+See the [open-source newcomer guide](docs/open-source-readiness.md) for
+prerequisites and the five-minute path.
 
 For a local trial, clone and install in one command:
 
@@ -77,8 +83,9 @@ git clone https://github.com/getnyxdoc/nyxdoc.git && cd nyxdoc && ./scripts/inst
 ```
 
 The installer creates `.env.production`, generates two different secrets
-without displaying them, pulls the exact release image, starts every service,
-and waits for health checks. To build this checkout instead, use
+without displaying them, pulls the versioned release image matching this
+checkout, starts every service, and waits for health checks. To build this
+checkout instead, use
 `./scripts/install.sh --build`.
 
 Open [http://localhost:3191](http://localhost:3191). The first account becomes
@@ -93,10 +100,24 @@ Update, stop, or remove the trial with explicit lifecycle commands:
 ./scripts/uninstall.sh --purge --confirm-purge=nyxdoc
 ```
 
-Normal uninstall preserves documents, media, backups, configuration, and the
-source checkout. Purge removes the Docker data volume but still preserves the
-external backup directory, configuration, and source. For HTTPS, backups,
-updates, removal, and recovery, read
+For the one-time update from `0.25.17` to `0.25.18`, run this command from the
+Nyxdoc checkout instead:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/getnyxdoc/nyxdoc/v0.25.18/scripts/update-bootstrap.sh | bash
+```
+
+The bridge closes the public collaboration boundary and drains already accepted
+editor writes before the legacy updater creates its backup. From `0.25.18`
+onward, use `./scripts/update.sh` normally.
+
+`update.sh` requires a clean Git checkout and creates a verified pre-update
+backup before changing a running installation. A failed matching update can
+resume only from its persisted, re-verified backup receipt. Normal uninstall
+preserves documents, media, backups, configuration, and the source checkout.
+Purge removes the Docker data volume and locally built images, but still
+preserves the external backup directory, configuration, and source. For HTTPS,
+backups, updates, removal, and recovery, read
 [DEPLOYMENT.md](DEPLOYMENT.md).
 
 ## Local development
@@ -122,43 +143,21 @@ npm run build
 
 ## Connect an external agent
 
-Create an agent identity and connection key in Nyxdoc. The UI provides one
-copyable handoff containing the MCP URL, transport, Bearer key, workspace access profile,
-and verification steps.
+After signing in, open **Settings → Workspace → Agent access → Connect the first
+agent**. Choose or create an agent identity, access profile, document scope, and
+connection key. A new key is shown only once; the UI-generated private handoff
+contains the workspace-default MCP URL, Streamable HTTP transport, Bearer
+authentication, and verification steps.
 
-Generic MCP connection:
-
-```text
-Transport: Streamable HTTP
-URL: https://your-nyxdoc.example/mcp
-Authorization: Bearer <NYXDOC_TOKEN>
-```
-
-Nyxdoc also advertises OAuth 2.1 discovery metadata for clients that support
-remote MCP authorization. OAuth uses PKCE S256 and lets the person choose the
-allowed workspaces and each workspace access profile; existing Bearer connection keys
-remain supported for local agents and automation.
-
-Call the compact `get_capabilities` summary first. Fetch a full AST schema with
-`get_schema` only when it is needed. It reports permissions, workspace scope,
-and the recommended small-document workflow. Agent To-dos are returned by assignee,
-with workspace information included as context; agents must not start queued
-To-dos unless a person explicitly asks them to process Nyxdoc To-dos.
-
-For images, an agent calls `create_image_upload`, PUTs the original bytes to
-the returned five-minute single-use URL, and inserts the response's
-`imageBlock`. Image bytes and base64 never travel inside the MCP JSON document.
-
-Use `capture_handoff` when a person asks an agent to preserve a conversation as
-structured project memory. It creates one document and optional ready Agent
-To-dos without starting those To-dos.
-
-See [docs/agent-contract.md](docs/agent-contract.md) for the full contract and
-[docs/mcp/oauth.md](docs/mcp/oauth.md) for remote OAuth setup.
+Call `get_capabilities` first, then `list_agent_workspaces`. For the complete
+five-minute path, Codex/Codex CLI setup, OAuth, image uploads, and Agent To-do
+boundaries, see [docs/open-source-readiness.md](docs/open-source-readiness.md),
+[docs/agent-contract.md](docs/agent-contract.md), and
+[docs/mcp/oauth.md](docs/mcp/oauth.md).
 
 ## Project status
 
-Version `0.25.10` is an early 0.x release used with real documents. Data
+Version `0.25.18` is an early 0.x release used with real documents. Data
 migrations are forward-only and rehearsed against verified backups, but APIs
 and UI details may still evolve before 1.0.
 
@@ -179,6 +178,8 @@ access, which is assigned explicitly per person or team at each workspace.
 - [Conversation handoff](docs/mcp/handoff.md)
 - [Agent To-do](docs/document-tasks.md)
 - [Editor quality gate](docs/editor-quality-gate.md)
+- [Open-source newcomer guide](docs/open-source-readiness.md)
+- [Testing and release qualification](docs/testing-and-release-qualification.md)
 
 ## Community and security
 

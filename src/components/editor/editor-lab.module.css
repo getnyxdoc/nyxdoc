@@ -363,6 +363,7 @@
 .editorContent code { padding: 2px 5px; border-radius: 5px; background: #f0f4f1; color: #9b4161; font-family: var(--font-mono); font-size: .88em; }
 .documentLink {
   color: #25785d;
+  cursor: pointer;
   text-decoration: underline;
   text-decoration-color: #8ac9b0;
   text-decoration-thickness: 1px;
@@ -388,6 +389,7 @@
   font-weight: 680;
   text-decoration: none;
 }
+a.documentReference { cursor: pointer; }
 .documentReference::before { content: "↗ "; opacity: .65; }
 .documentReference:hover { background: #ddf3e8; color: #195e47; }
 .codeBlock {

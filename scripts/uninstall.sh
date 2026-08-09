@@ -62,6 +62,7 @@ else
 fi
 
 nyxdoc_compose down --volumes --remove-orphans --rmi local
+nyxdoc_clear_update_state
 nyxdoc_info "Permanent purge complete."
 nyxdoc_info "Preserved external backups: $backup_path"
 nyxdoc_info "Preserved environment: $NYXDOC_ENV_FILE"

@@ -1,4 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
+import { yTextToSlateElement } from "@slate-yjs/core";
+import * as Y from "yjs";
 import type { NyxDatabase } from "@/lib/db/client";
 import {
   assertDatabaseFingerprintEqual,
@@ -11,7 +13,121 @@ export type AppMigration = {
   id: string;
   sql: string;
   safety?: "schema" | "transform" | "destructive-reset" | "operational";
+  transform?: {
+    /** Immutable semantic description included in the migration checksum. */
+    checksum: string;
+    apply: (database: NyxDatabase) => void;
+  };
 };
+
+function collectImageMediaIds(value: unknown, output = new Set<string>()) {
+  if (!value || typeof value !== "object") return output;
+  if (Array.isArray(value)) {
+    value.forEach((item) => collectImageMediaIds(item, output));
+    return output;
+  }
+  const node = value as Record<string, unknown>;
+  if (node.type === "img" && typeof node.mediaId === "string" && node.mediaId) {
+    output.add(node.mediaId);
+  }
+  Object.values(node).forEach((item) => collectImageMediaIds(item, output));
+  return output;
+}
+
+function imageMediaIdsFromJson(value: string) {
+  try {
+    return collectImageMediaIds(JSON.parse(value));
+  } catch {
+    return new Set<string>();
+  }
+}
+
+function imageMediaIdsFromCollaborationState(value: Buffer) {
+  try {
+    // Empty legacy state rows are placeholders, not an initialized empty
+    // document. Preserve the canonical projection in that case.
+    if (value.byteLength === 0) return null;
+    const ydoc = new Y.Doc();
+    Y.applyUpdate(ydoc, value, "nyxdoc-media-binding-migration");
+    const root = yTextToSlateElement(ydoc.get("content", Y.XmlText)) as unknown as {
+      children?: unknown;
+    };
+    return collectImageMediaIds(root.children);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Backfills the two media provenance facts without deleting legacy binding
+ * rows. A live Yjs draft is the current document projection when available;
+ * otherwise the canonical block projection is used. Retained revision
+ * snapshots are independently classified as historical media.
+ */
+function backfillDocumentMediaBindingProvenance(database: NyxDatabase) {
+  const currentByDocument = new Map<string, Set<string>>();
+  const addCurrent = (documentId: string, mediaIds: Set<string>) => {
+    const current = currentByDocument.get(documentId) ?? new Set<string>();
+    mediaIds.forEach((mediaId) => current.add(mediaId));
+    currentByDocument.set(documentId, current);
+  };
+  const canonicalBlocks = database.prepare(
+    `SELECT block.document_id, block.content_json
+     FROM document_blocks block
+     WHERE block.deleted_at IS NULL AND block.content_json IS NOT NULL`,
+  ).all() as Array<{ document_id: string; content_json: string }>;
+  canonicalBlocks.forEach((block) => addCurrent(
+    block.document_id,
+    imageMediaIdsFromJson(block.content_json),
+  ));
+
+  const collaborationStates = database.prepare(
+    `SELECT state.document_id, state.yjs_state
+     FROM document_collaboration_states state`,
+  ).all() as Array<{ document_id: string; yjs_state: Buffer }>;
+  collaborationStates.forEach((state) => {
+    const mediaIds = imageMediaIdsFromCollaborationState(state.yjs_state);
+    // A malformed CRDT state must not turn a valid canonical reference into a
+    // newly inaccessible asset during migration. The normal state-machine
+    // validation continues to own repair of malformed draft data.
+    if (mediaIds) currentByDocument.set(state.document_id, mediaIds);
+  });
+
+  const historyByDocument = new Map<string, Set<string>>();
+  const addHistory = (documentId: string, mediaIds: Set<string>) => {
+    const history = historyByDocument.get(documentId) ?? new Set<string>();
+    mediaIds.forEach((mediaId) => history.add(mediaId));
+    historyByDocument.set(documentId, history);
+  };
+  const revisions = database.prepare(
+    `SELECT revision.document_id, revision.snapshot_json
+     FROM document_revisions revision
+     JOIN documents document ON document.id = revision.document_id`,
+  ).all() as Array<{ document_id: string; snapshot_json: string }>;
+  revisions.forEach((revision) => addHistory(
+    revision.document_id,
+    imageMediaIdsFromJson(revision.snapshot_json),
+  ));
+
+  const bindings = database.prepare(
+    `SELECT workspace_id, document_id, media_id
+     FROM document_media_bindings`,
+  ).all() as Array<{ workspace_id: string; document_id: string; media_id: string }>;
+  const update = database.prepare(
+    `UPDATE document_media_bindings
+     SET current_binding = ?, revision_binding = ?
+     WHERE workspace_id = ? AND document_id = ? AND media_id = ?`,
+  );
+  bindings.forEach((binding) => {
+    update.run(
+      currentByDocument.get(binding.document_id)?.has(binding.media_id) ? 1 : 0,
+      historyByDocument.get(binding.document_id)?.has(binding.media_id) ? 1 : 0,
+      binding.workspace_id,
+      binding.document_id,
+      binding.media_id,
+    );
+  });
+}
 
 export const APP_MIGRATIONS: readonly AppMigration[] = [
   {
@@ -2738,6 +2854,188 @@ export const APP_MIGRATIONS: readonly AppMigration[] = [
       BEGIN SELECT RAISE(ABORT, 'bug report attachment must remain inside its manual report workspace'); END;
     `,
   },
+  {
+    id: "0043_document_revision_pointer_guards",
+    safety: "schema",
+    sql: `
+      CREATE TRIGGER documents_current_revision_insert
+      BEFORE INSERT ON documents
+      WHEN NEW.current_revision_id IS NOT NULL AND NOT EXISTS (
+        SELECT 1 FROM document_revisions revision
+        WHERE revision.id = NEW.current_revision_id
+          AND revision.document_id = NEW.id
+      )
+      BEGIN SELECT RAISE(ABORT, 'document current revision must belong to the same document'); END;
+
+      CREATE TRIGGER documents_current_revision_update
+      BEFORE UPDATE OF id, current_revision_id ON documents
+      WHEN NEW.current_revision_id IS NOT NULL AND NOT EXISTS (
+        SELECT 1 FROM document_revisions revision
+        WHERE revision.id = NEW.current_revision_id
+          AND revision.document_id = NEW.id
+      )
+      BEGIN SELECT RAISE(ABORT, 'document current revision must belong to the same document'); END;
+
+      CREATE TRIGGER document_revisions_current_pointer_update
+      BEFORE UPDATE OF id, document_id ON document_revisions
+      WHEN EXISTS (
+        SELECT 1 FROM documents document
+        WHERE document.current_revision_id = OLD.id
+          AND (NEW.id <> OLD.id OR NEW.document_id <> document.id)
+      )
+      BEGIN SELECT RAISE(ABORT, 'current document revision cannot move to another document'); END;
+
+      CREATE TRIGGER document_revisions_current_pointer_delete
+      BEFORE DELETE ON document_revisions
+      WHEN EXISTS (
+        SELECT 1 FROM documents document
+        WHERE document.current_revision_id = OLD.id
+      )
+      BEGIN SELECT RAISE(ABORT, 'current document revision cannot be deleted'); END;
+
+      CREATE TRIGGER collaboration_state_base_revision_insert
+      BEFORE INSERT ON document_collaboration_states
+      WHEN (NEW.base_revision_id IS NULL AND NEW.base_revision_number <> 0)
+        OR (NEW.base_revision_id IS NOT NULL AND NOT EXISTS (
+          SELECT 1 FROM document_revisions revision
+          WHERE revision.id = NEW.base_revision_id
+            AND revision.document_id = NEW.document_id
+            AND revision.revision_number = NEW.base_revision_number
+        ))
+      BEGIN SELECT RAISE(ABORT, 'collaboration base revision id and number must match the same document'); END;
+
+      CREATE TRIGGER collaboration_state_base_revision_update
+      BEFORE UPDATE OF document_id, base_revision_id, base_revision_number
+      ON document_collaboration_states
+      WHEN (NEW.base_revision_id IS NULL AND NEW.base_revision_number <> 0)
+        OR (NEW.base_revision_id IS NOT NULL AND NOT EXISTS (
+          SELECT 1 FROM document_revisions revision
+          WHERE revision.id = NEW.base_revision_id
+            AND revision.document_id = NEW.document_id
+            AND revision.revision_number = NEW.base_revision_number
+        ))
+      BEGIN SELECT RAISE(ABORT, 'collaboration base revision id and number must match the same document'); END;
+
+      CREATE TRIGGER document_revisions_collaboration_pointer_update
+      BEFORE UPDATE OF id, document_id, revision_number ON document_revisions
+      WHEN EXISTS (
+        SELECT 1 FROM document_collaboration_states state
+        WHERE state.base_revision_id = OLD.id
+          AND (
+            NEW.id <> OLD.id
+            OR NEW.document_id <> state.document_id
+            OR NEW.revision_number <> state.base_revision_number
+          )
+      )
+      BEGIN SELECT RAISE(ABORT, 'collaboration base revision cannot be moved or renumbered'); END;
+
+      CREATE TRIGGER document_revisions_collaboration_pointer_delete
+      BEFORE DELETE ON document_revisions
+      WHEN EXISTS (
+        SELECT 1 FROM document_collaboration_states state
+        WHERE state.base_revision_id = OLD.id
+      )
+      BEGIN SELECT RAISE(ABORT, 'collaboration base revision cannot be deleted'); END;
+
+      CREATE TRIGGER documents_collaboration_workspace_update
+      AFTER UPDATE OF workspace_id ON documents
+      WHEN NEW.workspace_id <> OLD.workspace_id
+      BEGIN
+        UPDATE document_collaboration_states
+        SET workspace_id = NEW.workspace_id
+        WHERE document_id = NEW.id;
+      END;
+
+      UPDATE documents
+      SET current_revision_id = current_revision_id;
+
+      UPDATE document_collaboration_states
+      SET document_id = document_id,
+          workspace_id = workspace_id,
+          base_revision_id = base_revision_id,
+          base_revision_number = base_revision_number;
+    `,
+  },
+  {
+    id: "0044_document_media_binding_provenance",
+    safety: "transform",
+    sql: `
+      ALTER TABLE document_media_bindings
+        ADD COLUMN current_binding INTEGER NOT NULL DEFAULT 1
+        CHECK (current_binding IN (0, 1));
+
+      ALTER TABLE document_media_bindings
+        ADD COLUMN revision_binding INTEGER NOT NULL DEFAULT 0
+        CHECK (revision_binding IN (0, 1));
+    `,
+    transform: {
+      checksum: "media-binding-provenance/v1: current=visible-draft-or-canonical; revision=retained-snapshot; preserve-rows",
+      apply: backfillDocumentMediaBindingProvenance,
+    },
+  },
+  {
+    id: "0045_collaboration_backup_checkpoint",
+    safety: "schema",
+    sql: `
+      CREATE TABLE collaboration_backup_checkpoints (
+        checkpoint_slot INTEGER PRIMARY KEY CHECK (checkpoint_slot = 1),
+        barrier_id TEXT NOT NULL,
+        acquired_at TEXT NOT NULL,
+        flushed_at TEXT NOT NULL,
+        expires_at TEXT NOT NULL,
+        flush_watermark INTEGER NOT NULL CHECK (flush_watermark >= 0),
+        loaded_document_count INTEGER NOT NULL CHECK (loaded_document_count >= 0),
+        checkpoint_recorded_at TEXT NOT NULL
+      );
+    `,
+  },
+  {
+    id: "0046_workspace_media_cleanup_queue",
+    safety: "schema",
+    sql: `
+      CREATE TABLE workspace_media_cleanup_queue (
+        id TEXT PRIMARY KEY,
+        workspace_id TEXT NOT NULL
+          REFERENCES workspace_purge_tombstones(workspace_id) ON DELETE CASCADE,
+        media_asset_id TEXT NOT NULL,
+        storage_key TEXT NOT NULL UNIQUE,
+        status TEXT NOT NULL DEFAULT 'pending'
+          CHECK (status IN ('pending', 'completed')),
+        attempt_count INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
+        enqueued_at TEXT NOT NULL,
+        last_attempt_at TEXT,
+        completed_at TEXT,
+        last_error TEXT,
+        UNIQUE (workspace_id, media_asset_id),
+        CHECK (
+          (status = 'pending' AND completed_at IS NULL)
+          OR (status = 'completed' AND completed_at IS NOT NULL)
+        )
+      );
+
+      CREATE INDEX workspace_media_cleanup_queue_pending_idx
+        ON workspace_media_cleanup_queue(status, workspace_id, enqueued_at, id);
+
+      CREATE TRIGGER workspace_media_cleanup_queue_boundary_insert
+      BEFORE INSERT ON workspace_media_cleanup_queue
+      WHEN NOT EXISTS (
+        SELECT 1
+        FROM media_assets media
+        WHERE media.id = NEW.media_asset_id
+          AND media.workspace_id = NEW.workspace_id
+          AND media.storage_key = NEW.storage_key
+      )
+      BEGIN SELECT RAISE(ABORT, 'workspace media cleanup must match a workspace purge asset'); END;
+
+      CREATE TRIGGER workspace_media_cleanup_queue_identity_immutable
+      BEFORE UPDATE OF workspace_id, media_asset_id, storage_key
+      ON workspace_media_cleanup_queue
+      WHEN NEW.workspace_id <> OLD.workspace_id
+        OR NEW.media_asset_id <> OLD.media_asset_id
+        OR NEW.storage_key <> OLD.storage_key
+      BEGIN SELECT RAISE(ABORT, 'workspace media cleanup identity is immutable'); END;
+    `,
+  },
 ];
 
 export type AppMigrationPlan = {
@@ -2771,12 +3069,49 @@ function ensureMigrationLedger(database: NyxDatabase) {
   `);
 }
 
+/**
+ * A brand-new installation has no state to preserve before its first schema
+ * initialization. Keep this predicate deliberately narrow: any application
+ * table or any recorded app migration means the database must use the normal
+ * backup-protected migration path.
+ */
+export function isPristineDatabaseForInitialization(database: NyxDatabase) {
+  const tables = (database.prepare(
+    `SELECT name
+     FROM sqlite_master
+     WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
+     ORDER BY name`,
+  ).all() as Array<{ name: string }>).map((row) => row.name);
+
+  if (tables.length === 0) return true;
+  if (tables.length !== 1 || tables[0] !== "_nyxdoc_migrations") return false;
+
+  const row = database.prepare(
+    "SELECT COUNT(*) AS count FROM _nyxdoc_migrations",
+  ).get() as { count: number };
+  return Number(row.count) === 0;
+}
+
 export function appMigrationChecksum(migration: AppMigration) {
+  const normalizedSql = migration.sql.replaceAll(/\r\n?/g, "\n");
+  if (!migration.transform) {
+    // v0.25.17 recorded this exact v1 byte sequence for 0001-0042. Do not
+    // append a delimiter for an absent transform: even a trailing NUL changes
+    // every historical checksum and prevents a real database from upgrading.
+    return createHash("sha256")
+      .update("nyxdoc-app-migration/v1\0")
+      .update(migration.id)
+      .update("\0")
+      .update(normalizedSql)
+      .digest("hex");
+  }
   return createHash("sha256")
-    .update("nyxdoc-app-migration/v1\0")
+    .update("nyxdoc-app-migration/v2\0")
     .update(migration.id)
     .update("\0")
-    .update(migration.sql.replaceAll(/\r\n?/g, "\n"))
+    .update(normalizedSql)
+    .update("\0")
+    .update(migration.transform.checksum)
     .digest("hex");
 }
 
@@ -2890,6 +3225,7 @@ export function runAppMigrations(
       const migration = pendingById.get(pending.id)!;
       assertMigrationPrecondition(database, migration);
       database.exec(migration.sql);
+      migration.transform?.apply(database);
       record.run(migration.id, new Date().toISOString());
     }
 

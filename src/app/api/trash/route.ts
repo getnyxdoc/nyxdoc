@@ -1,7 +1,7 @@
 import { requireWorkspaceSession } from "@/data/workspace-context";
 import { requireHumanWorkspacePermission } from "@/lib/authz/permissions";
 import { sqlite } from "@/lib/db/client";
-import { createDestructiveOperationBackup } from "@/lib/db/safety-backup";
+import { withDestructiveOperationBackup } from "@/lib/db/safety-backup";
 import { humanDocumentActor } from "@/lib/documents/actors";
 import { listTrashBatches, purgeTrashedDocument } from "@/lib/documents/service";
 import { apiErrorResponse } from "@/lib/http/errors";
@@ -30,18 +30,35 @@ export async function DELETE(request: Request) {
     requireHumanWorkspacePermission(sqlite, workspace.id, session.user.id, "documents.purge");
     const batches = listTrashBatches(sqlite, workspace.id);
     if (batches.length === 0) return Response.json({ documentCount: 0, results: [] });
-    const backup = await createDestructiveOperationBackup();
     const actor = humanDocumentActor(session.user);
-    const results = sqlite.transaction(() => batches.map((batch) => purgeTrashedDocument(
-      sqlite,
-      workspace.id,
-      actor,
-      batch.rootDocumentId,
-    )))();
+    const protectedOperation = await withDestructiveOperationBackup((backup) => ({
+      backupGenerationId: backup.manifest.generationId,
+      results: sqlite.transaction(() => {
+        requireHumanWorkspacePermission(
+          sqlite,
+          workspace.id,
+          session.user.id,
+          "documents.purge",
+        );
+        return batches.map((batch) => purgeTrashedDocument(
+          sqlite,
+          workspace.id,
+          actor,
+          batch.rootDocumentId,
+        ));
+      }).immediate(),
+    }));
+    const { backupGenerationId, results } = protectedOperation.result;
+    if (protectedOperation.warnings.length > 0) {
+      console.warn("[nyxdoc] trash purge completed with backup barrier warnings", {
+        workspaceId: workspace.id,
+        warnings: protectedOperation.warnings,
+      });
+    }
     return Response.json({
       documentCount: results.reduce((total, result) => total + result.documentCount, 0),
       results,
-      backupGenerationId: backup.manifest.generationId,
+      backupGenerationId,
     });
   } catch (error) {
     return apiErrorResponse(error);

@@ -25,7 +25,7 @@ const MAX_TEXT_LEAF_LENGTH = 20_000;
 export const NYXDOC_MAX_TOP_LEVEL_BLOCKS = 5_000;
 export const NYXDOC_MAX_DOCUMENT_TEXT_LENGTH = 1_000_000;
 const MEDIA_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-const EDITOR_RUNTIME_FIELDS = new Set(["_id"]);
+const EDITOR_RUNTIME_FIELDS = new Set(["_id", "_nyxdocSyntheticTrailing"]);
 
 export function stripNyxdocEditorRuntimeFields(value: unknown): unknown {
   if (Array.isArray(value)) {

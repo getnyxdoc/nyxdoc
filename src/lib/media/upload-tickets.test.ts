@@ -4,12 +4,19 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import type { NyxDatabase } from "@/lib/db/client";
-import { createDocument } from "@/lib/documents/service";
+import { createDocument, updateDocument } from "@/lib/documents/service";
+import { parseNyxdocDocumentV2 } from "@/lib/editor/schema";
+import { documentHasMediaBinding } from "@/lib/media/bindings";
+import { storeMediaAsset } from "@/lib/media/service";
 import {
   consumeAgentMediaUploadTicket,
   createAgentMediaUploadTicket,
 } from "@/lib/media/upload-tickets";
-import { authenticateApiToken, createWorkspaceToken } from "@/lib/tokens/service";
+import {
+  authenticateApiToken,
+  createWorkspaceToken,
+  tokenDocumentActor,
+} from "@/lib/tokens/service";
 import { createTestDatabase, createTestUser } from "@/test/fixture";
 
 const PNG_BYTES = Buffer.from(
@@ -109,6 +116,97 @@ describe("agent image upload tickets", () => {
       authorization: ticket.authorization,
       bytes: PNG_BYTES,
     }, { mediaRoot })).rejects.toMatchObject({ code: "CONFLICT" });
+  });
+
+  it("allows an agent-owned upload to be inserted before it has a document binding", async () => {
+    const { database, mediaRoot, user, workspace, identity, document } = fixture();
+    const uploaded = await storeMediaAsset(database, {
+      bytes: PNG_BYTES,
+      originalFilename: "agent-owned.png",
+      tokenId: identity.id,
+      userId: user.id,
+      workspaceId: workspace.id,
+    }, mediaRoot);
+    const content = parseNyxdocDocumentV2({
+      schemaVersion: 2,
+      blocks: [{
+        id: "agent-owned-upload",
+        type: "img",
+        mediaId: uploaded.id,
+        url: uploaded.url,
+        children: [{ text: "" }],
+      }],
+    });
+
+    const updated = updateDocument(
+      database,
+      workspace.id,
+      tokenDocumentActor(identity, "mcp"),
+      document.id,
+      {
+        baseRevision: document.revisionNumber,
+        content,
+      },
+    ).document;
+
+    expect(updated.content).toEqual(content);
+    expect(documentHasMediaBinding(
+      database,
+      workspace.id,
+      document.id,
+      uploaded.id,
+    )).toBe(true);
+  });
+
+  it("allows an agent upload to be inserted when storage deduplicates another uploader's bytes", async () => {
+    const { database, mediaRoot, user, workspace, identity, document } = fixture();
+    const existing = await storeMediaAsset(database, {
+      bytes: PNG_BYTES,
+      originalFilename: "existing.png",
+      userId: user.id,
+      workspaceId: workspace.id,
+    }, mediaRoot);
+    const ticket = createAgentMediaUploadTicket(database, identity, {
+      filename: "agent-copy.png",
+      mimeType: "image/png",
+      byteSize: PNG_BYTES.length,
+    });
+    const uploaded = await consumeAgentMediaUploadTicket(database, {
+      ticketId: ticket.id,
+      authorization: ticket.authorization,
+      bytes: PNG_BYTES,
+    }, { mediaRoot });
+
+    expect(uploaded.media).toMatchObject({
+      id: existing.id,
+      createdNew: false,
+    });
+    expect(database.prepare(
+      "SELECT uploaded_by_credential_id FROM media_assets WHERE id = ?",
+    ).get(existing.id)).toEqual({ uploaded_by_credential_id: null });
+    const content = parseNyxdocDocumentV2({
+      schemaVersion: 2,
+      blocks: [uploaded.imageBlock],
+    });
+
+    const updated = updateDocument(
+      database,
+      workspace.id,
+      tokenDocumentActor(identity, "mcp"),
+      document.id,
+      {
+        baseRevision: document.revisionNumber,
+        content,
+      },
+    ).document;
+
+    expect(updated.content).toEqual(content);
+    expect(documentHasMediaBinding(
+      database,
+      workspace.id,
+      document.id,
+      existing.id,
+    )).toBe(true);
   });
 
   it("rejects expired, forged, and cross-workspace uploads", async () => {
@@ -215,6 +313,35 @@ describe("agent image upload tickets", () => {
       authorization: unbound.authorization,
       bytes: PNG_BYTES,
     }, { mediaRoot })).rejects.toMatchObject({ code: "UNAUTHORIZED" });
+  });
+
+  it("rechecks the current credential IP allowlist before consuming a ticket", async () => {
+    const { database, mediaRoot, identity } = fixture();
+    const ticket = createAgentMediaUploadTicket(database, identity, {
+      filename: "network-bound.png",
+    });
+    database.prepare(
+      "UPDATE agent_credentials SET ip_allowlist_json = ? WHERE id = ?",
+    ).run(JSON.stringify(["203.0.113.0/24"]), identity.id);
+
+    await expect(consumeAgentMediaUploadTicket(database, {
+      ticketId: ticket.id,
+      authorization: ticket.authorization,
+      clientIp: "198.51.100.20",
+      bytes: PNG_BYTES,
+    }, { mediaRoot })).rejects.toMatchObject({ code: "UNAUTHORIZED" });
+    expect(database.prepare(
+      "SELECT consumed_at FROM agent_media_upload_tickets WHERE id = ?",
+    ).get(ticket.id)).toEqual({ consumed_at: null });
+
+    await expect(consumeAgentMediaUploadTicket(database, {
+      ticketId: ticket.id,
+      authorization: ticket.authorization,
+      clientIp: "203.0.113.42",
+      bytes: PNG_BYTES,
+    }, { mediaRoot })).resolves.toMatchObject({
+      media: { mimeType: "image/png" },
+    });
   });
 
   it("rejects custom grants that omit media.upload", () => {

@@ -1,7 +1,7 @@
 import { requireWorkspaceSession } from "@/data/workspace-context";
 import { requireHumanWorkspacePermission } from "@/lib/authz/permissions";
 import { sqlite } from "@/lib/db/client";
-import { createDestructiveOperationBackup } from "@/lib/db/safety-backup";
+import { withDestructiveOperationBackup } from "@/lib/db/safety-backup";
 import { humanDocumentActor } from "@/lib/documents/actors";
 import { purgeTrashedDocument } from "@/lib/documents/service";
 import { apiErrorResponse } from "@/lib/http/errors";
@@ -19,14 +19,32 @@ export async function DELETE(
     const { session, workspace } = await requireWorkspaceSession(request);
     requireHumanWorkspacePermission(sqlite, workspace.id, session.user.id, "documents.purge");
     const { documentId } = await context.params;
-    const backup = await createDestructiveOperationBackup();
-    const result = purgeTrashedDocument(
-      sqlite,
-      workspace.id,
-      humanDocumentActor(session.user),
-      documentId,
-    );
-    return Response.json({ ...result, backupGenerationId: backup.manifest.generationId });
+    const actor = humanDocumentActor(session.user);
+    const protectedOperation = await withDestructiveOperationBackup(() => sqlite.transaction(() => {
+      requireHumanWorkspacePermission(
+        sqlite,
+        workspace.id,
+        session.user.id,
+        "documents.purge",
+      );
+      return purgeTrashedDocument(
+        sqlite,
+        workspace.id,
+        actor,
+        documentId,
+      );
+    }).immediate());
+    if (protectedOperation.warnings.length > 0) {
+      console.warn("[nyxdoc] document purge completed with backup barrier warnings", {
+        workspaceId: workspace.id,
+        documentId,
+        warnings: protectedOperation.warnings,
+      });
+    }
+    return Response.json({
+      ...protectedOperation.result,
+      backupGenerationId: protectedOperation.backup.manifest.generationId,
+    });
   } catch (error) {
     return apiErrorResponse(error);
   }

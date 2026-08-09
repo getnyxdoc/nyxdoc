@@ -64,6 +64,10 @@ export async function requireMediaRequestIdentity(
         workspaceId: identity.workspaceId,
         mediaId: options.mediaId,
         canReadDocument: (documentId) => tokenCanAccessDocument(sqlite, identity, documentId),
+        canReadRevision: (documentId) => (
+          identity.capabilities.includes("revisions.read")
+          && tokenCanAccessDocument(sqlite, identity, documentId)
+        ),
       });
       if (!binding) {
         throw new ApiTokenError("NOT_FOUND", "이미지를 찾을 수 없습니다.");
@@ -90,6 +94,15 @@ export async function requireMediaRequestIdentity(
           session.user.id,
         );
         return Boolean(principal && humanDocumentPrincipalAllows(principal, "documents.read"));
+      },
+      canReadRevision: (documentId) => {
+        const principal = getHumanDocumentPrincipal(
+          sqlite,
+          workspace.id,
+          documentId,
+          session.user.id,
+        );
+        return Boolean(principal && humanDocumentPrincipalAllows(principal, "revisions.read"));
       },
     });
     if (!binding) {

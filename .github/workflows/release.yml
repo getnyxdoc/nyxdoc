@@ -1,26 +1,86 @@
 name: Release
 
 on:
-  push:
-    tags:
-      - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Stable version to publish (X.Y.Z, without a leading v)
+        required: true
+        type: string
 
 permissions:
   contents: read
+
+concurrency:
+  group: release-${{ inputs.version }}
+  cancel-in-progress: false
 
 jobs:
   quality:
     runs-on: ubuntu-latest
     timeout-minutes: 25
+    outputs:
+      version: ${{ steps.release.outputs.version }}
+      git_tag: ${{ steps.release.outputs.git_tag }}
+      revision: ${{ steps.release.outputs.revision }}
+      tag_exists: ${{ steps.release.outputs.tag_exists }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 24
           cache: npm
       - run: npm ci
+      - id: release
+        name: Verify main source, version, and any idempotent prior tag
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: |
+          set -Eeuo pipefail
+          [ "$GITHUB_REF" = refs/heads/main ] || {
+            printf 'Release must be dispatched against main, not %s\n' "$GITHUB_REF" >&2
+            exit 1
+          }
+          [[ "$RELEASE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+            printf 'version must be stable X.Y.Z without a leading v\n' >&2
+            exit 1
+          }
+
+          git fetch --no-tags origin \
+            +refs/heads/main:refs/remotes/origin/main
+          release_revision="$(git rev-parse HEAD)"
+          git merge-base --is-ancestor "$release_revision" refs/remotes/origin/main
+          release_tag="v${RELEASE_VERSION}"
+          node scripts/verify-release-metadata.mjs --tag "$release_tag"
+
+          tag_exists=false
+          remote_tag_ref="refs/tags/${release_tag}"
+          private_tag_ref=refs/nyxdoc-release/existing-tag
+          git update-ref -d "$private_tag_ref" >/dev/null 2>&1 || true
+          if git ls-remote --exit-code --refs origin "$remote_tag_ref" >/dev/null 2>&1; then
+            tag_exists=true
+            git fetch --no-tags origin "${remote_tag_ref}:${private_tag_ref}"
+            existing_revision="$(git rev-parse "${private_tag_ref}^{commit}")"
+            [ "$existing_revision" = "$release_revision" ] || {
+              printf 'existing release tag %s points to %s instead of %s\n' \
+                "$release_tag" "$existing_revision" "$release_revision" >&2
+              exit 1
+            }
+          fi
+          {
+            echo "version=$RELEASE_VERSION"
+            echo "git_tag=$release_tag"
+            echo "revision=$release_revision"
+            echo "tag_exists=$tag_exists"
+          } >> "$GITHUB_OUTPUT"
       - run: node scripts/check-browser-vertical-no-first-party-mocks.mjs
       - run: node scripts/test-release-qualification-scripts.mjs
+      - run: node scripts/test-lifecycle-cli.mjs
+      - run: shellcheck scripts/*.sh scripts/test-fixtures/*.sh && bash -n scripts/*.sh scripts/test-fixtures/*.sh
+      - run: bash scripts/test-lifecycle-shell.sh
+      - run: bash scripts/test-update-image-revision.sh
       - run: npm run typecheck
       - run: npm run lint
       - run: npm test
@@ -40,8 +100,12 @@ jobs:
       image: ${{ steps.candidate.outputs.image }}
       digest: ${{ steps.candidate.outputs.digest }}
       candidate_tag: ${{ steps.candidate.outputs.tag }}
+      revision: ${{ needs.quality.outputs.revision }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ needs.quality.outputs.revision }}
+          fetch-depth: 0
       - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
       - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
@@ -49,7 +113,53 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+      - id: existing
+        name: Reuse an idempotently published semver image only at this source
+        env:
+          RELEASE_VERSION: ${{ needs.quality.outputs.version }}
+          RELEASE_REVISION: ${{ needs.quality.outputs.revision }}
+          RELEASE_TAG_EXISTS: ${{ needs.quality.outputs.tag_exists }}
+        run: |
+          set -Eeuo pipefail
+          version_image="ghcr.io/getnyxdoc/nyxdoc:${RELEASE_VERSION}"
+          inspection="$(docker buildx imagetools inspect "$version_image" 2>/dev/null || true)"
+          digest="$(printf '%s\n' "$inspection" | awk '$1 == "Digest:" { print $2; exit }')"
+          if [ -z "$digest" ]; then
+            [ "$RELEASE_TAG_EXISTS" != true ] || {
+              printf 'release invariant violated: %s exists but %s is not pullable\n' \
+                "v${RELEASE_VERSION}" "$version_image" >&2
+              exit 1
+            }
+            echo 'found=false' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          [[ "$digest" =~ ^sha256:[a-f0-9]{64}$ ]]
+          image="ghcr.io/getnyxdoc/nyxdoc@${digest}"
+          docker pull "$image" >/dev/null
+          oci_revision="$(docker image inspect \
+            --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' \
+            "$image")"
+          image_environment="$(docker image inspect \
+            --format '{{ range .Config.Env }}{{ println . }}{{ end }}' "$image")"
+          source_revision_count="$(printf '%s\n' "$image_environment" | awk -F= \
+            '$1 == "NYXDOC_SOURCE_REVISION" { count += 1 } END { print count + 0 }')"
+          [ "$source_revision_count" = 1 ] || {
+            printf 'release image must contain exactly one NYXDOC_SOURCE_REVISION value (found %s)\n' \
+              "$source_revision_count" >&2
+            exit 1
+          }
+          source_revision="$(printf '%s\n' "$image_environment" | awk -F= \
+            '$1 == "NYXDOC_SOURCE_REVISION" { print substr($0, index($0, "=") + 1); exit }')"
+          [ "$oci_revision" = "$RELEASE_REVISION" ]
+          [ "$source_revision" = "$RELEASE_REVISION" ]
+          {
+            echo 'found=true'
+            echo "image=$image"
+            echo "digest=$digest"
+            echo "tag=$version_image"
+          } >> "$GITHUB_OUTPUT"
       - id: build
+        if: steps.existing.outputs.found != 'true'
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
@@ -60,41 +170,52 @@ jobs:
             org.opencontainers.image.title=Nyxdoc
             org.opencontainers.image.description=An agent-native document system for people and their external agents.
             org.opencontainers.image.licenses=MIT
-            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.revision=${{ needs.quality.outputs.revision }}
           build-args: |
-            SOURCE_REVISION=${{ github.sha }}
+            SOURCE_REVISION=${{ needs.quality.outputs.revision }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
           provenance: mode=max
           sbom: true
       - id: candidate
         env:
-          DIGEST: ${{ steps.build.outputs.digest }}
+          EXISTING: ${{ steps.existing.outputs.found }}
+          EXISTING_IMAGE: ${{ steps.existing.outputs.image }}
+          EXISTING_DIGEST: ${{ steps.existing.outputs.digest }}
+          EXISTING_TAG: ${{ steps.existing.outputs.tag }}
+          BUILD_DIGEST: ${{ steps.build.outputs.digest }}
           RUN_ID: ${{ github.run_id }}
           RUN_ATTEMPT: ${{ github.run_attempt }}
         run: |
           set -Eeuo pipefail
-          case "$DIGEST" in sha256:*) ;; *) exit 1;; esac
-          tag="ghcr.io/getnyxdoc/nyxdoc:candidate-${RUN_ID}-${RUN_ATTEMPT}"
-          image="ghcr.io/getnyxdoc/nyxdoc@${DIGEST}"
-          observed=""
-          for attempt in $(seq 1 12); do
-            if inspection="$(docker buildx imagetools inspect "$tag" 2>&1)"; then
-              observed="$(printf '%s\n' "$inspection" | awk '$1 == "Digest:" { print $2; exit }')"
-              [ "$observed" = "$DIGEST" ] && break
-            fi
-            printf 'candidate digest not visible yet (attempt %s/12)\n' "$attempt" >&2
-            sleep 10
-          done
-          test "$observed" = "$DIGEST"
+          if [ "$EXISTING" = true ]; then
+            image="$EXISTING_IMAGE"
+            digest="$EXISTING_DIGEST"
+            tag="$EXISTING_TAG"
+          else
+            digest="$BUILD_DIGEST"
+            case "$digest" in sha256:*) ;; *) exit 1;; esac
+            tag="ghcr.io/getnyxdoc/nyxdoc:candidate-${RUN_ID}-${RUN_ATTEMPT}"
+            image="ghcr.io/getnyxdoc/nyxdoc@${digest}"
+            observed=""
+            for attempt in $(seq 1 12); do
+              if inspection="$(docker buildx imagetools inspect "$tag" 2>&1)"; then
+                observed="$(printf '%s\n' "$inspection" | awk '$1 == "Digest:" { print $2; exit }')"
+                [ "$observed" = "$digest" ] && break
+              fi
+              printf 'candidate digest not visible yet (attempt %s/12)\n' "$attempt" >&2
+              sleep 10
+            done
+            test "$observed" = "$digest"
+          fi
           {
             echo "image=$image"
-            echo "digest=$DIGEST"
+            echo "digest=$digest"
             echo "tag=$tag"
           } >> "$GITHUB_OUTPUT"
 
   qualify-candidate:
-    needs: build-candidate
+    needs: [quality, build-candidate]
     runs-on: ubuntu-latest
     timeout-minutes: 60
     permissions:
@@ -103,6 +224,7 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
+          ref: ${{ needs.quality.outputs.revision }}
           fetch-depth: 0
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
@@ -116,13 +238,34 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Create the qualification-only local version tag
+        env:
+          RELEASE_TAG: ${{ needs.quality.outputs.git_tag }}
+          RELEASE_REVISION: ${{ needs.quality.outputs.revision }}
+        run: |
+          set -Eeuo pipefail
+          existing="$(git rev-parse "${RELEASE_TAG}^{commit}" 2>/dev/null || true)"
+          if [ -n "$existing" ]; then
+            [ "$existing" = "$RELEASE_REVISION" ]
+          else
+            git config user.name 'Nyxdoc Release Qualification'
+            git config user.email 'release-qualification@users.noreply.github.com'
+            git tag -a "$RELEASE_TAG" "$RELEASE_REVISION" \
+              -m "Qualification-only local tag for $RELEASE_TAG"
+          fi
       - id: baseline
         env:
-          CURRENT_TAG: ${{ github.ref_name }}
+          CURRENT_TAG: ${{ needs.quality.outputs.git_tag }}
+          RELEASE_REVISION: ${{ needs.quality.outputs.revision }}
         run: |
           set -Eeuo pipefail
           baseline=""
-          for candidate in $(git tag --list 'v[0-9]*' --sort=-v:refname | grep -Fxv "$CURRENT_TAG"); do
+          for candidate in $(
+            git tag --list 'v[0-9]*' --sort=-v:refname \
+              | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' \
+              | grep -Fxv "$CURRENT_TAG" || true
+          ); do
+            git merge-base --is-ancestor "${candidate}^{commit}" "$RELEASE_REVISION" || continue
             version="${candidate#v}"
             if docker buildx imagetools inspect "ghcr.io/getnyxdoc/nyxdoc:${version}" >/dev/null 2>&1; then
               baseline="$candidate"
@@ -138,7 +281,7 @@ jobs:
       - name: Qualify the immutable candidate image
         env:
           CANDIDATE_IMAGE: ${{ needs.build-candidate.outputs.image }}
-          CANDIDATE_REVISION: ${{ github.sha }}
+          CANDIDATE_REVISION: ${{ needs.build-candidate.outputs.revision }}
           BASELINE_REF: ${{ steps.baseline.outputs.ref }}
           BASELINE_IMAGE: ${{ steps.baseline.outputs.image }}
         run: |
@@ -152,23 +295,30 @@ jobs:
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: release-qualification-${{ github.run_id }}-${{ github.run_attempt }}
+          name: release-qualification-${{ github.run_id }}
           path: release-qualification/
           if-no-files-found: error
           retention-days: 90
+          overwrite: true
 
   promote-image:
-    needs: [build-candidate, qualify-candidate]
+    needs: [quality, build-candidate, qualify-candidate]
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    concurrency:
+      group: nyxdoc-release-publication
+      cancel-in-progress: false
     permissions:
-      contents: read
+      contents: write
       packages: write
     outputs:
       image: ${{ needs.build-candidate.outputs.image }}
       digest: ${{ needs.build-candidate.outputs.digest }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ needs.quality.outputs.revision }}
+          fetch-depth: 0
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 24
@@ -180,61 +330,102 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
-          name: release-qualification-${{ github.run_id }}-${{ github.run_attempt }}
+          name: release-qualification-${{ github.run_id }}
           path: release-qualification
       - name: Require complete digest-bound qualification evidence
         env:
           CANDIDATE_IMAGE: ${{ needs.build-candidate.outputs.image }}
-          CANDIDATE_REVISION: ${{ github.sha }}
+          CANDIDATE_REVISION: ${{ needs.build-candidate.outputs.revision }}
         run: >-
           node scripts/verify-release-qualification-receipt.mjs
           --receipt release-qualification/receipt.json
           --candidate-image "$CANDIDATE_IMAGE"
           --candidate-revision "$CANDIDATE_REVISION"
-      - id: metadata
-        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5
-        with:
-          images: ghcr.io/getnyxdoc/nyxdoc
-          tags: |
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=raw,value=latest
-      - name: Promote only the qualified manifest digest
+      - id: tags
+        env:
+          RELEASE_VERSION: ${{ needs.quality.outputs.version }}
+        run: |
+          set -Eeuo pipefail
+          IFS=. read -r major minor patch <<<"$RELEASE_VERSION"
+          [ -n "$major" ] && [ -n "$minor" ] && [ -n "$patch" ]
+          repository=ghcr.io/getnyxdoc/nyxdoc
+          {
+            echo "version_tag=${repository}:${RELEASE_VERSION}"
+            echo 'all<<EOF'
+            echo "${repository}:${RELEASE_VERSION}"
+            echo "${repository}:${major}.${minor}"
+            echo "${repository}:latest"
+            echo 'EOF'
+          } >> "$GITHUB_OUTPUT"
+      - name: Publish and verify the immutable semver image first
         env:
           CANDIDATE_IMAGE: ${{ needs.build-candidate.outputs.image }}
           CANDIDATE_DIGEST: ${{ needs.build-candidate.outputs.digest }}
-          TARGET_TAGS: ${{ steps.metadata.outputs.tags }}
+          CANDIDATE_REVISION: ${{ needs.build-candidate.outputs.revision }}
+          VERSION_TAG: ${{ steps.tags.outputs.version_tag }}
+          TARGET_TAGS: ${{ steps.tags.outputs.all }}
+          PROMOTION_PHASE: immutable
+        run: bash scripts/promote-release-image.sh
+      - name: Publish or verify the final Git tag at the qualified revision
+        env:
+          RELEASE_TAG: ${{ needs.quality.outputs.git_tag }}
+          RELEASE_REVISION: ${{ needs.quality.outputs.revision }}
         run: |
           set -Eeuo pipefail
-          for tag in $TARGET_TAGS; do
-            docker buildx imagetools create --prefer-index=false -t "$tag" "$CANDIDATE_IMAGE"
-            observed=""
-            for attempt in $(seq 1 12); do
-              if inspection="$(docker buildx imagetools inspect "$tag" 2>&1)"; then
-                observed="$(printf '%s\n' "$inspection" | awk '$1 == "Digest:" { print $2; exit }')"
-                [ "$observed" = "$CANDIDATE_DIGEST" ] && break
-              fi
-              printf 'promoted digest not visible yet for %s (attempt %s/12)\n' "$tag" "$attempt" >&2
-              sleep 10
-            done
-            test "$observed" = "$CANDIDATE_DIGEST"
-          done
+          remote_tag_ref="refs/tags/${RELEASE_TAG}"
+          private_tag_ref=refs/nyxdoc-release/published-tag
+          verify_remote_tag() {
+            git update-ref -d "$private_tag_ref" >/dev/null 2>&1 || true
+            git fetch --no-tags origin "${remote_tag_ref}:${private_tag_ref}"
+            observed="$(git rev-parse "${private_tag_ref}^{commit}")"
+            [ "$observed" = "$RELEASE_REVISION" ] || {
+              printf 'release tag %s resolves to %s instead of %s\n' \
+                "$RELEASE_TAG" "$observed" "$RELEASE_REVISION" >&2
+              return 1
+            }
+          }
 
-  github-release:
-    needs: promote-image
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-        with:
-          fetch-depth: 0
+          if git ls-remote --exit-code --refs origin "$remote_tag_ref" >/dev/null 2>&1; then
+            verify_remote_tag
+          else
+            existing="$(git rev-parse "${RELEASE_TAG}^{commit}" 2>/dev/null || true)"
+            if [ -n "$existing" ]; then
+              [ "$existing" = "$RELEASE_REVISION" ]
+            else
+              git config user.name github-actions
+              git config user.email github-actions@users.noreply.github.com
+              git tag -a "$RELEASE_TAG" "$RELEASE_REVISION" -m "Nyxdoc $RELEASE_TAG"
+            fi
+            if ! git push origin "refs/tags/${RELEASE_TAG}:refs/tags/${RELEASE_TAG}"; then
+              git ls-remote --exit-code --refs origin "$remote_tag_ref" >/dev/null 2>&1
+            fi
+            verify_remote_tag
+          fi
+
+          local_revision="$(git rev-parse "${RELEASE_TAG}^{commit}" 2>/dev/null || true)"
+          if [ -n "$local_revision" ]; then
+            [ "$local_revision" = "$RELEASE_REVISION" ]
+          else
+            git fetch --no-tags origin "${remote_tag_ref}:${remote_tag_ref}"
+          fi
+          [ "$(git rev-parse "${RELEASE_TAG}^{commit}")" = "$RELEASE_REVISION" ]
+      - name: Publish mutable aliases only after the final Git tag
+        env:
+          CANDIDATE_IMAGE: ${{ needs.build-candidate.outputs.image }}
+          CANDIDATE_DIGEST: ${{ needs.build-candidate.outputs.digest }}
+          CANDIDATE_REVISION: ${{ needs.build-candidate.outputs.revision }}
+          VERSION_TAG: ${{ steps.tags.outputs.version_tag }}
+          TARGET_TAGS: ${{ steps.tags.outputs.all }}
+          RELEASE_GIT_TAG: ${{ needs.quality.outputs.git_tag }}
+          PROMOTION_PHASE: aliases
+        run: bash scripts/promote-release-image.sh
       - name: Render release notes from changelog
         env:
-          IMAGE: ${{ needs.promote-image.outputs.image }}
+          IMAGE: ${{ needs.build-candidate.outputs.image }}
+          RELEASE_TAG: ${{ needs.quality.outputs.git_tag }}
         run: |
           set -Eeuo pipefail
-          version="${GITHUB_REF_NAME#v}"
+          version="${RELEASE_TAG#v}"
           heading="## ${version} - "
           awk -v heading="$heading" '
             index($0, heading) == 1 { capture = 1; next }
@@ -252,26 +443,44 @@ jobs:
           ' CHANGELOG.md > changelog-section.md
 
           if ! grep -q '^- ' changelog-section.md; then
-            printf 'CHANGELOG.md has no user-facing summary for %s\n' "$GITHUB_REF_NAME" >&2
+            printf 'CHANGELOG.md has no user-facing summary for %s\n' "$RELEASE_TAG" >&2
             exit 1
           fi
 
-          previous_tag="$(git describe --tags --abbrev=0 "${GITHUB_REF_NAME}^" 2>/dev/null || true)"
+          release_revision="$(git rev-parse HEAD)"
+          previous_tag="$(
+            git tag --list 'v[0-9]*' --sort=-v:refname \
+              | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' \
+              | grep -Fxv "$RELEASE_TAG" \
+              | while read -r candidate; do
+                  if git merge-base --is-ancestor "${candidate}^{commit}" "$release_revision"; then
+                    printf '%s\n' "$candidate"
+                    break
+                  fi
+                done || true
+          )"
           {
             printf '## What changed\n\n'
             cat changelog-section.md
             printf '\n## Container image\n\n`%s`\n' "$IMAGE"
             if [ -n "$previous_tag" ]; then
               printf '\n**Full Changelog**: https://github.com/%s/compare/%s...%s\n' \
-                "$GITHUB_REPOSITORY" "$previous_tag" "$GITHUB_REF_NAME"
+                "$GITHUB_REPOSITORY" "$previous_tag" "$RELEASE_TAG"
             fi
           } > release-notes.md
-      - name: Create GitHub release
+      - name: Create or repair the GitHub release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: >-
-          gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 ||
-          gh release create "$GITHUB_REF_NAME"
-          --verify-tag
-          --title "Nyxdoc $GITHUB_REF_NAME"
-          --notes-file release-notes.md
+          RELEASE_TAG: ${{ needs.quality.outputs.git_tag }}
+        run: |
+          set -Eeuo pipefail
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release edit "$RELEASE_TAG" \
+              --title "Nyxdoc $RELEASE_TAG" \
+              --notes-file release-notes.md
+          else
+            gh release create "$RELEASE_TAG" \
+              --verify-tag \
+              --title "Nyxdoc $RELEASE_TAG" \
+              --notes-file release-notes.md
+          fi

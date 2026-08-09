@@ -2,6 +2,7 @@
 
 import { type FormEvent, useState } from "react";
 import { ArrowRight, Building2, X } from "lucide-react";
+import { useRouter } from "next/navigation";
 import { useI18n } from "@/lib/i18n/client";
 import { rememberWorkspaceSelection } from "@/lib/workspaces/selection";
 import type { OrganizationSummary } from "@/lib/organizations/service";
@@ -28,6 +29,7 @@ export function WorkspaceCreateDialog({
   onClose: () => void;
   organizations?: OrganizationSummary[];
 }) {
+  const router = useRouter();
   const { locale } = useI18n();
   const copy = {
     en: {
@@ -112,7 +114,7 @@ export function WorkspaceCreateDialog({
         throw new Error(body.error || copy.failed);
       }
       rememberWorkspaceSelection(body.workspace.id);
-      window.location.assign(
+      router.replace(
         `/settings/workspace?workspace=${encodeURIComponent(body.workspace.id)}`
         + "&connectAgent=1&workspaceOnboarding=1#workspace-agents",
       );

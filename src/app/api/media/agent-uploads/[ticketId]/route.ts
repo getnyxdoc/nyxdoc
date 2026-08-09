@@ -1,5 +1,6 @@
 import { sqlite } from "@/lib/db/client";
 import { apiErrorResponse } from "@/lib/http/errors";
+import { requestClientIp } from "@/lib/http/client-ip";
 import { consumeAgentMediaUploadTicket } from "@/lib/media/upload-tickets";
 import { MAX_MEDIA_BYTES, MediaServiceError } from "@/lib/media/service";
 
@@ -43,6 +44,7 @@ export async function PUT(
     const result = await consumeAgentMediaUploadTicket(sqlite, {
       ticketId,
       authorization: request.headers.get("authorization"),
+      clientIp: requestClientIp(request),
       bytes: await readBodyWithLimit(request),
     });
     return Response.json(

@@ -1,6 +1,12 @@
-import { createBackupGeneration, verifyBackupGeneration } from "../src/lib/db/backup";
+import { withVerifiedDestructiveOperationBackup } from "../src/lib/db/backup";
 import { openDatabase } from "../src/lib/db/client";
-import { getBackupRoot, getDatabasePath, getMediaRoot } from "../src/lib/config";
+import {
+  getBackupRoot,
+  getCollaborationInternalUrl,
+  getCollaborationSecret,
+  getDatabasePath,
+  getMediaRoot,
+} from "../src/lib/config";
 import { purgeExpiredAccountAgents } from "../src/lib/agents/service";
 
 async function main() {
@@ -17,22 +23,31 @@ async function main() {
       console.log(JSON.stringify({ dueAgents: 0, purgedAgents: 0 }));
       return;
     }
-    const backupGeneration = await createBackupGeneration({
+    const protectedOperation = await withVerifiedDestructiveOperationBackup({
+      baseUrl: getCollaborationInternalUrl(),
+      secret: getCollaborationSecret(),
       databasePath,
       mediaRoot: getMediaRoot(),
       backupRoot: getBackupRoot(),
       sourceRevision: process.env.NYXDOC_SOURCE_REVISION?.trim() || "scheduled-agent-purge",
+      operation: (backup) => ({
+        backupGenerationId: backup.manifest.generationId,
+        purgedIds: purgeExpiredAccountAgents(database, {
+          now,
+          backupGenerationId: backup.manifest.generationId,
+        }),
+      }),
+      onWarning(warning) {
+        console.warn("[nyxdoc] scheduled agent purge barrier warning", { warning });
+      },
     });
-    const backup = await verifyBackupGeneration(backupGeneration.generationPath);
-    const purgedIds = purgeExpiredAccountAgents(database, {
-      now,
-      backupGenerationId: backup.manifest.generationId,
-    });
+    const { backupGenerationId, purgedIds } = protectedOperation.result;
     console.log(JSON.stringify({
       dueAgents: Number(due.count),
       purgedAgents: purgedIds.length,
       purgedAgentIds: purgedIds,
-      backupGenerationId: backup.manifest.generationId,
+      backupGenerationId,
+      barrierWarnings: protectedOperation.warnings.length,
     }));
   } finally {
     database.close();

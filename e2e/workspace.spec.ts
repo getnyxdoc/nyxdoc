@@ -69,6 +69,7 @@ test("renders an agent-authored raw URL as the public page title and opens it fr
 
   await page.goto("/dev/workspace-e2e?fixture=agent-link-reader");
   const titledLink = page.getByRole("link", { name: "Build skills | ChatGPT Learn" });
+  await expect(titledLink).toHaveCSS("cursor", "pointer");
   await expect(titledLink).toHaveAttribute(
     "href",
     "https://learn.chatgpt.com/docs/build-skills",
@@ -95,6 +96,7 @@ test("renders an agent-authored raw URL as the public page title and opens it fr
   previewAvailable = true;
   await page.goto("/dev/workspace-e2e?fixture=agent-link-editor");
   const editorLink = page.getByRole("link", { name: "Build skills | ChatGPT Learn" });
+  await expect(editorLink).toHaveCSS("cursor", "pointer");
   await expect(editorLink).toHaveAttribute(
     "href",
     "https://learn.chatgpt.com/docs/build-skills",
@@ -200,6 +202,7 @@ test("previews an old revision without mutation and loads it only into the share
     baseRevision: 2,
     expectedDraftVersion: 0,
     expectedGeneration: 1,
+    requestId: expect.stringMatching(/^revision-restore-/),
   });
   await expect(page.getByText("리비전 2", { exact: true })).toBeVisible();
 
@@ -1142,6 +1145,7 @@ test("moves a document branch inside another document from the tree", async ({ p
   await page.mouse.up();
 
   await expect.poll(() => moveBody).toEqual({
+    requestId: expect.stringMatching(/^tree-reorder-/),
     targetDocumentId: "document-navigation-01",
     position: "inside",
   });

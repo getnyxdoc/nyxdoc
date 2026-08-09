@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { afterEach, describe, expect, it } from "vitest";
 import { openDatabase } from "@/lib/db/client";
 import { runAppMigrations } from "@/lib/db/migrations";
@@ -12,12 +12,125 @@ import { createTestUser } from "@/test/fixture";
 import { createWorkspace } from "@/lib/workspaces/service";
 
 const temporaryDirectories: string[] = [];
+const barrierSidecars: Array<{ stop: () => Promise<void> }> = [];
 
-afterEach(() => {
+afterEach(async () => {
+  while (barrierSidecars.length) {
+    await barrierSidecars.pop()!.stop();
+  }
   while (temporaryDirectories.length) {
     rmSync(temporaryDirectories.pop()!, { recursive: true, force: true });
   }
 });
+
+async function startBarrierSidecar(secret: string) {
+  const source = String.raw`
+    const http = require("node:http");
+    const { randomUUID } = require("node:crypto");
+    const secret = process.env.NYXDOC_TEST_BARRIER_SECRET;
+    let active = null;
+    function receipt() {
+      return {
+        barrierId: active.id,
+        acquiredAt: active.acquiredAt,
+        flushedAt: active.flushedAt,
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+        flushWatermark: 0,
+        loadedDocumentCount: 0,
+      };
+    }
+    const server = http.createServer((request, response) => {
+      const write = (status, value) => {
+        response.writeHead(status, { "content-type": "application/json" });
+        response.end(JSON.stringify(value));
+      };
+      if (request.headers.authorization !== "Bearer " + secret) {
+        return write(401, { error: "unauthorized" });
+      }
+      if (request.method !== "POST") return write(405, { error: "method" });
+      if (request.url === "/internal/backup/barrier/acquire") {
+        if (active) return write(409, { error: "already acquired" });
+        const now = new Date().toISOString();
+        active = { id: randomUUID(), acquiredAt: now, flushedAt: now };
+        return write(200, receipt());
+      }
+      if (!active) return write(409, { error: "missing barrier" });
+      if (request.url === "/internal/backup/barrier/release") {
+        const result = { ...receipt(), released: true };
+        active = null;
+        return write(200, result);
+      }
+      if (request.url === "/internal/backup/barrier/status"
+          || request.url === "/internal/backup/barrier/renew") {
+        return write(200, receipt());
+      }
+      return write(404, { error: "not found" });
+    });
+    server.listen(0, "127.0.0.1", () => {
+      process.stdout.write(JSON.stringify({ port: server.address().port }) + "\n");
+    });
+    const close = () => server.close(() => process.exit(0));
+    process.once("SIGTERM", close);
+    process.once("SIGINT", close);
+  `;
+  const child = spawn(process.execPath, ["-e", source], {
+    env: { ...process.env, NYXDOC_TEST_BARRIER_SECRET: secret },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  let stderr = "";
+  child.stderr.setEncoding("utf8");
+  child.stderr.on("data", (chunk) => { stderr += chunk; });
+  const port = await new Promise<number>((resolve, reject) => {
+    let stdout = "";
+    const timeout = setTimeout(() => reject(new Error(
+      `Test collaboration barrier did not start. ${stderr}`,
+    )), 10_000);
+    child.stdout.setEncoding("utf8");
+    child.stdout.on("data", (chunk) => {
+      stdout += chunk;
+      const newline = stdout.indexOf("\n");
+      if (newline < 0) return;
+      clearTimeout(timeout);
+      try {
+        resolve(Number(JSON.parse(stdout.slice(0, newline)).port));
+      } catch (error) {
+        reject(error);
+      }
+    });
+    child.once("error", (error) => {
+      clearTimeout(timeout);
+      reject(error);
+    });
+    child.once("exit", (code) => {
+      if (code !== 0) {
+        clearTimeout(timeout);
+        reject(new Error(`Test collaboration barrier exited (${code}). ${stderr}`));
+      }
+    });
+  });
+  let stopped = false;
+  const sidecar = {
+    baseUrl: `http://127.0.0.1:${port}`,
+    async stop() {
+      if (stopped || child.exitCode !== null) return;
+      stopped = true;
+      await new Promise<void>((resolve, reject) => {
+        const force = setTimeout(() => child.kill("SIGKILL"), 2_000);
+        const deadline = setTimeout(() => reject(new Error(
+          "Test collaboration barrier did not stop within 5 seconds.",
+        )), 5_000);
+        child.once("exit", () => {
+          clearTimeout(force);
+          clearTimeout(deadline);
+          resolve();
+        });
+        child.kill("SIGTERM");
+      });
+    },
+  };
+  barrierSidecars.push(sidecar);
+  return sidecar;
+}
 
 function runTransferCli(environment: NodeJS.ProcessEnv, args: string[]) {
   const result = spawnSync(process.execPath, [
@@ -36,7 +149,7 @@ function runTransferCli(environment: NodeJS.ProcessEnv, args: string[]) {
 }
 
 describe("workspace transfer CLI", () => {
-  it("dry-runs without a backup, then backs up, preflights, transfers, and records a receipt", () => {
+  it("dry-runs without a backup, then backs up, preflights, transfers, and records a receipt", async () => {
     const directory = mkdtempSync(path.join(tmpdir(), "nyxdoc-transfer-cli-test-"));
     temporaryDirectories.push(directory);
     const databasePath = path.join(directory, "nyxdoc.db");
@@ -154,7 +267,13 @@ describe("workspace transfer CLI", () => {
     });
     expect(() => readdirSync(backupRoot)).toThrow();
 
-    const result = runTransferCli(environment, [
+    const barrierSecret = "transfer-cli-collaboration-secret-0123456789-abcdef";
+    const barrier = await startBarrierSidecar(barrierSecret);
+    const result = runTransferCli({
+      ...environment,
+      NYXDOC_COLLABORATION_SECRET: barrierSecret,
+      NYXDOC_COLLABORATION_INTERNAL_URL: barrier.baseUrl,
+    }, [
       ...commonArgs,
       "--expect-documents", "2",
       "--expect-blocks", "2",

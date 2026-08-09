@@ -4,6 +4,7 @@ import {
   assignAgentToWorkspace,
   createAccountAgent,
   createAgentCredential,
+  createOrganizationAgent,
 } from "@/lib/agents/service";
 import {
   completeMcpOAuthConsent,
@@ -13,6 +14,12 @@ import {
   provisionMcpOAuthGrant,
   resolveMcpOAuthIdentity,
 } from "@/lib/mcp/oauth";
+import {
+  acceptOrganizationInvitation,
+  createOrganization,
+  createOrganizationInvitation,
+  updateOrganizationMemberRole,
+} from "@/lib/organizations/service";
 import { createWorkspace } from "@/lib/workspaces/service";
 import { createTestDatabase, createTestUser } from "@/test/fixture";
 
@@ -144,6 +151,7 @@ describe("MCP OAuth workspace grants", () => {
       id: firstGrant.credentialId,
       workspaceId: first.id,
       scopes: firstGrant.scopes,
+      scopeCeiling: firstGrant.scopes,
     });
     expect(() => resolveMcpOAuthIdentity(database, {
       userId: user.id,
@@ -173,6 +181,7 @@ describe("MCP OAuth workspace grants", () => {
       globalAgentId: firstGrant.agentId,
       workspaceId: second.id,
       scopes: ["documents:read", "changes:read"],
+      scopeCeiling: ["documents:read", "changes:read"],
     });
 
     const state = getMcpOAuthConsentState(database, {
@@ -220,6 +229,94 @@ describe("MCP OAuth workspace grants", () => {
       clientId: firstGrant.clientId,
       tokenScopes: "documents:read changes:read",
       workspaceId: first.id,
+    })).toThrowError(McpOAuthError);
+  });
+
+  it("rejects an organization agent OAuth grant after the authorizing user loses agent management", () => {
+    const database = createTestDatabase();
+    databases.push(database);
+    const owner = createTestUser(database, {
+      name: "Original owner",
+      email: "oauth-original-owner@example.com",
+    });
+    const organization = createOrganization(database, {
+      userId: owner.user.id,
+      actorLabel: owner.user.name,
+      name: "OAuth organization",
+    });
+    const workspace = createWorkspace(
+      database,
+      owner.user,
+      "OAuth organization workspace",
+      "en",
+      { organizationId: organization.id },
+    );
+    const agent = createOrganizationAgent(database, {
+      organizationId: organization.id,
+      userId: owner.user.id,
+      actorLabel: owner.user.name,
+      displayName: "Organization OAuth agent",
+    });
+    assignAgentToWorkspace(database, {
+      userId: owner.user.id,
+      workspaceId: workspace.id,
+      agentId: agent.id,
+      accessProfile: "reader",
+    });
+    const grant = provisionMcpOAuthGrant(database, {
+      userId: owner.user.id,
+      clientId: "organization-agent-oauth-client",
+      clientName: "Organization Agent OAuth Client",
+      requestedScopes: "documents:read changes:read",
+      workspaceIds: [workspace.id],
+      accessProfile: "reader",
+      agent: { mode: "existing", agentId: agent.id },
+    });
+    expect(resolveMcpOAuthIdentity(database, {
+      userId: owner.user.id,
+      clientId: grant.clientId,
+      tokenScopes: "documents:read changes:read",
+      workspaceId: workspace.id,
+    })).toMatchObject({
+      globalAgentId: agent.id,
+      workspaceId: workspace.id,
+    });
+
+    const successor = createTestUser(database, {
+      name: "Successor owner",
+      email: "oauth-successor-owner@example.com",
+    });
+    const invitation = createOrganizationInvitation(database, {
+      organizationId: organization.id,
+      userId: owner.user.id,
+      actorLabel: owner.user.name,
+      email: successor.user.email,
+      role: "admin",
+    });
+    acceptOrganizationInvitation(database, {
+      token: invitation.token,
+      user: successor.user,
+    });
+    updateOrganizationMemberRole(database, {
+      organizationId: organization.id,
+      userId: owner.user.id,
+      targetUserId: successor.user.id,
+      actorLabel: owner.user.name,
+      role: "owner",
+    });
+    updateOrganizationMemberRole(database, {
+      organizationId: organization.id,
+      userId: successor.user.id,
+      targetUserId: owner.user.id,
+      actorLabel: successor.user.name,
+      role: "member",
+    });
+
+    expect(() => resolveMcpOAuthIdentity(database, {
+      userId: owner.user.id,
+      clientId: grant.clientId,
+      tokenScopes: "documents:read changes:read",
+      workspaceId: workspace.id,
     })).toThrowError(McpOAuthError);
   });
 
@@ -354,6 +451,51 @@ describe("MCP OAuth workspace grants", () => {
         effectiveCapabilities: expect.arrayContaining(["documents.read"]),
       }),
     ]);
+  });
+
+  it("fails closed when the persisted OAuth agent or credential binding changes", () => {
+    const database = createTestDatabase();
+    databases.push(database);
+    const { user, workspace } = createTestUser(database);
+    const grant = provisionMcpOAuthGrant(database, {
+      userId: user.id,
+      clientId: "grant-revalidation-client",
+      clientName: "Grant Revalidation Client",
+      requestedScopes: "documents:read documents:write changes:read",
+      workspaceIds: [workspace.id],
+      accessProfile: "writer",
+      agent: { mode: "new", displayName: "Original grant agent" },
+    });
+    const replacement = createAccountAgent(database, {
+      userId: user.id,
+      displayName: "Unexpected replacement agent",
+    });
+
+    database.prepare(
+      "UPDATE mcp_oauth_grants SET agent_id = ? WHERE id = ?",
+    ).run(replacement.id, grant.id);
+    expect(() => resolveMcpOAuthIdentity(database, {
+      userId: user.id,
+      clientId: grant.clientId,
+      tokenScopes: "documents:read",
+      workspaceId: workspace.id,
+    })).toThrow();
+
+    database.prepare(
+      "UPDATE mcp_oauth_grants SET agent_id = ? WHERE id = ?",
+    ).run(grant.agentId, grant.id);
+    const now = new Date().toISOString();
+    database.prepare(
+      `UPDATE agent_credential_grant_bindings
+       SET status = 'revoked', revoked_at = ?
+       WHERE credential_id = ?`,
+    ).run(now, grant.credentialId);
+    expect(() => resolveMcpOAuthIdentity(database, {
+      userId: user.id,
+      clientId: grant.clientId,
+      tokenScopes: "documents:read",
+      workspaceId: workspace.id,
+    })).toThrow();
   });
 
   it("revokes prior OAuth tokens and credentials when the selected agent changes", () => {

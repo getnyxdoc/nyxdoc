@@ -59,8 +59,14 @@ Gitリポジトリはソースコードに優れています。Nyxdocは一般�
 
 ## Docker Composeで始める
 
-公式の本番運用経路はLinuxとDocker Composeです。ローカル開発にはNode.js 24を
-使用します。
+サポート対象のセルフホスティング経路はLinux、Docker Engine、Docker Compose v2です。
+ライフサイクルスクリプトはBash/Linux用です。macOSとWindows Docker Desktopは
+ローカル開発には使えますが、インストール・更新・アンインストール・バックアップ
+復旧・本番運用のサポート対象ではありません。これらのコマンドはLinuxホストまたは
+VMで実行してください。ローカル開発にはNode.js 24を使用します。
+
+前提条件と5分間の導入経路は[オープンソース新規ユーザーガイド](docs/open-source-readiness.md)
+を参照してください。
 
 ローカルで試す場合は、1行でcloneとインストールを実行します。
 
@@ -69,8 +75,9 @@ git clone https://github.com/getnyxdoc/nyxdoc.git && cd nyxdoc && ./scripts/inst
 ```
 
 インストーラーは`.env.production`を作成し、異なる2つの秘密値を画面へ表示せずに
-生成し、正確なリリースイメージを取得して全サービスを起動し、health checkを
-待ちます。このcheckoutからビルドする場合は`./scripts/install.sh --build`を使います。
+生成し、このcheckoutのバージョンに対応するバージョン付きリリースイメージを取得して
+全サービスを起動し、health checkを待ちます。このcheckoutからビルドする場合は
+`./scripts/install.sh --build`を使います。
 
 [http://localhost:3191](http://localhost:3191)を開きます。最初のアカウントがサイト
 所有者になります。SMTPや独自メールドメインは不要です。最初の所有者作成後は、
@@ -84,9 +91,23 @@ git clone https://github.com/getnyxdoc/nyxdoc.git && cd nyxdoc && ./scripts/inst
 ./scripts/uninstall.sh --purge --confirm-purge=nyxdoc
 ```
 
-通常のアンインストールは文書、メディア、バックアップ、設定、ソースを保持します。
-purgeはDockerデータvolumeも削除しますが、外部バックアップ、設定、ソースは
-保持します。HTTPS、バックアップ、更新、削除、復旧は
+`0.25.17`から`0.25.18`へ一度だけ更新する場合は、Nyxdoc checkoutで代わりに次の
+コマンドを実行します。
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/getnyxdoc/nyxdoc/v0.25.18/scripts/update-bootstrap.sh | bash
+```
+
+このbridgeは公開共同編集境界を先に閉じ、受理済みの編集をすべて保存してから、旧版の
+updaterにバックアップを作成させます。`0.25.18`以降は通常どおり
+`./scripts/update.sh`を使用します。
+
+`update.sh`にはクリーンなGit checkoutが必要で、実行中の環境を変更する前に検証済み
+バックアップを作成します。同じ更新が失敗した場合のみ、保存済みかつ再検証された
+バックアップreceiptから再開できます。通常のアンインストールは文書、メディア、
+バックアップ、設定、ソースを保持します。purgeはDockerデータvolumeとローカルで
+ビルドしたイメージを削除しますが、外部バックアップ、設定、ソースは保持します。
+HTTPS、バックアップ、更新、削除、復旧は
 [DEPLOYMENT.md](DEPLOYMENT.md)を参照してください。
 
 ## ローカル開発
@@ -109,29 +130,19 @@ npm run build
 
 ## 外部エージェントを接続する
 
-NyxdocでエージェントIDと接続キーを作成します。UIからMCP URL、転送方式、
-Bearerキー、ワークスペース権限、確認手順を含む案内を一度にコピーできます。
+ログイン後、**設定 → ワークスペース → エージェント権限 → 最初のエージェントを接続**を
+開きます。エージェントID、アクセスプロファイル、文書範囲、接続キーを選択します。
+新しいキーの原文は一度だけ表示され、UIがMCP URL・Streamable HTTP・Bearer認証・確認手順を
+含む非公開の引き継ぎ文を生成します。
 
-```text
-転送方式: Streamable HTTP
-URL: https://your-nyxdoc.example/mcp
-認証: Bearer <NYXDOC_TOKEN>
-```
-
-接続直後に`get_capabilities`を呼び出してください。現在のスキーマ、権限、
-ワークスペース範囲、対応ツールが返されます。Agent To-doは担当エージェントを基準に
-取得し、ワークスペース情報を追加の文脈として提供します。人からNyxdoc To-doを処理
-する明示的な依頼を受けていないエージェントは、待機中の作業を勝手に開始してはいけません。
-
-画像を追加するときは`create_image_upload`が返す5分間・一度限りのURLへ元のバイトを
-`PUT`し、成功応答の`imageBlock`を文書へ挿入します。画像やbase64をMCP JSONへ
-含めません。
-
-詳細は[docs/agent-contract.md](docs/agent-contract.md)にあります。
+接続直後に`get_capabilities`、続けて`list_agent_workspaces`を呼び出してください。5分間の
+導入経路、Codex設定、OAuth、画像アップロード、Agent To-doの境界は
+[docs/open-source-readiness.md](docs/open-source-readiness.md)と
+[docs/agent-contract.md](docs/agent-contract.md)を参照してください。
 
 ## プロジェクトの状態
 
-`0.25.0`は実際の文書で利用している初期0.xリリースです。データ移行は検証済み
+`0.25.18`は実際の文書で利用している初期0.xリリースです。データ移行は検証済み
 バックアップの複製で事前にリハーサルするforward-only方式ですが、1.0まではAPIや
 UIの詳細が変更される可能性があります。
 
@@ -148,6 +159,8 @@ UIの詳細が変更される可能性があります。
 - [エージェントプロトコル](docs/agent-contract.md)
 - [Agent To-do](docs/document-tasks.md)
 - [エディター品質基準](docs/editor-quality-gate.md)
+- [オープンソース新規ユーザーガイド](docs/open-source-readiness.md)
+- [テストとリリース適格性](docs/testing-and-release-qualification.md)
 
 ## コミュニティとセキュリティ
 

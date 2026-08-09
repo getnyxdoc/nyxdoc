@@ -1,6 +1,12 @@
 import { randomUUID } from "node:crypto";
 import { afterEach, describe, expect, it } from "vitest";
-import { ensureCollaborationState } from "@/lib/collaboration/drafts";
+import {
+  collaborationDocumentFromYDoc,
+  collaborationYDocFromState,
+  ensureCollaborationState,
+  resetCollaborationState,
+  workingDocumentFromStoredState,
+} from "@/lib/collaboration/drafts";
 import type { NyxDatabase } from "@/lib/db/client";
 import {
   archiveDocument,
@@ -356,7 +362,7 @@ describe("document command service", () => {
       .toEqual([parent.document.id, child.document.id, grandchild.document.id, sibling.document.id]);
   });
 
-  it("reorders sibling branches without creating a document revision", () => {
+  it("reorders siblings without a revision and requires a canonical revision for parent changes", () => {
     const { database, user, workspace } = fixture();
     const actor = { type: "human" as const, userId: user.id, label: user.name, source: "web" as const };
     const parent = createDocument(database, workspace.id, actor, {
@@ -421,6 +427,112 @@ describe("document command service", () => {
       targetDocumentId: parent.document.id,
       position: "after",
     })).toThrowError(expect.objectContaining({ code: "INVALID_INPUT" }));
+    expect(getDocument(database, workspace.id, two.document.id)).toMatchObject({
+      parentDocumentId: parent.document.id,
+      revisionId: two.document.revisionId,
+      revisionNumber: 1,
+    });
+
+    const canonicalMove = updateDocument(database, workspace.id, actor, two.document.id, {
+      baseRevision: 1,
+      parentDocumentId: null,
+      summary: "문서를 최상위로 이동했습니다.",
+    });
+    const movedToRoot = reorderDocumentTree(database, workspace.id, actor, two.document.id, {
+      targetDocumentId: parent.document.id,
+      position: "after",
+    });
+    expect(movedToRoot).toMatchObject({
+      documentId: two.document.id,
+      parentDocumentId: null,
+      targetDocumentId: parent.document.id,
+      position: "after",
+      treeOrder: 300,
+      unchanged: true,
+    });
+    expect(getDocument(database, workspace.id, two.document.id)).toMatchObject({
+      parentDocumentId: null,
+      revisionId: canonicalMove.document.revisionId,
+      revisionNumber: 2,
+    });
+    expect(database.prepare(
+      "SELECT COUNT(*) AS count FROM document_revisions WHERE document_id = ?",
+    ).get(two.document.id)).toEqual({ count: 2 });
+  });
+
+  it("replays a same-parent reorder request without overwriting a later writer", () => {
+    const { database, user, workspace } = fixture();
+    const actor = {
+      type: "human" as const,
+      userId: user.id,
+      principalId: user.id,
+      label: user.name,
+      source: "web" as const,
+    };
+    const parent = createDocument(database, workspace.id, actor, {
+      title: "재시도 순서",
+      content: textContent([{ text: "상위 문서" }]),
+    });
+    const first = createDocument(database, workspace.id, actor, {
+      title: "첫째",
+      parentDocumentId: parent.document.id,
+      content: textContent([{ text: "첫째" }]),
+    });
+    const second = createDocument(database, workspace.id, actor, {
+      title: "둘째",
+      parentDocumentId: parent.document.id,
+      content: textContent([{ text: "둘째" }]),
+    });
+    const third = createDocument(database, workspace.id, actor, {
+      title: "셋째",
+      parentDocumentId: parent.document.id,
+      content: textContent([{ text: "셋째" }]),
+    });
+    const firstRequest = {
+      requestId: "same-parent-reorder-lost-response-001",
+      targetDocumentId: first.document.id,
+      position: "before" as const,
+    };
+
+    const receipt = reorderDocumentTree(
+      database,
+      workspace.id,
+      actor,
+      third.document.id,
+      firstRequest,
+    );
+    reorderDocumentTree(database, workspace.id, actor, third.document.id, {
+      requestId: "same-parent-reorder-concurrent-001",
+      targetDocumentId: second.document.id,
+      position: "after",
+    });
+    const eventsBeforeRetry = getChanges(database, workspace.id, 0, 100).events.length;
+
+    const replayed = reorderDocumentTree(
+      database,
+      workspace.id,
+      actor,
+      third.document.id,
+      firstRequest,
+    );
+
+    expect(replayed).toEqual(receipt);
+    expect(listDocuments(database, workspace.id)
+      .filter((document) => document.parentDocumentId === parent.document.id)
+      .map((document) => document.id))
+      .toEqual([first.document.id, second.document.id, third.document.id]);
+    expect(getChanges(database, workspace.id, 0, 100).events).toHaveLength(eventsBeforeRetry);
+    expect(() => reorderDocumentTree(
+      database,
+      workspace.id,
+      actor,
+      third.document.id,
+      {
+        ...firstRequest,
+        targetDocumentId: second.document.id,
+      },
+    )).toThrowError(expect.objectContaining({ code: "IDEMPOTENCY_CONFLICT" }));
+    expect(getChanges(database, workspace.id, 0, 100).events).toHaveLength(eventsBeforeRetry);
   });
 
   it("appends an existing child when it is dropped inside its parent", () => {
@@ -494,7 +606,7 @@ describe("document command service", () => {
         type: "agent",
         userId: user.id,
         tokenId: token.summary.id,
-        principalId: "agent-for-test",
+        principalId: token.summary.agentId,
         avatarMediaId: "avatar-for-test",
         label: "Codex",
         source: "mcp",
@@ -550,7 +662,7 @@ describe("document command service", () => {
         .get(created.document.revisionId),
     ).toEqual({
       actor_token_id: token.summary.id,
-      actor_principal_id: "agent-for-test",
+      actor_principal_id: token.summary.agentId,
       actor_avatar_media_id: "avatar-for-test",
       actor_label: "Codex",
       source: "mcp",
@@ -824,6 +936,142 @@ describe("document command service", () => {
     });
   });
 
+  it("fails closed when immutable revision metadata is incomplete instead of reading current fields", () => {
+    const { database, user, workspace } = fixture();
+    const actor = { type: "human" as const, userId: user.id, label: user.name, source: "web" as const };
+    const created = createDocument(database, workspace.id, actor, {
+      title: "고정된 과거 제목",
+      documentType: "plan",
+      workflowStatus: "draft",
+      tags: ["historical"],
+      content: textContent([{ text: "과거 본문" }]),
+    });
+    updateDocument(database, workspace.id, actor, created.document.id, {
+      baseRevision: 1,
+      title: "현재 제목",
+      documentType: "memo",
+      workflowStatus: "final",
+      tags: ["current"],
+    });
+
+    database.prepare(
+      "UPDATE document_revisions SET document_metadata_json = '{}' WHERE id = ?",
+    ).run(created.document.revisionId);
+    expect(() => getDocumentRevisionSnapshotByNumber(
+      database,
+      workspace.id,
+      created.document.id,
+      1,
+    )).toThrowError(expect.objectContaining({ code: "INVALID_INPUT" }));
+
+    database.prepare(
+      `UPDATE document_revisions
+       SET title_snapshot = NULL, document_metadata_json = ?
+       WHERE id = ?`,
+    ).run(JSON.stringify({
+      documentType: "plan",
+      workflowStatus: "draft",
+      tags: ["historical"],
+    }), created.document.revisionId);
+    expect(() => getDocumentRevisionSnapshot(
+      database,
+      workspace.id,
+      created.document.id,
+      created.document.revisionId!,
+    )).toThrowError(expect.objectContaining({ code: "INVALID_INPUT" }));
+  });
+
+  it("restores historical content without reviving a parent that is now trashed", () => {
+    const { database, user, workspace } = fixture();
+    const actor = { type: "human" as const, userId: user.id, label: user.name, source: "web" as const };
+    const parent = createDocument(database, workspace.id, actor, {
+      title: "삭제된 과거 부모",
+      content: textContent([{ text: "부모 본문" }]),
+    });
+    const child = createDocument(database, workspace.id, actor, {
+      title: "복원할 자식",
+      parentDocumentId: parent.document.id,
+      content: textContent([{ id: "historical-child", text: "과거 본문" }]),
+    });
+    const moved = updateDocument(database, workspace.id, actor, child.document.id, {
+      baseRevision: 1,
+      parentDocumentId: null,
+      content: textContent([{ id: "historical-child", text: "현재 본문" }]),
+    });
+    archiveDocument(database, workspace.id, actor, parent.document.id, { baseRevision: 1 });
+
+    const restored = restoreDocumentRevision(
+      database,
+      workspace.id,
+      actor,
+      child.document.id,
+      child.document.revisionId!,
+      moved.document.revisionNumber,
+    );
+
+    expect(restored.document).toMatchObject({
+      parentDocumentId: null,
+      revisionNumber: 3,
+    });
+    expect(restored.document.content.blocks.map(nyxdocBlockText)).toEqual(["과거 본문"]);
+    expect(getDocumentRevisionSnapshotByNumber(
+      database,
+      workspace.id,
+      child.document.id,
+      1,
+    ).parentDocumentId).toBe(parent.document.id);
+  });
+
+  it("resets a historical draft without reviving a parent that is now trashed", () => {
+    const { database, user, workspace } = fixture();
+    const actor = {
+      type: "human" as const,
+      userId: user.id,
+      principalId: user.id,
+      label: user.name,
+      source: "web" as const,
+    };
+    const parent = createDocument(database, workspace.id, actor, {
+      title: "초안에서 삭제된 부모",
+      content: textContent([{ text: "부모 본문" }]),
+    });
+    const child = createDocument(database, workspace.id, actor, {
+      title: "과거 초안 자식",
+      parentDocumentId: parent.document.id,
+      content: textContent([{ id: "draft-child", text: "과거 초안 본문" }]),
+    });
+    const state = ensureCollaborationState(database, workspace.id, child.document.id);
+    updateDocument(database, workspace.id, actor, child.document.id, {
+      baseRevision: 1,
+      parentDocumentId: null,
+      content: textContent([{ id: "draft-child", text: "현재 본문" }]),
+    });
+    archiveDocument(database, workspace.id, actor, parent.document.id, { baseRevision: 1 });
+    const historical = getDocumentRevisionSnapshotByNumber(
+      database,
+      workspace.id,
+      child.document.id,
+      1,
+    );
+
+    resetCollaborationState(database, workspace.id, child.document.id, historical, {
+      markDirty: true,
+      actor,
+      cas: {
+        expectedGeneration: state.generation,
+        expectedDraftVersion: state.draftVersion,
+        expectedBaseRevision: state.baseRevisionNumber,
+      },
+    });
+
+    expect(historical.parentDocumentId).toBe(parent.document.id);
+    expect(workingDocumentFromStoredState(database, workspace.id, child.document.id)).toMatchObject({
+      parentDocumentId: null,
+      baseRevisionNumber: 2,
+      hasUncommittedChanges: true,
+    });
+  });
+
   it("creates child documents, moves whole branches, and rejects hierarchy cycles", () => {
     const { database, user, workspace } = fixture();
     const actor = { type: "human" as const, userId: user.id, label: user.name, source: "web" as const };
@@ -927,10 +1175,16 @@ describe("document command service", () => {
 
   it("lets an agent trash only document trees whose first revisions it created", () => {
     const { database, user, workspace } = fixture();
-    const agentId = randomUUID();
+    const token = createWorkspaceToken(database, {
+      workspaceId: workspace.id,
+      userId: user.id,
+      name: "Document agent",
+    });
+    const agentId = token.summary.agentId;
     const agent = {
       type: "agent" as const,
       userId: user.id,
+      tokenId: token.summary.id,
       principalId: agentId,
       label: "Document agent",
       source: "mcp" as const,
@@ -1039,6 +1293,283 @@ describe("document command service", () => {
     expect(database.prepare(
       "SELECT COUNT(*) AS count FROM document_purge_tombstones WHERE document_id IN (?, ?)",
     ).get(parent.document.id, child.document.id)).toEqual({ count: 2 });
+  });
+
+  it("records and projects a canonical root parent when trash restore cannot reuse the original parent", () => {
+    const { database, user, workspace } = fixture();
+    const actor = {
+      type: "human" as const,
+      userId: user.id,
+      principalId: user.id,
+      label: user.name,
+      source: "web" as const,
+    };
+    const originalParent = createDocument(database, workspace.id, actor, {
+      title: "별도 휴지통 부모",
+      content: textContent([{ text: "부모" }]),
+    });
+    const child = createDocument(database, workspace.id, actor, {
+      title: "먼저 삭제한 자식",
+      parentDocumentId: originalParent.document.id,
+      content: textContent([{ text: "자식" }]),
+    });
+    const draft = ensureCollaborationState(database, workspace.id, child.document.id);
+
+    archiveDocument(database, workspace.id, actor, child.document.id, { baseRevision: 1 });
+    archiveDocument(database, workspace.id, actor, originalParent.document.id, { baseRevision: 1 });
+    restoreTrashedDocument(database, workspace.id, actor, child.document.id);
+
+    expect(getDocument(database, workspace.id, child.document.id)).toMatchObject({
+      parentDocumentId: null,
+      revisionNumber: 2,
+    });
+    expect(getDocumentRevisionSnapshotByNumber(
+      database,
+      workspace.id,
+      child.document.id,
+      1,
+    ).parentDocumentId).toBe(originalParent.document.id);
+    expect(getDocumentRevisionSnapshotByNumber(
+      database,
+      workspace.id,
+      child.document.id,
+      2,
+    ).parentDocumentId).toBeNull();
+
+    const restoredDraft = ensureCollaborationState(database, workspace.id, child.document.id);
+    expect(restoredDraft).toMatchObject({
+      generation: draft.generation + 2,
+      baseRevisionNumber: 2,
+    });
+    expect(collaborationDocumentFromYDoc(
+      collaborationYDocFromState(restoredDraft.state),
+    ).parentDocumentId).toBeNull();
+    expect(collaborationDocumentFromYDoc(
+      collaborationYDocFromState(restoredDraft.committedState),
+    ).parentDocumentId).toBeNull();
+  });
+
+  it("allows a scoped agent to restore its grant anchor at its original parent or root fallback", () => {
+    const { database, user, workspace } = fixture();
+    const human = {
+      type: "human" as const,
+      userId: user.id,
+      principalId: user.id,
+      label: user.name,
+      source: "web" as const,
+    };
+    const originalParent = createDocument(database, workspace.id, human, {
+      title: "Anchor original parent",
+      content: textContent([{ text: "outside the scoped grant" }]),
+    });
+    const anchor = createDocument(database, workspace.id, human, {
+      title: "Scoped grant anchor",
+      parentDocumentId: originalParent.document.id,
+      content: textContent([{ text: "anchor" }]),
+    });
+    const anchorChild = createDocument(database, workspace.id, human, {
+      title: "Anchor child",
+      parentDocumentId: anchor.document.id,
+      content: textContent([{ text: "child" }]),
+    });
+    const token = createWorkspaceToken(database, {
+      workspaceId: workspace.id,
+      userId: user.id,
+      name: "Anchor restore agent",
+      role: "admin",
+      rootDocumentId: anchor.document.id,
+    });
+    const agent = {
+      type: "agent" as const,
+      userId: user.id,
+      tokenId: token.summary.id,
+      principalId: token.summary.agentId,
+      label: "Anchor restore agent",
+      source: "mcp" as const,
+    };
+
+    archiveDocument(database, workspace.id, human, anchor.document.id, { baseRevision: 1 });
+    expect(restoreTrashedDocument(database, workspace.id, agent, anchor.document.id)).toMatchObject({
+      documentIds: [anchor.document.id, anchorChild.document.id],
+      documentCount: 2,
+    });
+    expect(getDocument(database, workspace.id, anchor.document.id).parentDocumentId)
+      .toBe(originalParent.document.id);
+    expect(getDocument(database, workspace.id, anchorChild.document.id).parentDocumentId)
+      .toBe(anchor.document.id);
+
+    archiveDocument(database, workspace.id, human, anchor.document.id, { baseRevision: 1 });
+    archiveDocument(database, workspace.id, human, originalParent.document.id, { baseRevision: 1 });
+    expect(restoreTrashedDocument(database, workspace.id, agent, anchor.document.id)).toMatchObject({
+      documentIds: [anchor.document.id, anchorChild.document.id],
+      documentCount: 2,
+    });
+    expect(getDocument(database, workspace.id, anchor.document.id).parentDocumentId).toBeNull();
+    expect(getDocument(database, workspace.id, anchorChild.document.id).parentDocumentId)
+      .toBe(anchor.document.id);
+  });
+
+  it("rejects a scoped agent restore when a separately trashed parent would force a root fallback", () => {
+    const { database, user, workspace } = fixture();
+    const human = {
+      type: "human" as const,
+      userId: user.id,
+      principalId: user.id,
+      label: user.name,
+      source: "web" as const,
+    };
+    const parentA = createDocument(database, workspace.id, human, {
+      title: "Grant root A",
+      content: textContent([{ text: "A" }]),
+    });
+    const childB = createDocument(database, workspace.id, human, {
+      title: "Scoped child B",
+      parentDocumentId: parentA.document.id,
+      content: textContent([{ text: "B" }]),
+    });
+    const scopedToken = createWorkspaceToken(database, {
+      workspaceId: workspace.id,
+      userId: user.id,
+      name: "Scoped restore agent",
+      role: "admin",
+      rootDocumentId: parentA.document.id,
+    });
+    const scopedAgent = {
+      type: "agent" as const,
+      userId: user.id,
+      tokenId: scopedToken.summary.id,
+      principalId: scopedToken.summary.agentId,
+      label: "Scoped restore agent",
+      source: "mcp" as const,
+    };
+
+    archiveDocument(database, workspace.id, human, childB.document.id, { baseRevision: 1 });
+    archiveDocument(database, workspace.id, human, parentA.document.id, { baseRevision: 1 });
+    const before = database.prepare(
+      `SELECT status, lifecycle_state, parent_document_id, original_parent_document_id,
+              tree_order, original_tree_order, trash_batch_id, current_revision_id
+       FROM documents WHERE id = ?`,
+    ).get(childB.document.id);
+
+    expect(() => restoreTrashedDocument(
+      database,
+      workspace.id,
+      scopedAgent,
+      childB.document.id,
+    )).toThrowError(expect.objectContaining({ code: "FORBIDDEN" }));
+    expect(database.prepare(
+      `SELECT status, lifecycle_state, parent_document_id, original_parent_document_id,
+              tree_order, original_tree_order, trash_batch_id, current_revision_id
+       FROM documents WHERE id = ?`,
+    ).get(childB.document.id)).toEqual(before);
+    expect(database.prepare(
+      "SELECT COUNT(*) AS count FROM document_trash_batches WHERE workspace_id = ?",
+    ).get(workspace.id)).toEqual({ count: 2 });
+    expect(database.prepare(
+      "SELECT COUNT(*) AS count FROM document_events WHERE document_id = ? AND event_type = 'restored'",
+    ).get(childB.document.id)).toEqual({ count: 0 });
+    expect(database.prepare(
+      "SELECT COUNT(*) AS count FROM workspace_audit_events WHERE workspace_id = ? AND action = 'document_trash.restored'",
+    ).get(workspace.id)).toEqual({ count: 0 });
+
+    const workspaceToken = createWorkspaceToken(database, {
+      workspaceId: workspace.id,
+      userId: user.id,
+      name: "Workspace restore agent",
+      role: "admin",
+    });
+    expect(restoreTrashedDocument(database, workspace.id, {
+      type: "agent",
+      userId: user.id,
+      tokenId: workspaceToken.summary.id,
+      principalId: workspaceToken.summary.agentId,
+      label: "Workspace restore agent",
+      source: "mcp",
+    }, childB.document.id)).toMatchObject({
+      rootDocumentId: childB.document.id,
+      documentIds: [childB.document.id],
+    });
+    expect(getDocument(database, workspace.id, childB.document.id).parentDocumentId).toBeNull();
+  });
+
+  it("reauthenticates an agent credential before restoring any trashed document", () => {
+    const { database, user, workspace } = fixture();
+    const human = {
+      type: "human" as const,
+      userId: user.id,
+      principalId: user.id,
+      label: user.name,
+      source: "web" as const,
+    };
+    const parent = createDocument(database, workspace.id, human, {
+      title: "Active grant root",
+      content: textContent([{ text: "root" }]),
+    });
+    const child = createDocument(database, workspace.id, human, {
+      title: "Recoverable child",
+      parentDocumentId: parent.document.id,
+      content: textContent([{ text: "child" }]),
+    });
+    const grandchild = createDocument(database, workspace.id, human, {
+      title: "Recoverable grandchild",
+      parentDocumentId: child.document.id,
+      content: textContent([{ text: "grandchild" }]),
+    });
+    const token = createWorkspaceToken(database, {
+      workspaceId: workspace.id,
+      userId: user.id,
+      name: "Revoked restore agent",
+      role: "admin",
+      rootDocumentId: parent.document.id,
+    });
+    const agent = {
+      type: "agent" as const,
+      userId: user.id,
+      tokenId: token.summary.id,
+      principalId: token.summary.agentId,
+      label: "Revoked restore agent",
+      source: "mcp" as const,
+    };
+    const originalTree = database.prepare(
+      `SELECT id, parent_document_id, tree_order
+       FROM documents WHERE id IN (?, ?) ORDER BY id`,
+    ).all(child.document.id, grandchild.document.id);
+    archiveDocument(database, workspace.id, human, child.document.id, { baseRevision: 1 });
+    expect(restoreTrashedDocument(database, workspace.id, agent, child.document.id)).toMatchObject({
+      documentIds: [child.document.id, grandchild.document.id],
+      documentCount: 2,
+    });
+    expect(database.prepare(
+      `SELECT id, parent_document_id, tree_order
+       FROM documents WHERE id IN (?, ?) ORDER BY id`,
+    ).all(child.document.id, grandchild.document.id)).toEqual(originalTree);
+    expect(database.prepare(
+      "SELECT COUNT(*) AS count FROM workspace_audit_events WHERE workspace_id = ? AND action = 'document_trash.restored'",
+    ).get(workspace.id)).toEqual({ count: 1 });
+
+    archiveDocument(database, workspace.id, human, child.document.id, { baseRevision: 1 });
+    const before = database.prepare(
+      `SELECT id, status, lifecycle_state, parent_document_id, tree_order, trash_batch_id
+       FROM documents WHERE id IN (?, ?) ORDER BY id`,
+    ).all(child.document.id, grandchild.document.id);
+    const restoredEventsBeforeRevocation = database.prepare(
+      "SELECT COUNT(*) AS count FROM document_events WHERE document_id IN (?, ?) AND event_type = 'restored'",
+    ).get(child.document.id, grandchild.document.id);
+    database.prepare("UPDATE agent_credentials SET revoked_at = ? WHERE id = ?")
+      .run(new Date().toISOString(), token.summary.id);
+
+    expect(() => restoreTrashedDocument(database, workspace.id, agent, child.document.id))
+      .toThrowError(expect.objectContaining({ code: "FORBIDDEN" }));
+    expect(database.prepare(
+      `SELECT id, status, lifecycle_state, parent_document_id, tree_order, trash_batch_id
+       FROM documents WHERE id IN (?, ?) ORDER BY id`,
+    ).all(child.document.id, grandchild.document.id)).toEqual(before);
+    expect(database.prepare(
+      "SELECT COUNT(*) AS count FROM document_events WHERE document_id IN (?, ?) AND event_type = 'restored'",
+    ).get(child.document.id, grandchild.document.id)).toEqual(restoredEventsBeforeRevocation);
+    expect(database.prepare(
+      "SELECT COUNT(*) AS count FROM workspace_audit_events WHERE workspace_id = ? AND action = 'document_trash.restored'",
+    ).get(workspace.id)).toEqual({ count: 1 });
   });
 
   it("does not allow a workspace to read another workspace's document", () => {

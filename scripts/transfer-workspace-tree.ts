@@ -28,12 +28,19 @@ function expectedOption(name: string) {
 async function main() {
   const [
     { recordWorkspaceAuditEvent },
-    { createBackupGeneration, verifyBackupGeneration },
+    { withVerifiedDestructiveOperationBackup },
     { openDatabase, sqlite },
     { assertDatabaseIntegrity },
     { getAppMigrationPlan },
     { archiveDocument },
-    { assertRuntimeConfiguration, getBackupRoot, getDatabasePath, getMediaRoot },
+    {
+      assertRuntimeConfiguration,
+      getBackupRoot,
+      getCollaborationInternalUrl,
+      getCollaborationSecret,
+      getDatabasePath,
+      getMediaRoot,
+    },
     {
       applyWorkspaceTreeTransfer,
       archiveWorkspaceAgentHistory,
@@ -191,17 +198,6 @@ async function main() {
   const sourceRevision = process.env.NYXDOC_SOURCE_REVISION?.trim() || "workspace-transfer";
   const databasePath = getDatabasePath();
   if (databasePath === ":memory:") throw new Error("Workspace transfer requires a file database.");
-  const backup = await createBackupGeneration({
-    databasePath,
-    mediaRoot: getMediaRoot(),
-    backupRoot: getBackupRoot(),
-    sourceRevision,
-  });
-  await verifyBackupGeneration(backup.generationPath);
-  const receiptPath = path.join(backup.generationPath, "workspace-transfer-receipt.json");
-  const temporary = await mkdtemp(path.join(tmpdir(), "nyxdoc-workspace-transfer-"));
-  const clonePath = path.join(temporary, "preflight.db");
-  const startedAt = new Date().toISOString();
 
   function archiveTargetStarter(database: typeof sqlite) {
     if (!targetStarterDocumentId) return { status: "not_requested" as const };
@@ -295,7 +291,7 @@ async function main() {
     assertDatabaseIntegrity(database);
   }
 
-  function execute(database: typeof sqlite) {
+  function execute(database: typeof sqlite, backupGenerationId: string) {
     let before = planWorkspaceTreeTransfer(database, input);
     let result = before;
     let historyResult: ReturnType<typeof archiveWorkspaceAgentHistory> | {
@@ -327,7 +323,7 @@ async function main() {
           targetWorkspaceId: input.targetWorkspaceId,
           rootDocumentId: input.rootDocumentId,
           agentId: input.agentId,
-          backupGenerationId: backup.manifest.generationId,
+          backupGenerationId,
           counts: before.counts,
         };
         recordWorkspaceAuditEvent(database, {
@@ -358,52 +354,69 @@ async function main() {
     };
   }
 
-  try {
-    await copyFile(path.join(backup.generationPath, "nyxdoc.db"), clonePath);
-    const clone = openDatabase(clonePath);
-    try {
-      execute(clone);
-    } finally {
-      clone.close();
-    }
-    const result = execute(sqlite);
-    const receipt = {
-      format: "nyxdoc-workspace-transfer-receipt/v1",
-      outcome: "succeeded",
-      sourceRevision,
-      backupGenerationId: backup.manifest.generationId,
-      backupDatabaseSha256: backup.manifest.database.sha256,
-      input,
-      expected,
-      expectedHistory,
-      result,
-      startedAt,
-      completedAt: new Date().toISOString(),
-    };
-    await writeFile(receiptPath, `${JSON.stringify(receipt, null, 2)}\n`, "utf8");
-    console.log(JSON.stringify({
-      status: "transferred",
-      backupGeneration: backup.generationPath,
-      result,
-    }, null, 2));
-  } catch (error) {
-    await writeFile(receiptPath, `${JSON.stringify({
-      format: "nyxdoc-workspace-transfer-receipt/v1",
-      outcome: "failed",
-      sourceRevision,
-      backupGenerationId: backup.manifest.generationId,
-      backupDatabaseSha256: backup.manifest.database.sha256,
-      input,
-      expected,
-      expectedHistory,
-      startedAt,
-      completedAt: new Date().toISOString(),
-      error: error instanceof Error ? error.message : String(error),
-    }, null, 2)}\n`, "utf8");
-    throw error;
-  } finally {
-    await rm(temporary, { recursive: true, force: true });
-  }
+  const protectedTransfer = await withVerifiedDestructiveOperationBackup({
+    baseUrl: getCollaborationInternalUrl(),
+    secret: getCollaborationSecret(),
+    databasePath,
+    mediaRoot: getMediaRoot(),
+    backupRoot: getBackupRoot(),
+    sourceRevision,
+    onWarning: (warning) => console.warn(`Workspace transfer backup warning: ${warning}`),
+    operation: async (backup) => {
+      const receiptPath = path.join(backup.generationPath, "workspace-transfer-receipt.json");
+      const temporary = await mkdtemp(path.join(tmpdir(), "nyxdoc-workspace-transfer-"));
+      const clonePath = path.join(temporary, "preflight.db");
+      const startedAt = new Date().toISOString();
+      try {
+        await copyFile(path.join(backup.generationPath, "nyxdoc.db"), clonePath);
+        const clone = openDatabase(clonePath);
+        try {
+          execute(clone, backup.manifest.generationId);
+        } finally {
+          clone.close();
+        }
+        const result = execute(sqlite, backup.manifest.generationId);
+        const receipt = {
+          format: "nyxdoc-workspace-transfer-receipt/v1",
+          outcome: "succeeded",
+          sourceRevision,
+          backupGenerationId: backup.manifest.generationId,
+          backupDatabaseSha256: backup.manifest.database.sha256,
+          input,
+          expected,
+          expectedHistory,
+          result,
+          startedAt,
+          completedAt: new Date().toISOString(),
+        };
+        await writeFile(receiptPath, `${JSON.stringify(receipt, null, 2)}\n`, "utf8");
+        return result;
+      } catch (error) {
+        await writeFile(receiptPath, `${JSON.stringify({
+          format: "nyxdoc-workspace-transfer-receipt/v1",
+          outcome: "failed",
+          sourceRevision,
+          backupGenerationId: backup.manifest.generationId,
+          backupDatabaseSha256: backup.manifest.database.sha256,
+          input,
+          expected,
+          expectedHistory,
+          startedAt,
+          completedAt: new Date().toISOString(),
+          error: error instanceof Error ? error.message : String(error),
+        }, null, 2)}\n`, "utf8");
+        throw error;
+      } finally {
+        await rm(temporary, { recursive: true, force: true });
+      }
+    },
+  });
+  console.log(JSON.stringify({
+    status: "transferred",
+    backupGeneration: protectedTransfer.backup.generationPath,
+    result: protectedTransfer.result,
+    warnings: protectedTransfer.warnings,
+  }, null, 2));
 }
 
 main().catch((error) => {

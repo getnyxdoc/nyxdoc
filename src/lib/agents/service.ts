@@ -556,74 +556,76 @@ export function bindAgentCredentialToGrant(
     grantId: string;
   },
 ) {
-  requireMutableAgent(
-    requireOwnedAgent(database, input.userId, input.agentId),
-    "연결 키를 워크스페이스 접근에 연결",
-  );
-  const credential = database.prepare(
-    `SELECT id, revoked_at, expires_at
-     FROM agent_credentials WHERE id = ? AND agent_id = ?`,
-  ).get(input.credentialId, input.agentId) as {
-    id: string;
-    revoked_at: string | null;
-    expires_at: string | null;
-  } | undefined;
-  if (!credential) {
-    throw new AgentServiceError(
-      "CREDENTIAL_AGENT_MISMATCH",
-      "선택한 연결 키는 이 에이전트에 속하지 않습니다.",
-      { credentialId: input.credentialId, agentId: input.agentId },
+  database.transaction(() => {
+    requireMutableAgent(
+      requireOwnedAgent(database, input.userId, input.agentId),
+      "연결 키를 워크스페이스 접근에 연결",
     );
-  }
-  if (credential.revoked_at) {
-    throw new AgentServiceError("CREDENTIAL_REVOKED", "폐기된 연결 키는 사용할 수 없습니다.");
-  }
-  if (credential.expires_at && Date.parse(credential.expires_at) <= Date.now()) {
-    throw new AgentServiceError("CREDENTIAL_EXPIRED", "만료된 연결 키는 사용할 수 없습니다.");
-  }
-  const grant = database.prepare(
-    `SELECT membership.id, membership.workspace_id, membership.agent_identity_id
-     FROM workspace_agents membership
-     JOIN workspaces workspace ON workspace.id = membership.workspace_id
-     WHERE membership.id = ? AND membership.status = 'active'
-       AND membership.revoked_at IS NULL AND workspace.lifecycle_state = 'active'`,
-  ).get(input.grantId) as {
-    id: string;
-    workspace_id: string;
-    agent_identity_id: string;
-  } | undefined;
-  if (!grant) throw new AgentServiceError("NOT_FOUND", "활성 에이전트 접근 권한을 찾을 수 없습니다.");
-  if (grant.agent_identity_id !== input.agentId) {
-    throw new AgentServiceError(
-      "CREDENTIAL_AGENT_MISMATCH",
-      "연결 키와 워크스페이스 접근 권한의 에이전트가 다릅니다.",
-    );
-  }
-  requireAgentWorkspaceAccess(database, grant.workspace_id, input.userId, "manage");
-  const active = database.prepare(
-    `SELECT id FROM agent_credential_grant_bindings
-     WHERE credential_id = ? AND grant_id = ?
-       AND status = 'active' AND revoked_at IS NULL`,
-  ).get(input.credentialId, input.grantId) as { id: string } | undefined;
-  if (!active) {
-    const now = new Date().toISOString();
-    database.prepare(
-      `INSERT INTO agent_credential_grant_bindings
-       (id, credential_id, grant_id, status, created_by_user_id, created_at, revoked_at)
-       VALUES (?, ?, ?, 'active', ?, ?, NULL)`,
-    ).run(randomUUID(), input.credentialId, input.grantId, input.userId, now);
-    recordWorkspaceAuditEvent(database, {
-      workspaceId: grant.workspace_id,
-      action: "agent.credential_bound",
-      actorType: "human",
-      actorUserId: input.userId,
-      actorLabel: "사용자",
-      targetType: "credential",
-      targetId: input.credentialId,
-      metadata: { agentId: input.agentId, grantId: input.grantId },
-      createdAt: now,
-    });
-  }
+    const credential = database.prepare(
+      `SELECT id, revoked_at, expires_at
+       FROM agent_credentials WHERE id = ? AND agent_id = ?`,
+    ).get(input.credentialId, input.agentId) as {
+      id: string;
+      revoked_at: string | null;
+      expires_at: string | null;
+    } | undefined;
+    if (!credential) {
+      throw new AgentServiceError(
+        "CREDENTIAL_AGENT_MISMATCH",
+        "선택한 연결 키는 이 에이전트에 속하지 않습니다.",
+        { credentialId: input.credentialId, agentId: input.agentId },
+      );
+    }
+    if (credential.revoked_at) {
+      throw new AgentServiceError("CREDENTIAL_REVOKED", "폐기된 연결 키는 사용할 수 없습니다.");
+    }
+    if (credential.expires_at && Date.parse(credential.expires_at) <= Date.now()) {
+      throw new AgentServiceError("CREDENTIAL_EXPIRED", "만료된 연결 키는 사용할 수 없습니다.");
+    }
+    const grant = database.prepare(
+      `SELECT membership.id, membership.workspace_id, membership.agent_identity_id
+       FROM workspace_agents membership
+       JOIN workspaces workspace ON workspace.id = membership.workspace_id
+       WHERE membership.id = ? AND membership.status = 'active'
+         AND membership.revoked_at IS NULL AND workspace.lifecycle_state = 'active'`,
+    ).get(input.grantId) as {
+      id: string;
+      workspace_id: string;
+      agent_identity_id: string;
+    } | undefined;
+    if (!grant) throw new AgentServiceError("NOT_FOUND", "활성 에이전트 접근 권한을 찾을 수 없습니다.");
+    if (grant.agent_identity_id !== input.agentId) {
+      throw new AgentServiceError(
+        "CREDENTIAL_AGENT_MISMATCH",
+        "연결 키와 워크스페이스 접근 권한의 에이전트가 다릅니다.",
+      );
+    }
+    requireAgentWorkspaceAccess(database, grant.workspace_id, input.userId, "manage");
+    const active = database.prepare(
+      `SELECT id FROM agent_credential_grant_bindings
+       WHERE credential_id = ? AND grant_id = ?
+         AND status = 'active' AND revoked_at IS NULL`,
+    ).get(input.credentialId, input.grantId) as { id: string } | undefined;
+    if (!active) {
+      const now = new Date().toISOString();
+      database.prepare(
+        `INSERT INTO agent_credential_grant_bindings
+         (id, credential_id, grant_id, status, created_by_user_id, created_at, revoked_at)
+         VALUES (?, ?, ?, 'active', ?, ?, NULL)`,
+      ).run(randomUUID(), input.credentialId, input.grantId, input.userId, now);
+      recordWorkspaceAuditEvent(database, {
+        workspaceId: grant.workspace_id,
+        action: "agent.credential_bound",
+        actorType: "human",
+        actorUserId: input.userId,
+        actorLabel: "사용자",
+        targetType: "credential",
+        targetId: input.credentialId,
+        metadata: { agentId: input.agentId, grantId: input.grantId },
+        createdAt: now,
+      });
+    }
+  }).immediate();
   return listCredentialBindings(database, input.credentialId)
     .find((binding) => binding.grantId === input.grantId && binding.status === "active")!;
 }
@@ -907,21 +909,25 @@ export function createOrganizationAgent(
     displayName: string;
   },
 ) {
-  requireOrganizationPermission(database, input.organizationId, input.userId, "agents.manage");
   const displayName = normalizedName(input.displayName, "에이전트 이름");
-  const count = database.prepare(
-    `SELECT COUNT(*) AS count
-     FROM agents agent
-     JOIN agent_ownership ownership ON ownership.agent_id = agent.id
-     WHERE ownership.owner_type = 'organization' AND ownership.organization_id = ?
-       AND agent.status = 'active' AND agent.deleted_at IS NULL`,
-  ).get(input.organizationId) as { count: number };
-  if (Number(count.count) >= 250) {
-    throw new AgentServiceError("INVALID_INPUT", "활성 에이전트는 조직당 최대 250개입니다.");
-  }
   const id = randomUUID();
   const now = new Date().toISOString();
   database.transaction(() => {
+    // The organization membership and active-agent limit are authorization
+    // state, not preflight hints. Keep them behind the same SQLite writer
+    // lock as the insert so a removed administrator cannot create an agent
+    // and concurrent creates cannot pass the 250-agent limit together.
+    requireOrganizationPermission(database, input.organizationId, input.userId, "agents.manage");
+    const count = database.prepare(
+      `SELECT COUNT(*) AS count
+       FROM agents agent
+       JOIN agent_ownership ownership ON ownership.agent_id = agent.id
+       WHERE ownership.owner_type = 'organization' AND ownership.organization_id = ?
+         AND agent.status = 'active' AND agent.deleted_at IS NULL`,
+    ).get(input.organizationId) as { count: number };
+    if (Number(count.count) >= 250) {
+      throw new AgentServiceError("INVALID_INPUT", "활성 에이전트는 조직당 최대 250개입니다.");
+    }
     database.prepare(
       `INSERT INTO agents
        (id, owner_user_id, display_name, avatar_media_id, status,
@@ -943,7 +949,7 @@ export function createOrganizationAgent(
       metadata: { displayName },
       createdAt: now,
     });
-  })();
+  }).immediate();
   return listOrganizationAgents(database, input.organizationId, input.userId).find(
     (agent) => agent.id === id,
   )!;
@@ -959,24 +965,25 @@ export function updateAccountAgent(
     status?: "active" | "disabled";
   },
 ) {
-  const current = requireMutableAgent(
-    requireOwnedAgent(database, input.userId, input.agentId),
-  );
-  const displayName = input.displayName === undefined
-    ? current.display_name
+  const requestedDisplayName = input.displayName === undefined
+    ? undefined
     : normalizedName(input.displayName, "에이전트 이름");
-  if (input.avatarMediaId) {
-    const media = database.prepare(
-      `SELECT 1 FROM media_assets media
-       JOIN workspace_members member ON member.workspace_id = media.workspace_id
-       WHERE media.id = ? AND member.user_id = ?`,
-    ).get(input.avatarMediaId, input.userId);
-    if (!media) throw new AgentServiceError("INVALID_INPUT", "접근 가능한 워크스페이스의 이미지를 선택해주세요.");
-  }
-  const avatarMediaId = input.avatarMediaId === undefined ? current.avatar_media_id : input.avatarMediaId;
-  const status = input.status ?? current.status;
   const now = new Date().toISOString();
   database.transaction(() => {
+    const current = requireMutableAgent(
+      requireOwnedAgent(database, input.userId, input.agentId),
+    );
+    const displayName = requestedDisplayName ?? current.display_name;
+    if (input.avatarMediaId) {
+      const media = database.prepare(
+        `SELECT 1 FROM media_assets media
+         JOIN workspace_members member ON member.workspace_id = media.workspace_id
+         WHERE media.id = ? AND member.user_id = ?`,
+      ).get(input.avatarMediaId, input.userId);
+      if (!media) throw new AgentServiceError("INVALID_INPUT", "접근 가능한 워크스페이스의 이미지를 선택해주세요.");
+    }
+    const avatarMediaId = input.avatarMediaId === undefined ? current.avatar_media_id : input.avatarMediaId;
+    const status = input.status ?? current.status;
     database.prepare(
       `UPDATE agents SET display_name = ?, avatar_media_id = ?, status = ?, updated_at = ?
        WHERE id = ?`,
@@ -1000,7 +1007,7 @@ export function updateAccountAgent(
       },
       createdAt: now,
     });
-  })();
+  }).immediate();
   return listAccountAgents(database, input.userId).find((agent) => agent.id === input.agentId)!;
 }
 
@@ -1025,13 +1032,6 @@ export function deleteAccountAgent(
   database: NyxDatabase,
   input: { userId: string; agentId: string; now?: string },
 ) {
-  const current = requireOwnedAgent(database, input.userId, input.agentId);
-  if (current.purged_at) {
-    throw new AgentServiceError("CONFLICT", "이미 영구 삭제된 에이전트입니다.");
-  }
-  if (current.deleted_at) {
-    throw new AgentServiceError("CONFLICT", "이미 삭제된 에이전트입니다.");
-  }
   const now = input.now ?? new Date().toISOString();
   const timestamp = Date.parse(now);
   if (!Number.isFinite(timestamp)) {
@@ -1039,6 +1039,13 @@ export function deleteAccountAgent(
   }
   const purgeAfter = new Date(timestamp + AGENT_RECOVERY_WINDOW_MS).toISOString();
   database.transaction(() => {
+    const current = requireOwnedAgent(database, input.userId, input.agentId);
+    if (current.purged_at) {
+      throw new AgentServiceError("CONFLICT", "이미 영구 삭제된 에이전트입니다.");
+    }
+    if (current.deleted_at) {
+      throw new AgentServiceError("CONFLICT", "이미 삭제된 에이전트입니다.");
+    }
     const disabledMemberships = database.prepare(
       `UPDATE workspace_agents
        SET status = 'disabled', updated_at = ?
@@ -1057,12 +1064,15 @@ export function deleteAccountAgent(
        ) AND revoked_at IS NULL`,
     ).run(now, input.agentId);
     const cancelledAssignments = cancelActiveAgentAssignments(database, input.agentId, now);
-    database.prepare(
+    const deleted = database.prepare(
       `UPDATE agents
        SET status = 'disabled', deleted_at = ?, purge_after = ?,
-           purged_at = NULL, updated_at = ?
-       WHERE id = ?`,
+           updated_at = ?
+       WHERE id = ? AND deleted_at IS NULL AND purged_at IS NULL`,
     ).run(now, purgeAfter, now, input.agentId);
+    if (deleted.changes !== 1) {
+      throw new AgentServiceError("CONFLICT", "에이전트의 삭제 상태가 변경되었습니다. 화면을 새로고침해주세요.");
+    }
     recordGlobalAgentAudit(database, {
       agentId: input.agentId,
       userId: input.userId,
@@ -1077,7 +1087,7 @@ export function deleteAccountAgent(
       },
       createdAt: now,
     });
-  })();
+  }).immediate();
   return listAccountAgents(database, input.userId).find((agent) => agent.id === input.agentId)!;
 }
 
@@ -1085,24 +1095,28 @@ export function restoreAccountAgent(
   database: NyxDatabase,
   input: { userId: string; agentId: string; now?: string },
 ) {
-  const current = requireOwnedAgent(database, input.userId, input.agentId);
-  if (current.purged_at) {
-    throw new AgentServiceError("CONFLICT", "복구 기간이 지나 영구 삭제된 에이전트입니다.");
-  }
-  if (!current.deleted_at || !current.purge_after) {
-    throw new AgentServiceError("CONFLICT", "삭제된 에이전트가 아닙니다.");
-  }
   const now = input.now ?? new Date().toISOString();
-  if (Date.parse(now) >= Date.parse(current.purge_after)) {
-    throw new AgentServiceError("CONFLICT", "30일 복구 기간이 지났습니다.");
-  }
   database.transaction(() => {
-    database.prepare(
+    const current = requireOwnedAgent(database, input.userId, input.agentId);
+    if (current.purged_at) {
+      throw new AgentServiceError("CONFLICT", "복구 기간이 지나 영구 삭제된 에이전트입니다.");
+    }
+    if (!current.deleted_at || !current.purge_after) {
+      throw new AgentServiceError("CONFLICT", "삭제된 에이전트가 아닙니다.");
+    }
+    if (Date.parse(now) >= Date.parse(current.purge_after)) {
+      throw new AgentServiceError("CONFLICT", "30일 복구 기간이 지났습니다.");
+    }
+    const restored = database.prepare(
       `UPDATE agents
        SET status = 'active', deleted_at = NULL, purge_after = NULL,
-           purged_at = NULL, updated_at = ?
-       WHERE id = ?`,
+           updated_at = ?
+       WHERE id = ? AND deleted_at IS NOT NULL AND purge_after IS NOT NULL
+         AND purged_at IS NULL`,
     ).run(now, input.agentId);
+    if (restored.changes !== 1) {
+      throw new AgentServiceError("CONFLICT", "에이전트의 삭제 상태가 변경되었습니다. 화면을 새로고침해주세요.");
+    }
     recordGlobalAgentAudit(database, {
       agentId: input.agentId,
       userId: input.userId,
@@ -1115,7 +1129,7 @@ export function restoreAccountAgent(
       },
       createdAt: now,
     });
-  })();
+  }).immediate();
   return listAccountAgents(database, input.userId).find((agent) => agent.id === input.agentId)!;
 }
 
@@ -1209,15 +1223,22 @@ export function purgeAccountAgent(
     throw new AgentServiceError("INVALID_INPUT", "검증된 삭제 직전 백업이 필요합니다.");
   }
   const now = input.now ?? new Date().toISOString();
-  database.transaction(() => purgeAccountAgentData(database, {
-    agentId: input.agentId,
-    now,
-    actorType: "human",
-    actorUserId: input.userId,
-    actorLabel: input.actorLabel?.trim() || "사용자",
-    purgeMode: "manual",
-    backupGenerationId: input.backupGenerationId,
-  })).immediate();
+  database.transaction(() => {
+    // A verified backup can take long enough for an organization administrator
+    // to lose ownership or administrative access. Recheck the same destructive
+    // authorization and confirmation while holding the write transaction so a
+    // stale preflight can never authorize the mutation below.
+    validateAccountAgentPurge(database, input);
+    purgeAccountAgentData(database, {
+      agentId: input.agentId,
+      now,
+      actorType: "human",
+      actorUserId: input.userId,
+      actorLabel: input.actorLabel?.trim() || "사용자",
+      purgeMode: "manual",
+      backupGenerationId: input.backupGenerationId,
+    });
+  }).immediate();
   return listAccountAgents(database, input.userId).find((agent) => agent.id === input.agentId)!;
 }
 
@@ -1327,34 +1348,44 @@ export function assignAgentToWorkspace(
     rootDocumentId?: string | null;
   },
 ) {
-  requireAgentWorkspaceAccess(database, input.workspaceId, input.userId, "manage");
-  const agent = requireMutableAgent(
-    requireOwnedAgent(database, input.userId, input.agentId),
-    "할당",
-  );
-  const ownership = agentWorkspaceOwnershipCompatibility(database, input);
-  if (agent.status !== "active") throw new AgentServiceError("INVALID_INPUT", "비활성 에이전트는 할당할 수 없습니다.");
-  const existing = database.prepare(
-    `SELECT id, status FROM workspace_agents
-     WHERE workspace_id = ? AND agent_identity_id = ? AND revoked_at IS NULL`,
-  ).get(input.workspaceId, input.agentId) as { id: string; status: string } | undefined;
-  if (existing?.status === "active") {
-    throw new AgentServiceError(
-      "GRANT_ALREADY_ACTIVE",
-      "이미 이 워크스페이스에 활성 접근이 있습니다.",
-      { agentId: input.agentId, workspaceId: input.workspaceId, grantId: existing.id },
-    );
-  }
   const accessProfile = input.accessProfile ?? "reader";
   const capabilities = normalizeCapabilities(accessProfile, input.capabilities);
   const role = accessProfile === "custom"
     ? (capabilities.includes("documents.update") ? "editor" : "viewer")
     : legacyRoleForAgentProfile(accessProfile);
-  const rootDocumentId = validateMembershipRoot(database, input.workspaceId, input.rootDocumentId ?? null);
-  const scopeMode = rootDocumentId ? "document_tree" : "workspace";
-  const membershipId = existing?.id ?? randomUUID();
-  const now = new Date().toISOString();
-  database.transaction(() => {
+  const membershipId = database.transaction(() => {
+    requireAgentWorkspaceAccess(database, input.workspaceId, input.userId, "manage");
+    const agent = requireMutableAgent(
+      requireOwnedAgent(database, input.userId, input.agentId),
+      "할당",
+    );
+    const ownership = agentWorkspaceOwnershipCompatibility(database, input);
+    if (agent.status !== "active") {
+      throw new AgentServiceError("INVALID_INPUT", "비활성 에이전트는 할당할 수 없습니다.");
+    }
+    const existing = database.prepare(
+      `SELECT id, status, policy_version FROM workspace_agents
+       WHERE workspace_id = ? AND agent_identity_id = ? AND revoked_at IS NULL`,
+    ).get(input.workspaceId, input.agentId) as {
+      id: string;
+      status: string;
+      policy_version: number;
+    } | undefined;
+    if (existing?.status === "active") {
+      throw new AgentServiceError(
+        "GRANT_ALREADY_ACTIVE",
+        "이미 이 워크스페이스에 활성 접근이 있습니다.",
+        { agentId: input.agentId, workspaceId: input.workspaceId, grantId: existing.id },
+      );
+    }
+    const rootDocumentId = validateMembershipRoot(
+      database,
+      input.workspaceId,
+      input.rootDocumentId ?? null,
+    );
+    const scopeMode = rootDocumentId ? "document_tree" : "workspace";
+    const currentMembershipId = existing?.id ?? randomUUID();
+    const now = new Date().toISOString();
     if (ownership.organizationId && ownership.personalAgentApproval) {
       database.prepare(
         `INSERT INTO organization_agent_approvals
@@ -1383,12 +1414,12 @@ export function assignAgentToWorkspace(
       });
     }
     if (existing) {
-      database.prepare(
+      const result = database.prepare(
         `UPDATE workspace_agents
          SET role = ?, status = 'active', permission_allow_json = ?, permission_deny_json = ?,
              root_document_id = ?, display_name = ?, access_profile = ?, capabilities_json = ?,
              scope_mode = ?, policy_version = policy_version + 1, updated_at = ?
-         WHERE id = ?`,
+         WHERE id = ? AND policy_version = ? AND revoked_at IS NULL`,
       ).run(
         role,
         "[]",
@@ -1399,8 +1430,15 @@ export function assignAgentToWorkspace(
         JSON.stringify(capabilities),
         scopeMode,
         now,
-        membershipId,
+        currentMembershipId,
+        existing.policy_version,
       );
+      if (result.changes !== 1) {
+        throw new AgentServiceError(
+          "CONFLICT",
+          "에이전트 접근 권한이 동시에 변경되었습니다. 최신 상태를 확인한 뒤 다시 시도해주세요.",
+        );
+      }
     } else {
       database.prepare(
         `INSERT INTO workspace_agents
@@ -1410,7 +1448,7 @@ export function assignAgentToWorkspace(
           access_profile, capabilities_json, scope_mode, policy_version, revoked_at)
          VALUES (?, ?, ?, NULL, ?, 'active', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, NULL)`,
       ).run(
-        membershipId,
+        currentMembershipId,
         input.workspaceId,
         agent.display_name,
         role,
@@ -1430,7 +1468,7 @@ export function assignAgentToWorkspace(
     // before its current root-document boundary was configured.
     cancelAssignmentsOutsideWorkspaceAgentGrantBoundary(database, {
       grant: {
-        id: membershipId,
+        id: currentMembershipId,
         agentIdentityId: input.agentId,
         workspaceId: input.workspaceId,
         status: "active",
@@ -1449,7 +1487,7 @@ export function assignAgentToWorkspace(
       actorLabel: "사용자",
       targetType: "agent",
       targetId: input.agentId,
-      metadata: { membershipId, accessProfile, capabilities, rootDocumentId },
+      metadata: { membershipId: currentMembershipId, accessProfile, capabilities, rootDocumentId },
       createdAt: now,
     });
     recordOrganizationWorkspaceAgentAudit(database, {
@@ -1459,10 +1497,11 @@ export function assignAgentToWorkspace(
         : "organization.agent_workspace_assigned",
       userId: input.userId,
       agentId: input.agentId,
-      metadata: { membershipId, accessProfile, capabilities, rootDocumentId },
+      metadata: { membershipId: currentMembershipId, accessProfile, capabilities, rootDocumentId },
       createdAt: now,
     });
-  })();
+    return currentMembershipId;
+  }).immediate();
   return listWorkspaceAgentMemberships(database, input.workspaceId, input.userId)
     .find((membership) => membership.membershipId === membershipId)!;
 }
@@ -1480,45 +1519,47 @@ export function updateAgentWorkspaceMembership(
     status?: "active" | "disabled";
   },
 ) {
-  requireAgentWorkspaceAccess(database, input.workspaceId, input.userId, "manage");
-  requireMutableAgent(
-    requireOwnedAgent(database, input.userId, input.agentId),
-    "권한을 변경",
-  );
-  const current = database.prepare(
-    `SELECT id, role, access_profile, capabilities_json, status, root_document_id,
-            policy_version
-     FROM workspace_agents
-     WHERE workspace_id = ? AND agent_identity_id = ? AND revoked_at IS NULL`,
-  ).get(input.workspaceId, input.agentId) as {
-    id: string;
-    role: AgentWorkspaceRole;
-    access_profile: AgentAccessProfile;
-    capabilities_json: string;
-    status: "active" | "disabled";
-    root_document_id: string | null;
-    policy_version: number;
-  } | undefined;
-  if (!current) throw new AgentServiceError("NOT_FOUND", "워크스페이스 에이전트 할당을 찾을 수 없습니다.");
-  const rootDocumentId = validateMembershipRoot(database, input.workspaceId, input.rootDocumentId);
-  const accessProfile = input.accessProfile ?? current.access_profile;
-  const capabilities = normalizeCapabilities(
-    accessProfile,
-    input.capabilities ?? parseJsonList(current.capabilities_json, WORKSPACE_PERMISSIONS),
-  );
-  const role = accessProfile === "custom"
-    ? (capabilities.includes("documents.update") ? "editor" : "viewer")
-    : legacyRoleForAgentProfile(accessProfile);
-  const status = input.status ?? current.status;
-  const scopeMode = rootDocumentId ? "document_tree" : "workspace";
-  const now = new Date().toISOString();
-  database.transaction(() => {
-    database.prepare(
+  const membershipId = database.transaction(() => {
+    requireAgentWorkspaceAccess(database, input.workspaceId, input.userId, "manage");
+    requireMutableAgent(
+      requireOwnedAgent(database, input.userId, input.agentId),
+      "권한을 변경",
+    );
+    const current = database.prepare(
+      `SELECT id, role, access_profile, capabilities_json, status, root_document_id,
+              policy_version
+       FROM workspace_agents
+       WHERE workspace_id = ? AND agent_identity_id = ? AND revoked_at IS NULL`,
+    ).get(input.workspaceId, input.agentId) as {
+      id: string;
+      role: AgentWorkspaceRole;
+      access_profile: AgentAccessProfile;
+      capabilities_json: string;
+      status: "active" | "disabled";
+      root_document_id: string | null;
+      policy_version: number;
+    } | undefined;
+    if (!current) {
+      throw new AgentServiceError("NOT_FOUND", "워크스페이스 에이전트 할당을 찾을 수 없습니다.");
+    }
+    const rootDocumentId = validateMembershipRoot(database, input.workspaceId, input.rootDocumentId);
+    const accessProfile = input.accessProfile ?? current.access_profile;
+    const capabilities = normalizeCapabilities(
+      accessProfile,
+      input.capabilities ?? parseJsonList(current.capabilities_json, WORKSPACE_PERMISSIONS),
+    );
+    const role = accessProfile === "custom"
+      ? (capabilities.includes("documents.update") ? "editor" : "viewer")
+      : legacyRoleForAgentProfile(accessProfile);
+    const status = input.status ?? current.status;
+    const scopeMode = rootDocumentId ? "document_tree" : "workspace";
+    const now = new Date().toISOString();
+    const result = database.prepare(
       `UPDATE workspace_agents
        SET role = ?, access_profile = ?, capabilities_json = ?, status = ?,
            root_document_id = ?, scope_mode = ?, permission_allow_json = ?,
            permission_deny_json = ?, policy_version = policy_version + 1, updated_at = ?
-       WHERE id = ?`,
+       WHERE id = ? AND policy_version = ? AND revoked_at IS NULL`,
     ).run(
       role,
       accessProfile,
@@ -1530,7 +1571,14 @@ export function updateAgentWorkspaceMembership(
       "[]",
       now,
       current.id,
+      current.policy_version,
     );
+    if (result.changes !== 1) {
+      throw new AgentServiceError(
+        "CONFLICT",
+        "에이전트 접근 권한이 동시에 변경되었습니다. 최신 상태를 확인한 뒤 다시 시도해주세요.",
+      );
+    }
     cancelAssignmentsOutsideWorkspaceAgentGrantBoundary(database, {
       grant: {
         id: current.id,
@@ -1585,9 +1633,10 @@ export function updateAgentWorkspaceMembership(
       },
       createdAt: now,
     });
-  })();
+    return current.id;
+  }).immediate();
   return listWorkspaceAgentMemberships(database, input.workspaceId, input.userId)
-    .find((membership) => membership.membershipId === current.id)!;
+    .find((membership) => membership.membershipId === membershipId)!;
 }
 
 function normalizeScopes(scopes: readonly ApiTokenScope[]) {
@@ -1646,29 +1695,8 @@ export function createAgentCredential(
     expiresAt?: string | null;
   },
 ) {
-  const agent = requireMutableAgent(
-    requireOwnedAgent(database, input.userId, input.agentId),
-    "연결 키를 생성",
-  );
-  if (agent.status !== "active") {
-    throw new AgentServiceError("INVALID_INPUT", "비활성 에이전트에는 새 연결 키를 만들 수 없습니다.");
-  }
-  const activeCount = database.prepare(
-    "SELECT COUNT(*) AS count FROM agent_credentials WHERE agent_id = ? AND revoked_at IS NULL",
-  ).get(input.agentId) as { count: number };
-  if (activeCount.count >= 20) throw new AgentServiceError("INVALID_INPUT", "활성 연결 키는 에이전트마다 최대 20개입니다.");
   const name = normalizedName(input.name, "연결 키 이름");
   const scopes = normalizeScopes(input.scopes ?? DEFAULT_API_TOKEN_SCOPES);
-  const selectedGrants = resolveCredentialGrantRows(database, {
-    userId: input.userId,
-    agentId: input.agentId,
-    workspaceIds: input.workspaceAllowlist ?? [],
-  });
-  const defaultWorkspaceId = validateCredentialDefaultWorkspace(
-    input.defaultWorkspaceId ?? null,
-    selectedGrants,
-  );
-  const workspaceIds = selectedGrants.map((grant) => grant.workspace_id);
   let ipAllowlist: string[];
   try {
     ipAllowlist = normalizeIpAllowlist(input.ipAllowlist ?? []);
@@ -1682,6 +1710,29 @@ export function createAgentCredential(
   const id = randomUUID();
   const now = new Date().toISOString();
   database.transaction(() => {
+    const agent = requireMutableAgent(
+      requireOwnedAgent(database, input.userId, input.agentId),
+      "연결 키를 생성",
+    );
+    if (agent.status !== "active") {
+      throw new AgentServiceError("INVALID_INPUT", "비활성 에이전트에는 새 연결 키를 만들 수 없습니다.");
+    }
+    const activeCount = database.prepare(
+      "SELECT COUNT(*) AS count FROM agent_credentials WHERE agent_id = ? AND revoked_at IS NULL",
+    ).get(input.agentId) as { count: number };
+    if (activeCount.count >= 20) {
+      throw new AgentServiceError("INVALID_INPUT", "활성 연결 키는 에이전트마다 최대 20개입니다.");
+    }
+    const selectedGrants = resolveCredentialGrantRows(database, {
+      userId: input.userId,
+      agentId: input.agentId,
+      workspaceIds: input.workspaceAllowlist ?? [],
+    });
+    const defaultWorkspaceId = validateCredentialDefaultWorkspace(
+      input.defaultWorkspaceId ?? null,
+      selectedGrants,
+    );
+    const workspaceIds = selectedGrants.map((grant) => grant.workspace_id);
     database.prepare(
       `INSERT INTO agent_credentials
        (id, agent_id, created_by_user_id, name, token_prefix, token_hash,
@@ -1710,23 +1761,23 @@ export function createAgentCredential(
       credentialId: id,
       workspaceIds,
     });
-  })();
-  recordGlobalAgentAudit(database, {
-    agentId: input.agentId,
-    userId: input.userId,
-    action: "credential.global_created",
-    targetType: "credential",
-    targetId: id,
-    metadata: {
-      prefix,
-      scopes,
-      defaultWorkspaceId,
-      workspaceIds,
-      ipAllowlist,
-      expiresAt,
-    },
-    createdAt: now,
-  });
+    recordGlobalAgentAudit(database, {
+      agentId: input.agentId,
+      userId: input.userId,
+      action: "credential.global_created",
+      targetType: "credential",
+      targetId: id,
+      metadata: {
+        prefix,
+        scopes,
+        defaultWorkspaceId,
+        workspaceIds,
+        ipAllowlist,
+        expiresAt,
+      },
+      createdAt: now,
+    });
+  }).immediate();
   return { token, credential: listCredentials(database, input.agentId).find((credential) => credential.id === id)! };
 }
 
@@ -1744,26 +1795,8 @@ export function updateAgentCredential(
     expiresAt: string | null;
   },
 ) {
-  requireMutableAgent(
-    requireOwnedAgent(database, input.userId, input.agentId),
-    "연결 키를 수정",
-  );
-  const current = database.prepare(
-    "SELECT id FROM agent_credentials WHERE id = ? AND agent_id = ? AND revoked_at IS NULL",
-  ).get(input.credentialId, input.agentId);
-  if (!current) throw new AgentServiceError("NOT_FOUND", "활성 연결 키를 찾을 수 없습니다.");
   const name = normalizedName(input.name, "연결 키 이름");
   const scopes = normalizeScopes(input.scopes);
-  const selectedGrants = resolveCredentialGrantRows(database, {
-    userId: input.userId,
-    agentId: input.agentId,
-    workspaceIds: input.workspaceAllowlist,
-  });
-  const defaultWorkspaceId = validateCredentialDefaultWorkspace(
-    input.defaultWorkspaceId,
-    selectedGrants,
-  );
-  const workspaceIds = selectedGrants.map((grant) => grant.workspace_id);
   let ipAllowlist: string[];
   try {
     ipAllowlist = normalizeIpAllowlist(input.ipAllowlist);
@@ -1773,7 +1806,25 @@ export function updateAgentCredential(
   const expiresAt = normalizeExpiry(input.expiresAt);
   const now = new Date().toISOString();
   database.transaction(() => {
-    database.prepare(
+    requireMutableAgent(
+      requireOwnedAgent(database, input.userId, input.agentId),
+      "연결 키를 수정",
+    );
+    const current = database.prepare(
+      "SELECT id FROM agent_credentials WHERE id = ? AND agent_id = ? AND revoked_at IS NULL",
+    ).get(input.credentialId, input.agentId);
+    if (!current) throw new AgentServiceError("NOT_FOUND", "활성 연결 키를 찾을 수 없습니다.");
+    const selectedGrants = resolveCredentialGrantRows(database, {
+      userId: input.userId,
+      agentId: input.agentId,
+      workspaceIds: input.workspaceAllowlist,
+    });
+    const defaultWorkspaceId = validateCredentialDefaultWorkspace(
+      input.defaultWorkspaceId,
+      selectedGrants,
+    );
+    const workspaceIds = selectedGrants.map((grant) => grant.workspace_id);
+    const result = database.prepare(
       `UPDATE agent_credentials
        SET name = ?, scopes_json = ?, default_workspace_id = ?,
            workspace_allowlist_json = ?, ip_allowlist_json = ?, expires_at = ?, updated_at = ?
@@ -1789,29 +1840,32 @@ export function updateAgentCredential(
       input.credentialId,
       input.agentId,
     );
+    if (result.changes !== 1) {
+      throw new AgentServiceError("NOT_FOUND", "활성 연결 키를 찾을 수 없습니다.");
+    }
     reconcileCredentialGrantBindings(database, {
       userId: input.userId,
       agentId: input.agentId,
       credentialId: input.credentialId,
       workspaceIds,
     });
-  })();
-  recordGlobalAgentAudit(database, {
-    agentId: input.agentId,
-    userId: input.userId,
-    action: "credential.global_updated",
-    targetType: "credential",
-    targetId: input.credentialId,
-    metadata: {
-      name,
-      scopes,
-      defaultWorkspaceId,
-      workspaceIds,
-      ipAllowlist,
-      expiresAt,
-    },
-    createdAt: now,
-  });
+    recordGlobalAgentAudit(database, {
+      agentId: input.agentId,
+      userId: input.userId,
+      action: "credential.global_updated",
+      targetType: "credential",
+      targetId: input.credentialId,
+      metadata: {
+        name,
+        scopes,
+        defaultWorkspaceId,
+        workspaceIds,
+        ipAllowlist,
+        expiresAt,
+      },
+      createdAt: now,
+    });
+  }).immediate();
   return listCredentials(database, input.agentId).find((credential) => credential.id === input.credentialId)!;
 }
 
@@ -1919,19 +1973,19 @@ export function connectAgentToWorkspace(
       binding,
       token,
     };
-  })();
+  }).immediate();
 }
 
 export function revokeAgentCredential(
   database: NyxDatabase,
   input: { userId: string; agentId: string; credentialId: string },
 ) {
-  requireMutableAgent(
-    requireOwnedAgent(database, input.userId, input.agentId),
-    "연결 키를 폐기",
-  );
   const now = new Date().toISOString();
   database.transaction(() => {
+    requireMutableAgent(
+      requireOwnedAgent(database, input.userId, input.agentId),
+      "연결 키를 폐기",
+    );
     const result = database.prepare(
       `UPDATE agent_credentials SET revoked_at = ?, updated_at = ?
        WHERE id = ? AND agent_id = ? AND revoked_at IS NULL`,
@@ -1953,53 +2007,53 @@ export function revokeAgentCredential(
       targetId: input.credentialId,
       createdAt: now,
     });
-  })();
+  }).immediate();
 }
 
 export function rotateAgentCredential(
   database: NyxDatabase,
   input: { userId: string; agentId: string; credentialId: string },
 ) {
-  requireMutableAgent(
-    requireOwnedAgent(database, input.userId, input.agentId),
-    "연결 키를 회전",
-  );
-  const current = database.prepare(
-    `SELECT name, scopes_json, default_workspace_id, ip_allowlist_json, expires_at
-     FROM agent_credentials
-     WHERE id = ? AND agent_id = ? AND revoked_at IS NULL`,
-  ).get(input.credentialId, input.agentId) as {
-    name: string;
-    scopes_json: string;
-    default_workspace_id: string | null;
-    ip_allowlist_json: string;
-    expires_at: string | null;
-  } | undefined;
-  if (!current) throw new AgentServiceError("NOT_FOUND", "활성 연결 키를 찾을 수 없습니다.");
-  // `workspace_allowlist_json` remains a legacy storage mirror. A credential can
-  // be attached to another workspace later without rewriting that mirror, so the
-  // active binding rows are the only authoritative source when rotating a key.
-  const boundWorkspaceIds = (database.prepare(
-    `SELECT DISTINCT membership.workspace_id
-     FROM agent_credential_grant_bindings binding
-     JOIN workspace_agents membership ON membership.id = binding.grant_id
-     JOIN workspaces workspace ON workspace.id = membership.workspace_id
-     WHERE binding.credential_id = ?
-       AND binding.status = 'active' AND binding.revoked_at IS NULL
-       AND membership.agent_identity_id = ?
-       AND membership.status = 'active' AND membership.revoked_at IS NULL
-       AND workspace.lifecycle_state = 'active'
-     ORDER BY membership.workspace_id`,
-  ).all(input.credentialId, input.agentId) as Array<{ workspace_id: string }>)
-    .map((row) => row.workspace_id);
-  const defaultWorkspaceId = current.default_workspace_id
-    && boundWorkspaceIds.includes(current.default_workspace_id)
-    ? current.default_workspace_id
-    : null;
-  const preservedExpiry = current.expires_at && Date.parse(current.expires_at) > Date.now()
-    ? current.expires_at
-    : null;
   return database.transaction(() => {
+    requireMutableAgent(
+      requireOwnedAgent(database, input.userId, input.agentId),
+      "연결 키를 회전",
+    );
+    const current = database.prepare(
+      `SELECT name, scopes_json, default_workspace_id, ip_allowlist_json, expires_at
+       FROM agent_credentials
+       WHERE id = ? AND agent_id = ? AND revoked_at IS NULL`,
+    ).get(input.credentialId, input.agentId) as {
+      name: string;
+      scopes_json: string;
+      default_workspace_id: string | null;
+      ip_allowlist_json: string;
+      expires_at: string | null;
+    } | undefined;
+    if (!current) throw new AgentServiceError("NOT_FOUND", "활성 연결 키를 찾을 수 없습니다.");
+    // `workspace_allowlist_json` remains a legacy storage mirror. A credential can
+    // be attached to another workspace later without rewriting that mirror, so the
+    // active binding rows are the only authoritative source when rotating a key.
+    const boundWorkspaceIds = (database.prepare(
+      `SELECT DISTINCT membership.workspace_id
+       FROM agent_credential_grant_bindings binding
+       JOIN workspace_agents membership ON membership.id = binding.grant_id
+       JOIN workspaces workspace ON workspace.id = membership.workspace_id
+       WHERE binding.credential_id = ?
+         AND binding.status = 'active' AND binding.revoked_at IS NULL
+         AND membership.agent_identity_id = ?
+         AND membership.status = 'active' AND membership.revoked_at IS NULL
+         AND workspace.lifecycle_state = 'active'
+       ORDER BY membership.workspace_id`,
+    ).all(input.credentialId, input.agentId) as Array<{ workspace_id: string }>)
+      .map((row) => row.workspace_id);
+    const defaultWorkspaceId = current.default_workspace_id
+      && boundWorkspaceIds.includes(current.default_workspace_id)
+      ? current.default_workspace_id
+      : null;
+    const preservedExpiry = current.expires_at && Date.parse(current.expires_at) > Date.now()
+      ? current.expires_at
+      : null;
     revokeAgentCredential(database, input);
     return createAgentCredential(database, {
       userId: input.userId,
@@ -2011,5 +2065,5 @@ export function rotateAgentCredential(
       ipAllowlist: parseJsonList<string>(current.ip_allowlist_json),
       expiresAt: preservedExpiry,
     });
-  })();
+  }).immediate();
 }

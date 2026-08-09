@@ -1,4 +1,10 @@
 import * as Y from "yjs";
+import {
+  getHumanDocumentPrincipal,
+  getHumanWorkspacePrincipal,
+  humanDocumentPrincipalAllows,
+  humanRoleAllows,
+} from "@/lib/authz/permissions";
 import type { NyxDatabase } from "@/lib/db/client";
 import {
   collaborationYDocFromState,
@@ -18,6 +24,7 @@ import {
   workingDocumentFromStoredState,
   workingDocumentFromYDoc,
   type CollaborationIdempotency,
+  type DraftActor,
   type WorkingDocument,
 } from "@/lib/collaboration/drafts";
 import type {
@@ -36,6 +43,7 @@ import type {
   ResetWorkingDocumentResponse,
   WorkingDocumentResponse,
 } from "@/lib/collaboration/protocol";
+import { requireCurrentCollaborationAuthorization } from "@/lib/collaboration/authorization";
 import {
   applyDocumentPatch,
   archiveDocument,
@@ -51,6 +59,16 @@ import {
   type TopLevelBlockIdRemap,
 } from "@/lib/documents/block-ids";
 import { DocumentServiceError } from "@/lib/documents/types";
+import {
+  assertDocumentMediaAssetsBelongToWorkspace,
+  assertDocumentMediaReferencesAuthorized,
+} from "@/lib/media/bindings";
+import {
+  ApiTokenError,
+  authenticateAgentCredential,
+  requireTokenDocumentAccess,
+  requireTokenPermission,
+} from "@/lib/tokens/service";
 
 export type CollaborationDocumentProvider = {
   withDocument<T>(roomName: string, callback: (document: Y.Doc) => Promise<T> | T): Promise<T>;
@@ -77,6 +95,231 @@ function assertExpectedDraftVersion(
       },
     );
   }
+}
+
+function sameWorkingPayload(left: WorkingDocument, right: WorkingDocument) {
+  return JSON.stringify({
+    title: left.title,
+    parentDocumentId: left.parentDocumentId,
+    metadata: left.metadata,
+    content: left.content,
+  }) === JSON.stringify({
+    title: right.title,
+    parentDocumentId: right.parentDocumentId,
+    metadata: right.metadata,
+    content: right.content,
+  });
+}
+
+function currentAgentIdentity(
+  database: NyxDatabase,
+  workspaceId: string,
+  actor: DraftActor,
+) {
+  const tokenId = actor.tokenId?.trim();
+  if (!tokenId) {
+    throw new DocumentServiceError(
+      "FORBIDDEN",
+      "현재 에이전트 연결 자격 증명을 확인할 수 없습니다.",
+    );
+  }
+  try {
+    const identity = authenticateAgentCredential(database, tokenId, {
+      workspaceId,
+      clientIp: actor.requestContext?.clientIp,
+      scopeCeiling: actor.scopeCeiling,
+    });
+    if (actor.principalId && identity.globalAgentId !== actor.principalId) {
+      throw new DocumentServiceError(
+        "FORBIDDEN",
+        "현재 에이전트 연결과 작업자 신원이 일치하지 않습니다.",
+      );
+    }
+    return identity;
+  } catch (error) {
+    if (error instanceof DocumentServiceError) throw error;
+    if (error instanceof ApiTokenError) {
+      throw new DocumentServiceError(
+        error.code === "NOT_FOUND" ? "NOT_FOUND" : "FORBIDDEN",
+        error.message,
+      );
+    }
+    throw error;
+  }
+}
+
+function documentReferenceIds(content: WorkingDocument["content"]) {
+  const references = new Set<string>();
+  function visit(value: unknown) {
+    if (Array.isArray(value)) {
+      value.forEach(visit);
+      return;
+    }
+    if (!value || typeof value !== "object") return;
+    const node = value as Record<string, unknown>;
+    if (node.type === "doc_ref" && typeof node.documentId === "string") {
+      references.add(node.documentId);
+    }
+    if (Array.isArray(node.children)) node.children.forEach(visit);
+  }
+  visit(content.blocks);
+  return [...references];
+}
+
+/**
+ * Historical content is untrusted input at the point it becomes the new shared
+ * draft. Re-run the same current-actor media and document-scope checks used by
+ * canonical writes; access that existed when the revision was created is not a
+ * lease for a later restore.
+ */
+function assertReplacementSnapshotAuthorized(input: {
+  database: NyxDatabase;
+  workspaceId: string;
+  actor: DraftActor;
+  content: WorkingDocument["content"];
+}) {
+  const { database, workspaceId, actor, content } = input;
+  if (actor.type === "system") {
+    assertDocumentMediaAssetsBelongToWorkspace(database, workspaceId, content);
+  } else {
+    const documentActor = documentActorFromDraftActor(actor);
+    const agentIdentity = actor.type === "agent"
+      ? currentAgentIdentity(database, workspaceId, actor)
+      : null;
+    assertDocumentMediaReferencesAuthorized(database, {
+      workspaceId,
+      actor: documentActor,
+      content,
+      ...(agentIdentity
+        ? {
+            agentCanReadDocument(documentId: string) {
+              try {
+                requireTokenDocumentAccess(database, agentIdentity, documentId);
+                return true;
+              } catch (error) {
+                if (error instanceof ApiTokenError) return false;
+                throw error;
+              }
+            },
+            agentCanReadRevision(documentId: string) {
+              try {
+                requireTokenPermission(agentIdentity, "documents:read", "revisions.read");
+                requireTokenDocumentAccess(database, agentIdentity, documentId);
+                return true;
+              } catch (error) {
+                if (error instanceof ApiTokenError) return false;
+                throw error;
+              }
+            },
+          }
+        : {}),
+    });
+  }
+
+  for (const targetDocumentId of documentReferenceIds(content)) {
+    const target = database.prepare(
+      `SELECT 1 FROM documents
+       WHERE workspace_id = ? AND id = ?
+         AND status = 'active' AND lifecycle_state = 'active'`,
+    ).get(workspaceId, targetDocumentId);
+    if (!target) {
+      throw new DocumentServiceError(
+        "INVALID_INPUT",
+        "내부 문서 링크의 대상이 이 워크스페이스에 없거나 보관되었습니다.",
+        { targetDocumentId },
+      );
+    }
+    if (actor.type === "system") continue;
+    if (actor.type === "human") {
+      const userId = actor.userId?.trim();
+      const principal = userId
+        ? getHumanDocumentPrincipal(database, workspaceId, targetDocumentId, userId)
+        : null;
+      if (principal && humanDocumentPrincipalAllows(principal, "documents.read")) continue;
+    } else {
+      const identity = currentAgentIdentity(database, workspaceId, actor);
+      try {
+        requireTokenDocumentAccess(database, identity, targetDocumentId);
+        continue;
+      } catch (error) {
+        if (!(error instanceof ApiTokenError)) throw error;
+      }
+    }
+    throw new DocumentServiceError(
+      "FORBIDDEN",
+      "내부 문서 링크가 현재 작업자의 허용 범위를 벗어났습니다.",
+      { targetDocumentId },
+    );
+  }
+}
+
+function requireCurrentArchiveAuthorization(
+  database: NyxDatabase,
+  request: ArchiveWorkingTreeRequest,
+) {
+  if (request.actor.type === "system") return;
+  requireCurrentCollaborationAuthorization(
+    database,
+    request.workspaceId,
+    request.documentId,
+    request.actor,
+    "draft.update",
+  );
+  if (request.actor.type === "human") {
+    const userId = request.actor.userId?.trim();
+    const principal = userId
+      ? getHumanWorkspacePrincipal(database, request.workspaceId, userId)
+      : null;
+    if (!principal || !humanRoleAllows(principal.role, "documents.trash")) {
+      throw new DocumentServiceError(
+        "FORBIDDEN",
+        "현재 워크스페이스 권한으로 문서를 휴지통으로 옮길 수 없습니다.",
+      );
+    }
+    return;
+  }
+
+  const identity = currentAgentIdentity(database, request.workspaceId, request.actor);
+  try {
+    requireTokenPermission(
+      identity,
+      "documents:write",
+      request.createdByAgentId ? "documents.trash_own" : "documents.trash",
+    );
+    requireTokenDocumentAccess(database, identity, request.documentId);
+  } catch (error) {
+    if (error instanceof ApiTokenError) {
+      throw new DocumentServiceError(
+        error.code === "NOT_FOUND" ? "NOT_FOUND" : "FORBIDDEN",
+        error.message,
+      );
+    }
+    throw error;
+  }
+}
+
+function getActiveSubtreeDocumentIds(
+  database: NyxDatabase,
+  workspaceId: string,
+  documentId: string,
+) {
+  return (database.prepare(
+    `WITH RECURSIVE subtree(id) AS (
+       SELECT id
+       FROM documents
+       WHERE workspace_id = ? AND id = ?
+         AND status = 'active' AND lifecycle_state = 'active'
+       UNION ALL
+       SELECT document.id
+       FROM documents document
+       JOIN subtree ON document.parent_document_id = subtree.id
+       WHERE document.workspace_id = ?
+         AND document.status = 'active'
+         AND document.lifecycle_state = 'active'
+     )
+     SELECT id FROM subtree ORDER BY id`,
+  ).all(workspaceId, documentId, workspaceId) as Array<{ id: string }>)
+    .map(({ id }) => id);
 }
 
 function assertDestructiveCas(
@@ -260,18 +503,53 @@ export function createCollaborationCommands(input: {
     );
   }
 
-  function commitLoadedDocument(input: {
+  function loadAuthoritativeDraft(roomName: string) {
+    const state = loadCollaborationStateByRoom(database, roomName);
+    const document = collaborationYDocFromState(state.state);
+    return {
+      document,
+      working: workingDocumentFromYDoc(database, roomName, document),
+    };
+  }
+
+  function assertProcessDraftMatchesAuthoritative(
+    processWorking: WorkingDocument,
+    authoritativeWorking: WorkingDocument,
+    code: "DRAFT_CONFLICT" | "DRAFT_VERSION_CONFLICT" | "DRAFT_NOT_SYNCED",
+  ) {
+    if (sameWorkingPayload(processWorking, authoritativeWorking)) return;
+    throw new DocumentServiceError(
+      code,
+      "이 서버의 공유 초안이 아직 최신 저장 상태와 동기화되지 않았습니다. 동기화 후 다시 시도해주세요.",
+      {
+        currentDraftVersion: authoritativeWorking.draftVersion,
+        generation: authoritativeWorking.generation,
+      },
+    );
+  }
+
+  function commitLoadedDocumentInTransaction(input: {
     document: Y.Doc;
     working: WorkingDocument;
     actor: CommitWorkingDocumentRequest["actor"];
     summary?: string;
     idempotency: CollaborationIdempotency | null;
     normalizationRemaps?: readonly TopLevelBlockIdRemap[];
-    existingTransaction?: boolean;
-    broadcast?: boolean;
   }): CommitWorkingDocumentResponse {
     const { document, actor, summary, idempotency } = input;
     let working = input.working;
+    requireCurrentCollaborationAuthorization(
+      database,
+      working.workspaceId,
+      working.documentId,
+      actor,
+      "canonical.commit",
+    );
+    assertDocumentMediaAssetsBelongToWorkspace(
+      database,
+      working.workspaceId,
+      working.content,
+    );
     const normalized = normalizeTopLevelBlockIds(
       database,
       working.documentId,
@@ -288,60 +566,53 @@ export function createCollaborationCommands(input: {
       ...(input.normalizationRemaps ?? []),
       ...normalized.repairs,
     ]);
-    const commit = () => {
-      const canonical = assertCanonicalBase(working);
-      const result = updateDocument(
+    const canonical = assertCanonicalBase(working);
+    const result = updateDocument(
+      database,
+      working.workspaceId,
+      documentActorFromDraftActor(actor),
+      working.documentId,
+      {
+        idempotencyOperation: "commit_document",
+        baseRevision: canonical.revisionNumber,
+        title: working.title,
+        parentDocumentId: working.parentDocumentId,
+        documentType: working.metadata.documentType,
+        workflowStatus: working.metadata.workflowStatus,
+        tags: working.metadata.tags,
+        content: working.content,
+        summary,
+      },
+    );
+    if (result.unchanged) {
+      markCollaborationSyncedWithoutRevision(
         database,
-        working.workspaceId,
-        documentActorFromDraftActor(actor),
-        working.documentId,
-        {
-          idempotencyOperation: "commit_document",
-          baseRevision: canonical.revisionNumber,
-          title: working.title,
-          parentDocumentId: working.parentDocumentId,
-          documentType: working.metadata.documentType,
-          workflowStatus: working.metadata.workflowStatus,
-          tags: working.metadata.tags,
-          content: working.content,
-          summary,
-        },
+        working.roomName,
+        result.document.revisionId,
+        result.document.revisionNumber,
       );
-      if (result.unchanged) {
-        markCollaborationSyncedWithoutRevision(
-          database,
-          working.roomName,
-          result.document.revisionId,
-          result.document.revisionNumber,
-        );
-      } else {
-        if (!result.document.revisionId) {
-          throw new DocumentServiceError(
-            "COLLABORATION_UNAVAILABLE",
-            "저장된 정본 리비전 식별자가 없습니다.",
-          );
-        }
-        markCollaborationCommitted(
-          database,
-          working.roomName,
-          result.document.revisionId,
-          result.document.revisionNumber,
-          actor,
+    } else {
+      if (!result.document.revisionId) {
+        throw new DocumentServiceError(
+          "COLLABORATION_UNAVAILABLE",
+          "저장된 정본 리비전 식별자가 없습니다.",
         );
       }
-      const value: CommitWorkingDocumentResponse = {
-        ...result,
-        workingDocument: workingDocumentFromYDoc(database, working.roomName, document),
-        ...(normalization ? { normalization } : {}),
-      };
-      recordCollaborationRequest(database, idempotency, value);
-      return value;
+      markCollaborationCommitted(
+        database,
+        working.roomName,
+        result.document.revisionId,
+        result.document.revisionNumber,
+        actor,
+      );
+    }
+    const value: CommitWorkingDocumentResponse = {
+      ...result,
+      workingDocument: workingDocumentFromYDoc(database, working.roomName, document),
+      ...(normalization ? { normalization } : {}),
     };
-    const response = input.existingTransaction
-      ? commit()
-      : database.transaction(commit).immediate();
-    if (input.broadcast !== false) broadcastCanonicalCommit(document, response, actor);
-    return response;
+    recordCollaborationRequest(database, idempotency, value);
+    return value;
   }
 
   function broadcastCanonicalCommit(
@@ -390,9 +661,29 @@ export function createCollaborationCommands(input: {
     }
 
     const response = await provider.withDocument(request.roomName, (document) => {
+      let persistedDocument: Y.Doc | null = null;
       const mutation = database.transaction(() => {
-        const before = workingDocumentFromYDoc(database, request.roomName, document);
+        const processWorking = workingDocumentFromYDoc(database, request.roomName, document);
+        assertDocumentMediaAssetsBelongToWorkspace(
+          database,
+          processWorking.workspaceId,
+          processWorking.content,
+        );
+        const authoritative = loadAuthoritativeDraft(request.roomName);
+        const before = authoritative.working;
+        requireCurrentCollaborationAuthorization(
+          database,
+          before.workspaceId,
+          before.documentId,
+          request.actor,
+          "draft.update",
+        );
         assertExpectedDraftVersion(before, request.expectedDraftVersion);
+        assertProcessDraftMatchesAuthoritative(
+          processWorking,
+          before,
+          "DRAFT_CONFLICT",
+        );
         requireDraftMoveAuthorization(
           before,
           request.replacement.parentDocumentId,
@@ -401,26 +692,59 @@ export function createCollaborationCommands(input: {
         const normalized = request.replacement.content
           ? normalizeTopLevelBlockIds(database, state.documentId, request.replacement.content)
           : null;
-        replaceWorkingDocument(document, {
+        if (normalized) {
+          assertDocumentMediaAssetsBelongToWorkspace(
+            database,
+            state.workspaceId,
+            normalized.content,
+          );
+        }
+        const candidate = authoritative.document;
+        replaceWorkingDocument(candidate, {
           ...request.replacement,
           ...(normalized ? { content: normalized.content } : {}),
         }, {
           context: { actor: request.actor, recordedByEndpoint: true },
         });
-        persistCollaborationUpdate(database, request.roomName, document, request.actor);
-        const workingDocument = workingDocumentFromYDoc(database, request.roomName, document);
+        const candidateWorking = workingDocumentFromYDoc(
+          database,
+          request.roomName,
+          candidate,
+        );
+        assertDocumentMediaAssetsBelongToWorkspace(
+          database,
+          candidateWorking.workspaceId,
+          candidateWorking.content,
+        );
+        persistCollaborationUpdate(database, request.roomName, candidate, request.actor);
+        const workingDocument = workingDocumentFromYDoc(database, request.roomName, candidate);
         const normalization = normalized
           ? blockIdNormalization(normalized.repairs)
           : undefined;
-        return {
+        const value = {
           workingDocument,
           ...(normalization ? { normalization } : {}),
         };
+        recordCollaborationRequest(database, idempotency, value);
+        persistedDocument = candidate;
+        return value;
       }).immediate();
+      if (!persistedDocument) {
+        throw new DocumentServiceError(
+          "COLLABORATION_UNAVAILABLE",
+          "공유 초안 변경 결과를 협업 문서에 반영하지 못했습니다.",
+        );
+      }
+      const candidateDelta = Y.encodeStateAsUpdate(
+        persistedDocument,
+        Y.encodeStateVector(document),
+      );
+      Y.applyUpdate(document, candidateDelta, {
+        context: { actor: request.actor, recordedByEndpoint: true },
+      });
       broadcastDraftStatus(provider, document, mutation.workingDocument);
       return mutation;
     });
-    recordCollaborationRequest(database, idempotency, response);
     return observeDraftMutation(response, response.workingDocument, false);
   }
 
@@ -450,27 +774,29 @@ export function createCollaborationCommands(input: {
     }
 
     const response = await provider.withDocument(request.roomName, (document) => {
-      // Persist edits already accepted by the collaboration room independently
-      // of this replace-and-commit attempt. A later canonical-write failure
-      // must roll back only the candidate replacement, not prior user edits.
-      persistCollaborationYDoc(database, request.roomName, document);
-      const observed = workingDocumentFromYDoc(database, request.roomName, document);
-      assertExpectedDraftVersion(observed, request.expectedDraftVersion);
-      assertCanonicalBase(observed);
-      requireDraftMoveAuthorization(
-        observed,
-        request.replacement.parentDocumentId,
-        request.actor,
-      );
-      const candidate = collaborationYDocFromState(Y.encodeStateAsUpdate(document));
       let committedDocument: Y.Doc | null = null;
       const response = database.transaction(() => {
-        // Recheck after entering the SQLite write transaction. The replacement
-        // itself is applied to an isolated candidate document so a failed
-        // canonical write cannot leak a partially replaced draft into either
-        // SQLite or the in-memory collaboration room.
-        const before = workingDocumentFromYDoc(database, request.roomName, document);
+        const processWorking = workingDocumentFromYDoc(database, request.roomName, document);
+        assertDocumentMediaAssetsBelongToWorkspace(
+          database,
+          processWorking.workspaceId,
+          processWorking.content,
+        );
+        const authoritative = loadAuthoritativeDraft(request.roomName);
+        const before = authoritative.working;
+        requireCurrentCollaborationAuthorization(
+          database,
+          before.workspaceId,
+          before.documentId,
+          request.actor,
+          "draft.update",
+        );
         assertExpectedDraftVersion(before, request.expectedDraftVersion);
+        assertProcessDraftMatchesAuthoritative(
+          processWorking,
+          before,
+          "DRAFT_CONFLICT",
+        );
         assertCanonicalBase(before);
         requireDraftMoveAuthorization(
           before,
@@ -480,6 +806,16 @@ export function createCollaborationCommands(input: {
         const normalized = request.replacement.content
           ? normalizeTopLevelBlockIds(database, state.documentId, request.replacement.content)
           : null;
+        if (normalized) {
+          assertDocumentMediaAssetsBelongToWorkspace(
+            database,
+            state.workspaceId,
+            normalized.content,
+          );
+        }
+        // The replacement and every commit-side normalization operate on the
+        // locked stored draft, never on a process-local Y.Doc that may be stale.
+        const candidate = authoritative.document;
         replaceWorkingDocument(candidate, {
           ...request.replacement,
           ...(normalized ? { content: normalized.content } : {}),
@@ -487,15 +823,13 @@ export function createCollaborationCommands(input: {
           context: { actor: request.actor, recordedByEndpoint: true },
         });
         persistCollaborationUpdate(database, request.roomName, candidate, request.actor);
-        const committed = commitLoadedDocument({
+        const committed = commitLoadedDocumentInTransaction({
           document: candidate,
           working: workingDocumentFromYDoc(database, request.roomName, candidate),
           actor: request.actor,
           summary: request.summary,
           idempotency,
           normalizationRemaps: normalized?.repairs,
-          existingTransaction: true,
-          broadcast: false,
         });
         committedDocument = candidate;
         return committed;
@@ -541,50 +875,45 @@ export function createCollaborationCommands(input: {
     }
 
     const response = await provider.withDocument(request.roomName, (document) => {
-      // Flush accepted live edits before taking the structural move CAS. The
-      // move commits only canonical metadata; it never commits this draft body.
-      persistCollaborationYDoc(database, request.roomName, document);
-      const observed = workingDocumentFromYDoc(database, request.roomName, document);
-      assertDestructiveCas(observed, request);
-      assertCanonicalBase(observed);
-      const target = getDocument(database, observed.workspaceId, request.targetDocumentId);
-      const destinationParentDocumentId = request.position === "inside"
-        ? target.id
-        : target.parentDocumentId;
-      if (observed.parentDocumentId === destinationParentDocumentId) {
-        throw new DocumentServiceError(
-          "INVALID_INPUT",
-          "같은 상위 문서 안의 순서 변경에는 구조 초안 재배치가 필요하지 않습니다.",
-        );
-      }
-      requireDraftMoveAuthorization(observed, destinationParentDocumentId, request.actor);
-
-      const candidate = collaborationYDocFromState(Y.encodeStateAsUpdate(document));
-      replaceWorkingDocument(candidate, {
-        parentDocumentId: destinationParentDocumentId,
-      }, {
-        context: { actor: request.actor, recordedByEndpoint: true },
-      });
-
+      let movedDocument: Y.Doc | null = null;
       const moved = database.transaction(() => {
-        const before = workingDocumentFromYDoc(database, request.roomName, document);
+        const processWorking = workingDocumentFromYDoc(database, request.roomName, document);
+        assertDocumentMediaAssetsBelongToWorkspace(
+          database,
+          processWorking.workspaceId,
+          processWorking.content,
+        );
+        const authoritative = loadAuthoritativeDraft(request.roomName);
+        const before = authoritative.working;
         assertDestructiveCas(before, request);
-        const lockedCanonical = assertCanonicalBase(before);
-        const lockedTarget = getDocument(
+        assertProcessDraftMatchesAuthoritative(
+          processWorking,
+          before,
+          "DRAFT_VERSION_CONFLICT",
+        );
+        const canonical = assertCanonicalBase(before);
+        const target = getDocument(
           database,
           before.workspaceId,
           request.targetDocumentId,
         );
-        const lockedParentDocumentId = request.position === "inside"
-          ? lockedTarget.id
-          : lockedTarget.parentDocumentId;
-        if (lockedParentDocumentId !== destinationParentDocumentId) {
+        const destinationParentDocumentId = request.position === "inside"
+          ? target.id
+          : target.parentDocumentId;
+        if (before.parentDocumentId === destinationParentDocumentId) {
           throw new DocumentServiceError(
-            "REVISION_CONFLICT",
-            "이동 기준 문서의 위치가 바뀌었습니다. 최신 문서 트리를 다시 확인해주세요.",
+            "INVALID_INPUT",
+            "같은 상위 문서 안의 순서 변경에는 구조 초안 재배치가 필요하지 않습니다.",
           );
         }
-        requireDraftMoveAuthorization(before, lockedParentDocumentId, request.actor);
+        requireDraftMoveAuthorization(before, destinationParentDocumentId, request.actor);
+
+        const candidate = authoritative.document;
+        replaceWorkingDocument(candidate, {
+          parentDocumentId: destinationParentDocumentId,
+        }, {
+          context: { actor: request.actor, recordedByEndpoint: true },
+        });
 
         const canonicalMove = updateDocument(
           database,
@@ -592,8 +921,8 @@ export function createCollaborationCommands(input: {
           documentActorFromDraftActor(request.actor),
           before.documentId,
           {
-            baseRevision: lockedCanonical.revisionNumber,
-            parentDocumentId: lockedParentDocumentId,
+            baseRevision: canonical.revisionNumber,
+            parentDocumentId: destinationParentDocumentId,
             summary: request.summary,
           },
         );
@@ -626,10 +955,20 @@ export function createCollaborationCommands(input: {
           ),
         };
         recordCollaborationRequest(database, idempotency, value);
+        movedDocument = candidate;
         return value;
       }).immediate();
 
-      const candidateDelta = Y.encodeStateAsUpdate(candidate, Y.encodeStateVector(document));
+      if (!movedDocument) {
+        throw new DocumentServiceError(
+          "COLLABORATION_UNAVAILABLE",
+          "문서 이동 결과를 공유 초안에 반영하지 못했습니다.",
+        );
+      }
+      const candidateDelta = Y.encodeStateAsUpdate(
+        movedDocument,
+        Y.encodeStateVector(document),
+      );
       Y.applyUpdate(document, candidateDelta, {
         context: { actor: request.actor, recordedByEndpoint: true },
       });
@@ -662,28 +1001,72 @@ export function createCollaborationCommands(input: {
         ));
     }
 
-    const response = await provider.withDocument(request.roomName, async (document) => {
-      const before = workingDocumentFromYDoc(database, request.roomName, document);
-      assertExpectedDraftVersion(before, request.expectedDraftVersion);
-      const patchedContent = applyDocumentPatch(before.content, request.operations);
-      const normalized = normalizeTopLevelBlockIds(
-        database,
-        state.documentId,
-        patchedContent,
+    const response = await provider.withDocument(request.roomName, (document) => {
+      let persistedDocument: Y.Doc | null = null;
+      const mutation = database.transaction(() => {
+        const processWorking = workingDocumentFromYDoc(database, request.roomName, document);
+        assertDocumentMediaAssetsBelongToWorkspace(
+          database,
+          processWorking.workspaceId,
+          processWorking.content,
+        );
+        const authoritative = loadAuthoritativeDraft(request.roomName);
+        const before = authoritative.working;
+        assertExpectedDraftVersion(before, request.expectedDraftVersion);
+        assertProcessDraftMatchesAuthoritative(
+          processWorking,
+          before,
+          "DRAFT_CONFLICT",
+        );
+        requireCurrentCollaborationAuthorization(
+          database,
+          before.workspaceId,
+          before.documentId,
+          request.actor,
+          "draft.update",
+        );
+        const patchedContent = applyDocumentPatch(before.content, request.operations);
+        const normalized = normalizeTopLevelBlockIds(
+          database,
+          state.documentId,
+          patchedContent,
+        );
+        assertDocumentMediaAssetsBelongToWorkspace(
+          database,
+          state.workspaceId,
+          normalized.content,
+        );
+        const candidate = authoritative.document;
+        replaceWorkingDocument(candidate, { content: normalized.content }, {
+          context: { actor: request.actor, recordedByEndpoint: true },
+        });
+        persistCollaborationUpdate(database, request.roomName, candidate, request.actor);
+        const workingDocument = workingDocumentFromYDoc(database, request.roomName, candidate);
+        const normalization = blockIdNormalization(normalized.repairs);
+        const value = {
+          workingDocument,
+          ...(normalization ? { normalization } : {}),
+        };
+        recordCollaborationRequest(database, idempotency, value);
+        persistedDocument = candidate;
+        return value;
+      }).immediate();
+      if (!persistedDocument) {
+        throw new DocumentServiceError(
+          "COLLABORATION_UNAVAILABLE",
+          "공유 초안 변경 결과를 협업 문서에 반영하지 못했습니다.",
+        );
+      }
+      const candidateDelta = Y.encodeStateAsUpdate(
+        persistedDocument,
+        Y.encodeStateVector(document),
       );
-      replaceWorkingDocument(document, { content: normalized.content }, {
+      Y.applyUpdate(document, candidateDelta, {
         context: { actor: request.actor, recordedByEndpoint: true },
       });
-      persistCollaborationUpdate(database, request.roomName, document, request.actor);
-      const workingDocument = workingDocumentFromYDoc(database, request.roomName, document);
-      const normalization = blockIdNormalization(normalized.repairs);
-      broadcastDraftStatus(provider, document, workingDocument);
-      return {
-        workingDocument,
-        ...(normalization ? { normalization } : {}),
-      };
+      broadcastDraftStatus(provider, document, mutation.workingDocument);
+      return mutation;
     });
-    recordCollaborationRequest(database, idempotency, response);
     return observeDraftMutation(response, response.workingDocument, false);
   }
 
@@ -710,32 +1093,61 @@ export function createCollaborationCommands(input: {
     }
 
     const response = await provider.withDocument(request.roomName, (document) => {
-      const before = workingDocumentFromYDoc(database, request.roomName, document);
-      assertCommitSynchronizationFence(
-        document,
-        before,
-        request.synchronizationFence,
-      );
-      // Flush the exact in-memory state before taking the immutable snapshot.
-      persistCollaborationYDoc(database, request.roomName, document);
-      const working = workingDocumentFromYDoc(database, request.roomName, document);
-      assertCommitSynchronizationFence(
-        document,
-        working,
-        request.synchronizationFence,
-      );
-      assertExpectedDraftVersion(
-        working,
-        request.expectedDraftVersion,
-        "DRAFT_VERSION_CONFLICT",
-      );
-      return commitLoadedDocument({
-        document,
-        working,
-        actor: request.actor,
-        summary: request.summary,
-        idempotency,
+      let committedDocument: Y.Doc | null = null;
+      const committed = database.transaction(() => {
+        const processWorking = workingDocumentFromYDoc(database, request.roomName, document);
+        assertDocumentMediaAssetsBelongToWorkspace(
+          database,
+          processWorking.workspaceId,
+          processWorking.content,
+        );
+        assertCommitSynchronizationFence(
+          document,
+          processWorking,
+          request.synchronizationFence,
+        );
+
+        // Bind the optimistic version and immutable snapshot to the same
+        // locked database state. A process-local room may lag another server,
+        // so it is used only as a synchronization check, never as commit input.
+        const authoritative = loadAuthoritativeDraft(request.roomName);
+        const working = authoritative.working;
+        assertExpectedDraftVersion(
+          working,
+          request.expectedDraftVersion,
+          "DRAFT_VERSION_CONFLICT",
+        );
+        assertProcessDraftMatchesAuthoritative(
+          processWorking,
+          working,
+          request.synchronizationFence ? "DRAFT_NOT_SYNCED" : "DRAFT_VERSION_CONFLICT",
+        );
+        assertCommitSynchronizationFence(
+          authoritative.document,
+          working,
+          request.synchronizationFence,
+        );
+        const value = commitLoadedDocumentInTransaction({
+          document: authoritative.document,
+          working,
+          actor: request.actor,
+          summary: request.summary,
+          idempotency,
+        });
+        committedDocument = authoritative.document;
+        return value;
+      }).immediate();
+      if (!committedDocument) {
+        throw new DocumentServiceError(
+          "COLLABORATION_UNAVAILABLE",
+          "원자적 문서 저장 결과를 공유 초안에 반영하지 못했습니다.",
+        );
+      }
+      Y.applyUpdate(document, Y.encodeStateAsUpdate(committedDocument), {
+        context: { actor: request.actor, recordedByEndpoint: true },
       });
+      broadcastCanonicalCommit(document, committed, request.actor);
+      return committed;
     });
     return observeDraftMutation(response, response.workingDocument, false);
   }
@@ -743,6 +1155,12 @@ export function createCollaborationCommands(input: {
   async function resetWorking(
     request: ResetWorkingDocumentRequest,
   ): Promise<ResetWorkingDocumentResponse> {
+    if (request.actor.type === "human" && request.requestId === undefined) {
+      throw new DocumentServiceError(
+        "INVALID_INPUT",
+        "복원 또는 초안 폐기 요청에는 안정적인 requestId가 필요합니다.",
+      );
+    }
     const currentState = ensureCollaborationState(database, request.workspaceId, request.documentId);
     const idempotency = prepareCollaborationIdempotency({
       workspaceId: request.workspaceId,
@@ -762,17 +1180,35 @@ export function createCollaborationCommands(input: {
         ));
     }
     const response = await provider.withDocument(currentState.roomName, (document) => {
-      // Accepted live-room updates are independent of this destructive
-      // operation and must remain persisted even when the caller's CAS is stale.
-      persistCollaborationYDoc(database, currentState.roomName, document);
-      const working = workingDocumentFromYDoc(database, currentState.roomName, document);
-      assertDestructiveCas(working, request);
       return database.transaction(() => {
-        const locked = workingDocumentFromYDoc(database, currentState.roomName, document);
-        assertDestructiveCas(locked, request);
+        const processWorking = workingDocumentFromYDoc(
+          database,
+          currentState.roomName,
+          document,
+        );
+        const authoritative = loadAuthoritativeDraft(currentState.roomName);
+        requireCurrentCollaborationAuthorization(
+          database,
+          authoritative.working.workspaceId,
+          authoritative.working.documentId,
+          request.actor,
+          request.revisionId ? "draft.restore" : "draft.update",
+        );
+        assertDestructiveCas(authoritative.working, request);
+        assertProcessDraftMatchesAuthoritative(
+          processWorking,
+          authoritative.working,
+          "DRAFT_VERSION_CONFLICT",
+        );
         const source = request.revisionId
           ? getDocumentRevisionSnapshot(database, request.workspaceId, request.documentId, request.revisionId)
           : getDocument(database, request.workspaceId, request.documentId);
+        assertReplacementSnapshotAuthorized({
+          database,
+          workspaceId: request.workspaceId,
+          actor: request.actor,
+          content: source.content,
+        });
         const roomName = resetCollaborationState(
           database,
           request.workspaceId,
@@ -805,39 +1241,78 @@ export function createCollaborationCommands(input: {
   async function archiveWorkingTree(
     request: ArchiveWorkingTreeRequest,
   ): Promise<ArchiveWorkingTreeResponse> {
-    const subtree = database.prepare(
-      `WITH RECURSIVE subtree(id) AS (
-         SELECT id
-         FROM documents
-         WHERE workspace_id = ? AND id = ?
-           AND status = 'active' AND lifecycle_state = 'active'
-         UNION ALL
-         SELECT document.id
-         FROM documents document
-         JOIN subtree ON document.parent_document_id = subtree.id
-         WHERE document.workspace_id = ?
-           AND document.status = 'active'
-           AND document.lifecycle_state = 'active'
-       )
-       SELECT id FROM subtree ORDER BY id`,
-    ).all(
+    const subtreeDocumentIds = getActiveSubtreeDocumentIds(
+      database,
       request.workspaceId,
       request.documentId,
-      request.workspaceId,
-    ) as Array<{ id: string }>;
-    if (subtree.length === 0) {
+    );
+    if (subtreeDocumentIds.length === 0) {
       throw new DocumentServiceError("NOT_FOUND", "문서를 찾을 수 없습니다.");
     }
-    const rooms = subtree.map(({ id }) =>
+    const rooms = subtreeDocumentIds.map((id) =>
       ensureCollaborationState(database, request.workspaceId, id).roomName);
     const opened: Array<{ roomName: string; document: Y.Doc }> = [];
 
-    async function openAll(index: number): Promise<ArchiveWorkingTreeResponse> {
-      if (index >= rooms.length) {
-        // No asynchronous boundary is allowed between this flush and the
-        // generation bump inside archiveDocument. Any update already applied
-        // to an opened Y.Doc is therefore included in the sealed draft.
-        for (const room of opened) {
+    async function openAll(index: number): Promise<void> {
+      if (index >= rooms.length) return;
+      const roomName = rooms[index]!;
+      return provider.withDocument(roomName, async (document) => {
+        opened.push({ roomName, document });
+        await openAll(index + 1);
+      });
+    }
+
+    let operationFailed = false;
+    try {
+      // Let every direct provider callback unwind while the documents are
+      // still active. Hocuspocus stores on direct disconnect; archiving inside
+      // the callback would make that final store target an archived document.
+      await openAll(0);
+      return database.transaction(() => {
+        // Opening every room is asynchronous and must not grant a permission
+        // lease. Resolve the current actor again while holding the same write
+        // lock that protects the draft flush and subtree archive.
+        requireCurrentArchiveAuthorization(database, request);
+
+        // Room discovery and provider loading happen before the write lock.
+        // Refuse to archive if a concurrent tree move changed the exact
+        // subtree: every document that will be archived must have had its
+        // live Y.Doc opened and included in this atomic flush.
+        const currentSubtreeDocumentIds = getActiveSubtreeDocumentIds(
+          database,
+          request.workspaceId,
+          request.documentId,
+        );
+        if (
+          currentSubtreeDocumentIds.length !== subtreeDocumentIds.length
+          || currentSubtreeDocumentIds.some(
+            (documentId, index) => documentId !== subtreeDocumentIds[index],
+          )
+        ) {
+          throw new DocumentServiceError(
+            "DRAFT_CONFLICT",
+            "문서 구조가 변경되었습니다. 최신 문서 트리를 다시 읽고 휴지통 이동을 재시도해주세요.",
+            {
+              expectedDocumentIds: subtreeDocumentIds,
+              currentDocumentIds: currentSubtreeDocumentIds,
+            },
+          );
+        }
+
+        // There is no asynchronous boundary from this projection through the
+        // generation seal. Persist isolated snapshots so any later failure
+        // rolls every draft back without mutating the provider-owned Y.Docs.
+        const candidates = opened.map((room) => ({
+          roomName: room.roomName,
+          document: collaborationYDocFromState(Y.encodeStateAsUpdate(room.document)),
+        }));
+        for (const room of candidates) {
+          const working = workingDocumentFromYDoc(database, room.roomName, room.document);
+          assertDocumentMediaAssetsBelongToWorkspace(
+            database,
+            working.workspaceId,
+            working.content,
+          );
           persistCollaborationYDoc(database, room.roomName, room.document);
         }
         return archiveDocument(
@@ -850,19 +1325,25 @@ export function createCollaborationCommands(input: {
             createdByAgentId: request.createdByAgentId,
           },
         );
+      }).immediate();
+    } catch (error) {
+      operationFailed = true;
+      throw error;
+    } finally {
+      // A provider can fail before invoking its callback, so close only rooms
+      // that were actually handed to this command. Attempt every cleanup and
+      // preserve the primary open/authorization/flush/archive error.
+      const openedRoomNames = [...new Set(opened.map((room) => room.roomName))];
+      const cleanup = await Promise.allSettled(openedRoomNames.map(async (roomName) => {
+        await provider.closeConnections(roomName);
+      }));
+      if (!operationFailed) {
+        const cleanupFailure = cleanup.find(
+          (result): result is PromiseRejectedResult => result.status === "rejected",
+        );
+        if (cleanupFailure) throw cleanupFailure.reason;
       }
-      const roomName = rooms[index]!;
-      return provider.withDocument(roomName, async (document) => {
-        opened.push({ roomName, document });
-        return openAll(index + 1);
-      });
     }
-
-    const response = await openAll(0);
-    await Promise.all(rooms.map(async (roomName) => {
-      await provider.closeConnections(roomName);
-    }));
-    return response;
   }
 
   return {

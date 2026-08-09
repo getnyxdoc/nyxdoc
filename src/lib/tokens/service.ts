@@ -22,6 +22,19 @@ export const API_TOKEN_SCOPES = [
   "revisions:restore",
 ] as const;
 export type ApiTokenScope = (typeof API_TOKEN_SCOPES)[number];
+
+/**
+ * Request-bound context established by a trusted HTTP/OAuth authentication
+ * boundary. It is carried with the identity so transaction-bound credential
+ * rechecks apply the same network policy as the initial authentication.
+ *
+ * Public REST and MCP tool inputs never accept this object. If it crosses the
+ * app/collaboration process boundary, it is inside the authenticated internal
+ * command envelope (or a signed collaboration token).
+ */
+export type ApiTokenRequestContext = Readonly<{
+  clientIp: string | null;
+}>;
 export const DEFAULT_API_TOKEN_SCOPES: ApiTokenScope[] = [
   "documents:read",
   "documents:write",
@@ -49,6 +62,14 @@ export type ApiTokenIdentity = {
   bindingId: string;
   prefix: string;
   scopes: ApiTokenScope[];
+  /**
+   * Immutable request/session ceiling imposed above the credential itself.
+   * OAuth identities always carry this so later workspace projection or
+   * credential-ID reauthentication cannot regain scopes absent from the
+   * access token. Normal credential authentication leaves it unset.
+   */
+  readonly scopeCeiling?: readonly ApiTokenScope[];
+  readonly requestContext: ApiTokenRequestContext;
   lastEventCursor: number;
   scopeMode: "workspace" | "document_tree";
   rootDocumentId: string | null;
@@ -584,6 +605,8 @@ function authenticateCredentialRow(
   options: {
     workspaceId?: string | null;
     clientIp?: string | null;
+    scopeCeiling?: readonly ApiTokenScope[];
+    /** @deprecated Use scopeCeiling for narrowed session identities. */
     scopeOverride?: readonly ApiTokenScope[];
   },
 ): ApiTokenIdentity {
@@ -673,8 +696,13 @@ function authenticateCredentialRow(
     .run(now, row.id);
   const capabilities = parseStringList(membership.capabilities_json, WORKSPACE_PERMISSIONS);
   const credentialScopes = parseScopes(row.scopes_json);
-  const scopes = options.scopeOverride
-    ? credentialScopes.filter((scope) => options.scopeOverride!.includes(scope))
+  const requestedScopeCeiling = options.scopeCeiling ?? options.scopeOverride;
+  const scopeCeiling = requestedScopeCeiling === undefined
+    ? undefined
+    : Object.freeze(Array.from(new Set(requestedScopeCeiling.filter((scope) =>
+        API_TOKEN_SCOPES.includes(scope)))));
+  const scopes = scopeCeiling
+    ? credentialScopes.filter((scope) => scopeCeiling.includes(scope))
     : credentialScopes;
   return {
     id: row.id,
@@ -689,6 +717,8 @@ function authenticateCredentialRow(
     bindingId: membership.binding_id,
     prefix: row.token_prefix,
     scopes,
+    ...(scopeCeiling ? { scopeCeiling } : {}),
+    requestContext: Object.freeze({ clientIp: options.clientIp ?? null }),
     lastEventCursor: Number(state?.last_event_cursor ?? 0),
     scopeMode: membership.scope_mode,
     rootDocumentId: membership.root_document_id,
@@ -709,7 +739,9 @@ export function authenticateApiToken(
     .prepare(
       `${credentialAuthenticationSelect}
        WHERE credential.token_hash = ? AND credential.revoked_at IS NULL
-         AND agent.status = 'active'`,
+         AND agent.status = 'active'
+         AND agent.deleted_at IS NULL
+         AND agent.purged_at IS NULL`,
     )
     .get(hashToken(match[1])) as CredentialAuthenticationRow | undefined;
   return authenticateCredentialRow(database, row, options);
@@ -721,6 +753,8 @@ export function authenticateAgentCredential(
   options: {
     workspaceId?: string | null;
     clientIp?: string | null;
+    scopeCeiling?: readonly ApiTokenScope[];
+    /** @deprecated Use scopeCeiling for narrowed session identities. */
     scopeOverride?: readonly ApiTokenScope[];
   } = {},
 ) {
@@ -728,7 +762,9 @@ export function authenticateAgentCredential(
     .prepare(
       `${credentialAuthenticationSelect}
        WHERE credential.id = ? AND credential.revoked_at IS NULL
-         AND agent.status = 'active'`,
+         AND agent.status = 'active'
+         AND agent.deleted_at IS NULL
+         AND agent.purged_at IS NULL`,
     )
     .get(credentialId) as CredentialAuthenticationRow | undefined;
   return authenticateCredentialRow(database, row, options);
@@ -742,6 +778,7 @@ export function listApiTokenWorkspaceIdentities(
     `SELECT membership.id, membership.workspace_id,
             membership.access_profile, membership.capabilities_json,
             membership.root_document_id, membership.scope_mode,
+            credential.scopes_json,
             binding.id AS binding_id,
             workspace.name AS workspace_name, workspace.slug AS workspace_slug,
             COALESCE(state.last_event_cursor, 0) AS last_event_cursor
@@ -751,6 +788,15 @@ export function listApiTokenWorkspaceIdentities(
       AND binding.credential_id = ?
       AND binding.status = 'active'
       AND binding.revoked_at IS NULL
+     JOIN agent_credentials credential
+       ON credential.id = binding.credential_id
+      AND credential.agent_id = membership.agent_identity_id
+      AND credential.revoked_at IS NULL
+     JOIN agents agent
+       ON agent.id = membership.agent_identity_id
+      AND agent.status = 'active'
+      AND agent.deleted_at IS NULL
+      AND agent.purged_at IS NULL
      JOIN workspaces workspace ON workspace.id = membership.workspace_id
      JOIN workspace_ownership ownership ON ownership.workspace_id = workspace.id
      JOIN agent_ownership agent_owner ON agent_owner.agent_id = membership.agent_identity_id
@@ -765,6 +811,7 @@ export function listApiTokenWorkspaceIdentities(
      LEFT JOIN agent_credential_workspace_state state
        ON state.credential_id = ? AND state.workspace_id = membership.workspace_id
      WHERE membership.agent_identity_id = ?
+       AND (credential.expires_at IS NULL OR credential.expires_at > ?)
        AND membership.status = 'active' AND membership.revoked_at IS NULL
        AND (membership.scope_mode = 'workspace' OR membership.root_document_id IS NOT NULL)
        AND workspace.lifecycle_state = 'active'
@@ -784,11 +831,17 @@ export function listApiTokenWorkspaceIdentities(
          ))
        )
      ORDER BY workspace.name COLLATE NOCASE, workspace.id`,
-  ).all(identity.id, identity.id, identity.globalAgentId) as Array<{
+  ).all(
+    identity.id,
+    identity.id,
+    identity.globalAgentId,
+    new Date().toISOString(),
+  ) as Array<{
     id: string;
     workspace_id: string;
     access_profile: AgentAccessProfile;
     capabilities_json: string;
+    scopes_json: string;
     binding_id: string;
     scope_mode: "workspace" | "document_tree";
     root_document_id: string | null;
@@ -797,13 +850,19 @@ export function listApiTokenWorkspaceIdentities(
     last_event_cursor: number;
   }>;
 
-  return rows.map((row) => ({
+  return rows.map((row) => {
+    const credentialScopes = parseScopes(row.scopes_json);
+    const scopes = identity.scopeCeiling === undefined
+      ? credentialScopes
+      : credentialScopes.filter((scope) => identity.scopeCeiling!.includes(scope));
+    return {
       identity: {
         ...identity,
         agentId: row.id,
         workspaceId: row.workspace_id,
         accessProfile: row.access_profile,
         capabilities: parseStringList(row.capabilities_json, WORKSPACE_PERMISSIONS),
+        scopes,
         bindingId: row.binding_id,
         scopeMode: row.scope_mode,
         rootDocumentId: row.root_document_id,
@@ -814,7 +873,8 @@ export function listApiTokenWorkspaceIdentities(
         name: row.workspace_name,
         slug: row.workspace_slug,
       },
-    }));
+    };
+  });
 }
 
 export function requireTokenScope(identity: ApiTokenIdentity, scope: ApiTokenScope) {
@@ -850,7 +910,7 @@ export function requireTokenPermission(
 export function tokenDocumentActor(
   identity: ApiTokenIdentity,
   source: DocumentMutationSource,
-): DocumentActor {
+): DocumentActor & { readonly scopeCeiling?: readonly ApiTokenScope[] } {
   return {
     type: "agent",
     userId: identity.userId,
@@ -859,7 +919,94 @@ export function tokenDocumentActor(
     avatarMediaId: identity.avatarMediaId,
     label: identity.name,
     source,
+    ...(identity.scopeCeiling ? { scopeCeiling: identity.scopeCeiling } : {}),
+    requestContext: identity.requestContext,
   };
+}
+
+function loadActiveTokenWorkspaceProjection(
+  database: NyxDatabase,
+  identity: ApiTokenIdentity,
+) {
+  return database.prepare(
+    `SELECT membership.scope_mode, membership.root_document_id
+     FROM agent_credentials credential
+     JOIN agents agent
+       ON agent.id = credential.agent_id
+      AND agent.status = 'active'
+      AND agent.deleted_at IS NULL
+      AND agent.purged_at IS NULL
+     JOIN agent_credential_grant_bindings binding
+       ON binding.id = ?
+      AND binding.credential_id = credential.id
+      AND binding.status = 'active'
+      AND binding.revoked_at IS NULL
+     JOIN workspace_agents membership
+       ON membership.id = ?
+      AND membership.id = binding.grant_id
+      AND membership.agent_identity_id = agent.id
+      AND membership.workspace_id = ?
+      AND membership.status = 'active'
+      AND membership.revoked_at IS NULL
+      AND (membership.scope_mode = 'workspace' OR membership.root_document_id IS NOT NULL)
+     JOIN workspaces workspace
+       ON workspace.id = membership.workspace_id
+      AND workspace.lifecycle_state = 'active'
+     JOIN workspace_ownership ownership ON ownership.workspace_id = workspace.id
+     JOIN agent_ownership agent_owner ON agent_owner.agent_id = agent.id
+     LEFT JOIN organizations organization ON organization.id = ownership.organization_id
+     LEFT JOIN organization_agent_approvals approval
+       ON approval.organization_id = ownership.organization_id
+      AND approval.agent_id = agent.id
+      AND approval.revoked_at IS NULL
+     LEFT JOIN organization_members personal_agent_member
+       ON personal_agent_member.organization_id = ownership.organization_id
+      AND personal_agent_member.user_id = agent_owner.owner_user_id
+     WHERE credential.id = ?
+       AND credential.agent_id = ?
+       AND credential.revoked_at IS NULL
+       AND (credential.expires_at IS NULL OR credential.expires_at > ?)
+       AND (ownership.owner_type = 'personal' OR organization.lifecycle_state = 'active')
+       AND (
+         (ownership.owner_type = 'personal'
+          AND agent_owner.owner_type = 'personal'
+          AND agent_owner.owner_user_id = ownership.owner_user_id)
+         OR
+         (ownership.owner_type = 'organization' AND (
+           (agent_owner.owner_type = 'organization'
+            AND agent_owner.organization_id = ownership.organization_id)
+           OR
+           (agent_owner.owner_type = 'personal'
+            AND approval.id IS NOT NULL
+            AND personal_agent_member.id IS NOT NULL)
+         ))
+       )
+     LIMIT 1`,
+  ).get(
+    identity.bindingId,
+    identity.agentId,
+    identity.workspaceId,
+    identity.id,
+    identity.globalAgentId,
+    new Date().toISOString(),
+  ) as {
+    scope_mode: "workspace" | "document_tree";
+    root_document_id: string | null;
+  } | undefined;
+}
+
+function requireActiveTokenWorkspaceProjection(
+  database: NyxDatabase,
+  identity: ApiTokenIdentity,
+) {
+  const projection = loadActiveTokenWorkspaceProjection(database, identity);
+  if (!projection) {
+    throw new ApiTokenError(
+      "FORBIDDEN",
+      "이 연결 키는 대상 워크스페이스의 에이전트 접근 권한에 연결되어 있지 않습니다.",
+    );
+  }
+  return projection;
 }
 
 export function tokenCanAccessDocument(
@@ -868,11 +1015,20 @@ export function tokenCanAccessDocument(
   documentId: string,
   includeArchived = false,
 ) {
-  if (identity.scopeMode === "workspace") return true;
+  const projection = loadActiveTokenWorkspaceProjection(database, identity);
+  if (!projection) return false;
+  if (projection.scope_mode === "workspace") {
+    return Boolean(database.prepare(
+      `SELECT 1
+       FROM documents
+       WHERE workspace_id = ? AND id = ? AND (? = 1 OR status = 'active')
+       LIMIT 1`,
+    ).get(identity.workspaceId, documentId, includeArchived ? 1 : 0));
+  }
   // A document-tree grant without a live root is invalid. This must fail
   // closed: deletion or corruption of the root may never widen the grant to
   // the whole workspace.
-  if (!identity.rootDocumentId) return false;
+  if (!projection.root_document_id) return false;
   return Boolean(database.prepare(
     `WITH RECURSIVE ancestors(id, parent_document_id) AS (
        SELECT id, parent_document_id
@@ -891,7 +1047,7 @@ export function tokenCanAccessDocument(
     includeArchived ? 1 : 0,
     identity.workspaceId,
     includeArchived ? 1 : 0,
-    identity.rootDocumentId,
+    projection.root_document_id,
   ));
 }
 
@@ -910,8 +1066,14 @@ export function resolveTokenReadRoot(
   identity: ApiTokenIdentity,
   requestedRoot?: string,
 ) {
-  if (requestedRoot) requireTokenDocumentAccess(database, identity, requestedRoot);
-  return requestedRoot ?? identity.rootDocumentId ?? undefined;
+  const projection = requireActiveTokenWorkspaceProjection(database, identity);
+  if (requestedRoot) {
+    requireTokenDocumentAccess(database, identity, requestedRoot);
+    return requestedRoot;
+  }
+  return projection.scope_mode === "document_tree"
+    ? projection.root_document_id ?? undefined
+    : undefined;
 }
 
 export function resolveTokenCreateParent(
@@ -919,8 +1081,12 @@ export function resolveTokenCreateParent(
   identity: ApiTokenIdentity,
   requestedParent: string | null | undefined,
 ) {
-  if (!identity.rootDocumentId) return requestedParent;
-  if (requestedParent === undefined || requestedParent === null) return identity.rootDocumentId;
+  const projection = requireActiveTokenWorkspaceProjection(database, identity);
+  if (projection.scope_mode === "workspace") return requestedParent;
+  if (!projection.root_document_id) {
+    throw new ApiTokenError("FORBIDDEN", "이 연결의 문서 범위 루트를 확인할 수 없습니다.");
+  }
+  if (requestedParent === undefined || requestedParent === null) return projection.root_document_id;
   requireTokenDocumentAccess(database, identity, requestedParent);
   return requestedParent;
 }
@@ -930,7 +1096,8 @@ export function requireTokenParentAccess(
   identity: ApiTokenIdentity,
   requestedParent: string | null | undefined,
 ) {
-  if (requestedParent === undefined || !identity.rootDocumentId) return;
+  const projection = requireActiveTokenWorkspaceProjection(database, identity);
+  if (requestedParent === undefined || projection.scope_mode === "workspace") return;
   if (requestedParent === null) {
     throw new ApiTokenError("FORBIDDEN", "범위 제한 연결은 문서를 워크스페이스 최상위로 옮길 수 없습니다.");
   }

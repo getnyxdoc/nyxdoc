@@ -793,7 +793,7 @@ export function SettingsShell({
       return;
     }
     rememberWorkspaceSelection(body.nextWorkspaceId);
-    window.location.assign(
+    router.replace(
       `/settings/workspace?workspace=${encodeURIComponent(body.nextWorkspaceId)}`,
     );
   }
@@ -839,7 +839,7 @@ export function SettingsShell({
 
   async function signOut() {
     await authClient.signOut();
-    window.location.href = "/sign-in";
+    router.replace("/sign-in");
   }
 
   return (

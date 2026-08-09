@@ -1,5 +1,8 @@
 import { randomBytes, randomUUID } from "node:crypto";
-import { recordWorkspaceAuditEvent } from "@/lib/authz/permissions";
+import {
+  recordWorkspaceAuditEvent,
+  requireHumanWorkspacePermission,
+} from "@/lib/authz/permissions";
 import type { NyxDatabase } from "@/lib/db/client";
 import { getDocument } from "@/lib/documents/service";
 import type { DocumentDetail } from "@/lib/documents/types";
@@ -93,57 +96,65 @@ export function enableDocumentPublicShare(
     actorLabel: string;
   },
 ) {
-  getDocument(database, input.workspaceId, input.documentId);
-  const now = new Date().toISOString();
-  const existing = loadShare(database, input.workspaceId, input.documentId);
+  return database.transaction(() => {
+    requireHumanWorkspacePermission(
+      database,
+      input.workspaceId,
+      input.userId,
+      "documents.share",
+    );
+    getDocument(database, input.workspaceId, input.documentId);
+    const now = new Date().toISOString();
+    const existing = loadShare(database, input.workspaceId, input.documentId);
 
-  if (existing) {
-    if (!existing.enabled) {
-      database.prepare(
-        `UPDATE document_public_shares
-         SET enabled = 1, updated_at = ?, disabled_at = NULL
-         WHERE id = ?`,
-      ).run(now, existing.id);
-      recordWorkspaceAuditEvent(database, {
-        workspaceId: input.workspaceId,
-        action: "document.public_share.enabled",
-        actorType: "human",
-        actorUserId: input.userId,
-        actorLabel: input.actorLabel,
-        targetType: "document",
-        targetId: input.documentId,
-      });
+    if (existing) {
+      if (!existing.enabled) {
+        database.prepare(
+          `UPDATE document_public_shares
+           SET enabled = 1, updated_at = ?, disabled_at = NULL
+           WHERE id = ?`,
+        ).run(now, existing.id);
+        recordWorkspaceAuditEvent(database, {
+          workspaceId: input.workspaceId,
+          action: "document.public_share.enabled",
+          actorType: "human",
+          actorUserId: input.userId,
+          actorLabel: input.actorLabel,
+          targetType: "document",
+          targetId: input.documentId,
+        });
+      }
+      return mapShare(loadShare(database, input.workspaceId, input.documentId)!);
     }
-    return mapShare(loadShare(database, input.workspaceId, input.documentId)!);
-  }
 
-  const id = randomUUID();
-  const publicToken = randomBytes(32).toString("base64url");
-  database.prepare(
-    `INSERT INTO document_public_shares
-     (id, workspace_id, document_id, public_token, enabled,
-      created_by_user_id, created_by_label, created_at, updated_at, disabled_at)
-     VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, NULL)`,
-  ).run(
-    id,
-    input.workspaceId,
-    input.documentId,
-    publicToken,
-    input.userId,
-    input.actorLabel,
-    now,
-    now,
-  );
-  recordWorkspaceAuditEvent(database, {
-    workspaceId: input.workspaceId,
-    action: "document.public_share.created",
-    actorType: "human",
-    actorUserId: input.userId,
-    actorLabel: input.actorLabel,
-    targetType: "document",
-    targetId: input.documentId,
-  });
-  return mapShare(loadShare(database, input.workspaceId, input.documentId)!);
+    const id = randomUUID();
+    const publicToken = randomBytes(32).toString("base64url");
+    database.prepare(
+      `INSERT INTO document_public_shares
+       (id, workspace_id, document_id, public_token, enabled,
+        created_by_user_id, created_by_label, created_at, updated_at, disabled_at)
+       VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, NULL)`,
+    ).run(
+      id,
+      input.workspaceId,
+      input.documentId,
+      publicToken,
+      input.userId,
+      input.actorLabel,
+      now,
+      now,
+    );
+    recordWorkspaceAuditEvent(database, {
+      workspaceId: input.workspaceId,
+      action: "document.public_share.created",
+      actorType: "human",
+      actorUserId: input.userId,
+      actorLabel: input.actorLabel,
+      targetType: "document",
+      targetId: input.documentId,
+    });
+    return mapShare(loadShare(database, input.workspaceId, input.documentId)!);
+  }).immediate();
 }
 
 export function disableDocumentPublicShare(
@@ -155,27 +166,35 @@ export function disableDocumentPublicShare(
     actorLabel: string;
   },
 ) {
-  getDocument(database, input.workspaceId, input.documentId);
-  const existing = loadShare(database, input.workspaceId, input.documentId);
-  if (!existing) return null;
-  if (existing.enabled) {
-    const now = new Date().toISOString();
-    database.prepare(
-      `UPDATE document_public_shares
-       SET enabled = 0, updated_at = ?, disabled_at = ?
-       WHERE id = ?`,
-    ).run(now, now, existing.id);
-    recordWorkspaceAuditEvent(database, {
-      workspaceId: input.workspaceId,
-      action: "document.public_share.disabled",
-      actorType: "human",
-      actorUserId: input.userId,
-      actorLabel: input.actorLabel,
-      targetType: "document",
-      targetId: input.documentId,
-    });
-  }
-  return mapShare(loadShare(database, input.workspaceId, input.documentId)!);
+  return database.transaction(() => {
+    requireHumanWorkspacePermission(
+      database,
+      input.workspaceId,
+      input.userId,
+      "documents.share",
+    );
+    getDocument(database, input.workspaceId, input.documentId);
+    const existing = loadShare(database, input.workspaceId, input.documentId);
+    if (!existing) return null;
+    if (existing.enabled) {
+      const now = new Date().toISOString();
+      database.prepare(
+        `UPDATE document_public_shares
+         SET enabled = 0, updated_at = ?, disabled_at = ?
+         WHERE id = ?`,
+      ).run(now, now, existing.id);
+      recordWorkspaceAuditEvent(database, {
+        workspaceId: input.workspaceId,
+        action: "document.public_share.disabled",
+        actorType: "human",
+        actorUserId: input.userId,
+        actorLabel: input.actorLabel,
+        targetType: "document",
+        targetId: input.documentId,
+      });
+    }
+    return mapShare(loadShare(database, input.workspaceId, input.documentId)!);
+  }).immediate();
 }
 
 export function getPublicSharedDocument(

@@ -2,6 +2,30 @@
 
 All notable user-facing changes are recorded here.
 
+## 0.25.18 - 2026-08-09
+
+- Made collaboration writes durable before broadcast, rechecked authorization
+  for every live mutation, and preserved shared drafts across Strict Mode,
+  reconnects, and document-tree moves.
+- Unified document moves behind the canonical collaboration command boundary,
+  including same-parent reorder idempotency and conflict-safe cross-parent
+  moves without implicitly committing a dirty body.
+- Closed media, OAuth consent, archive, trash, workspace, and agent lifecycle
+  authorization races with live mutation barriers and fail-closed scope checks.
+- Added verified media-history and backup-checkpoint migrations, stronger
+  offline migration rehearsals, and a one-time v0.25.17 update bridge that
+  drains accepted editor writes before the legacy updater creates its backup.
+- Expanded real Chrome and Edge collaboration coverage, release-candidate
+  browser verticals, migration/restore checks, and lifecycle interruption tests.
+- Reworked release publication around an immutable qualified image digest,
+  source provenance, serialized aliases, idempotent recovery, and readable
+  changelog-derived GitHub Release notes.
+- Updated the supported runtime dependencies and removed known production npm
+  audit findings.
+- Made first-install and disaster-recovery paths portable across Docker hosts
+  by accepting image-seeded empty media directories and normalizing data,
+  media, and backup ownership before offline migrations.
+
 ## 0.25.17 - 2026-08-07
 
 - Allow documents with an uncommitted shared draft to move across parents

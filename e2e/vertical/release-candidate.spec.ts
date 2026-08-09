@@ -1,4 +1,9 @@
 import { expect, test } from "@playwright/test";
+import {
+  authenticateHardeningOwner,
+  installBrowserErrorGuard,
+  installConsoleErrorStackProbe,
+} from "../hardening/helpers";
 
 function isCollaborationWebSocket(rawUrl: string) {
   const path = new URL(rawUrl).pathname;
@@ -8,8 +13,8 @@ function isCollaborationWebSocket(rawUrl: string) {
 
 test("qualifies real sign-up, session, collaboration, commit, and reload boundaries", async ({ context, page }) => {
   const websocketUrls = new Set<string>();
-  page.on("console", (message) => console.log(`[browser:${message.type()}] ${message.text()}`));
-  page.on("pageerror", (error) => console.log(`[browser:pageerror] ${error.message}`));
+  await installConsoleErrorStackProbe(page);
+  const browserErrors = installBrowserErrorGuard(page, "editor");
   page.on("websocket", (socket) => {
     websocketUrls.add(socket.url());
     socket.on("close", () => console.log(`[browser:websocket-close] ${socket.url()}`));
@@ -18,24 +23,7 @@ test("qualifies real sign-up, session, collaboration, commit, and reload boundar
 
   const runId = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
   const marker = `release-collaboration-${runId}`;
-  // GitHub Actions passes optional workflow inputs as empty strings. Treat an
-  // empty existing-account email as "not configured" so fresh-install
-  // qualification exercises first-owner sign-up with a generated address.
-  const existingEmail = process.env.PLAYWRIGHT_EXISTING_EMAIL?.trim() || undefined;
-  const password = process.env.PLAYWRIGHT_EXISTING_PASSWORD
-    ?? "Release-qualification-password-123!";
-
-  await page.goto(existingEmail ? "/sign-in" : "/sign-up");
-  if (!existingEmail) {
-    await page.locator("#name").fill("Release Qualification");
-  }
-  await page.locator("#email").fill(existingEmail ?? `release-${runId}@example.test`);
-  await page.locator("#password").fill(password);
-  await page.getByRole("button", {
-    name: existingEmail ? "워크스페이스 열기" : "사이트 시작하기",
-  }).click();
-
-  await expect(page).toHaveURL(/\/app(?:\?|$)/, { timeout: 30_000 });
+  await authenticateHardeningOwner(page);
   await expect(page.getByRole("combobox", { name: "워크스페이스 선택" }).first()).toBeVisible();
 
   const title = page.getByRole("textbox", { name: "문서 이름" });
@@ -53,6 +41,8 @@ test("qualifies real sign-up, session, collaboration, commit, and reload boundar
   expect(activeDocumentHref).toMatch(/^\/app\?workspace=[^&]+&document=[^&]+$/);
 
   const observer = await context.newPage();
+  await installConsoleErrorStackProbe(observer);
+  const observerBrowserErrors = installBrowserErrorGuard(observer, "observer");
   const observerWebsocketUrls = new Set<string>();
   observer.on("websocket", (socket) => observerWebsocketUrls.add(socket.url()));
   await observer.goto(activeDocumentHref!);
@@ -98,4 +88,76 @@ test("qualifies real sign-up, session, collaboration, commit, and reload boundar
   await expect(observer.getByText("리비전과 동일", { exact: true })).toHaveText("리비전과 동일", {
     timeout: 30_000,
   });
+  await browserErrors.assertClean();
+  await observerBrowserErrors.assertClean();
+});
+
+test("keeps fresh collaboration resources through React StrictMode replay", async ({ context, page }) => {
+  await installConsoleErrorStackProbe(page);
+  const browserErrors = installBrowserErrorGuard(page, "strict-editor");
+  let openedSockets = 0;
+  let closedSockets = 0;
+  page.on("websocket", (socket) => {
+    if (!isCollaborationWebSocket(socket.url())) return;
+    openedSockets += 1;
+    socket.on("close", () => {
+      closedSockets += 1;
+    });
+  });
+
+  await authenticateHardeningOwner(page);
+  await expect.poll(
+    () => openedSockets - closedSockets,
+    { message: "StrictMode replay must retain one live collaboration provider" },
+  ).toBe(1);
+
+  const activeDocumentHref = await page.locator('a[aria-current="page"]')
+    .first()
+    .getAttribute("href");
+  expect(activeDocumentHref).toMatch(/^\/app\?workspace=[^&]+&document=[^&]+$/);
+
+  const observer = await context.newPage();
+  await installConsoleErrorStackProbe(observer);
+  const observerBrowserErrors = installBrowserErrorGuard(observer, "strict-observer");
+  let observerOpenedSockets = 0;
+  let observerClosedSockets = 0;
+  observer.on("websocket", (socket) => {
+    if (!isCollaborationWebSocket(socket.url())) return;
+    observerOpenedSockets += 1;
+    socket.on("close", () => {
+      observerClosedSockets += 1;
+    });
+  });
+  await observer.goto(activeDocumentHref!);
+  await expect(observer.getByRole("textbox", { name: "문서 이름" }))
+    .toBeEnabled({ timeout: 30_000 });
+  await expect.poll(
+    () => observerOpenedSockets - observerClosedSockets,
+    { message: "the peer must also retain one live collaboration provider" },
+  ).toBe(1);
+
+  const marker = `strictmode-lifecycle-${Date.now()}`;
+  const editor = page.locator('[data-slate-editor="true"][contenteditable="true"]').first();
+  await editor.evaluate((element) => {
+    element.focus();
+    const range = document.createRange();
+    range.selectNodeContents(element);
+    range.collapse(false);
+    const selection = window.getSelection();
+    selection?.removeAllRanges();
+    selection?.addRange(range);
+  });
+  await page.keyboard.insertText(` ${marker}`);
+
+  const observerEditor = observer
+    .locator('[data-slate-editor="true"][contenteditable="true"]')
+    .first();
+  await expect(observerEditor).toContainText(marker, { timeout: 30_000 });
+  await expect(page.getByText("초안 저장됨", { exact: true })).toHaveText("초안 저장됨", {
+    timeout: 30_000,
+  });
+  expect(openedSockets - closedSockets).toBe(1);
+  expect(observerOpenedSockets - observerClosedSockets).toBe(1);
+  await browserErrors.assertClean();
+  await observerBrowserErrors.assertClean();
 });

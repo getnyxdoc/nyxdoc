@@ -8,7 +8,14 @@ function option(name: string) {
 }
 
 async function backup() {
-  const [{ assertRuntimeConfiguration, getBackupRoot, getDatabasePath, getMediaRoot }, backupModule] =
+  const [{
+    assertRuntimeConfiguration,
+    getBackupRoot,
+    getCollaborationInternalUrl,
+    getCollaborationSecret,
+    getDatabasePath,
+    getMediaRoot,
+  }, backupModule] =
     await Promise.all([
       import("../src/lib/config"),
       import("../src/lib/db/backup"),
@@ -20,13 +27,23 @@ async function backup() {
   const sourceRevision = option("--source-revision")
     ?? process.env.NYXDOC_SOURCE_REVISION
     ?? "unknown";
-  const generation = await backupModule.createBackupGeneration({
-    databasePath,
-    mediaRoot,
-    backupRoot,
-    sourceRevision,
+  const generation = await backupModule.withCollaborationBackupBarrier({
+    baseUrl: getCollaborationInternalUrl(),
+    secret: getCollaborationSecret(),
+    callback: async ({ receipt, assertHeld }) => {
+      const created = await backupModule.createLiveBackupGeneration({
+        databasePath,
+        mediaRoot,
+        backupRoot,
+        sourceRevision,
+        collaborationBarrier: receipt,
+        assertCollaborationBarrierHeld: assertHeld,
+      });
+      await backupModule.verifyBackupGeneration(created.generationPath);
+      await assertHeld();
+      return created;
+    },
   });
-  await backupModule.verifyBackupGeneration(generation.generationPath);
   console.log(JSON.stringify({
     status: "verified",
     generationId: generation.manifest.generationId,
@@ -36,6 +53,9 @@ async function backup() {
     mediaFiles: generation.manifest.media.fileCount,
     mediaBytes: generation.manifest.media.totalBytes,
     sourceRevision: generation.manifest.sourceRevision,
+    collaborationBarrierId: generation.manifest.collaborationBarrier?.barrierId,
+    collaborationFlushWatermark: generation.manifest.collaborationBarrier?.flushWatermark,
+    collaborationLoadedDocuments: generation.manifest.collaborationBarrier?.loadedDocumentCount,
   }, null, 2));
 }
 

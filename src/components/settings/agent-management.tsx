@@ -1797,9 +1797,10 @@ export function WorkspaceAgentsPanel({
 
   function clearAutomaticOpenFlag() {
     const url = new URL(window.location.href);
-    if (!url.searchParams.has("connectAgent")) return;
+    if (!url.searchParams.has("connectAgent")) return false;
     url.searchParams.delete("connectAgent");
-    window.history.replaceState(window.history.state, "", url);
+    router.replace(`${url.pathname}${url.search}${url.hash}`, { scroll: false });
+    return true;
   }
 
   function resetWizard() {
@@ -1912,10 +1913,10 @@ export function WorkspaceAgentsPanel({
       window.location.assign(onboardingCompletionHref);
       return;
     }
-    clearAutomaticOpenFlag();
+    const replacingAutomaticOpenUrl = clearAutomaticOpenFlag();
     setWizardOpen(false);
     resetWizard();
-    router.refresh();
+    if (!replacingAutomaticOpenUrl) router.refresh();
   }
 
   function openEditor(membership: AgentWorkspaceMembershipSummary) {

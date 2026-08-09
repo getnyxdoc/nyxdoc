@@ -1,10 +1,12 @@
 import { randomUUID } from "node:crypto";
+import * as Y from "yjs";
 import {
   getHumanDocumentPrincipal,
   getHumanWorkspacePrincipal,
   humanDocumentPrincipalAllows,
   humanRoleAllows,
   recordWorkspaceAuditEvent,
+  requireHumanWorkspacePermission,
 } from "@/lib/authz/permissions";
 import { cancelAssignmentsOutsideWorkspaceAgentBoundaries } from "@/lib/agents/workspace-grant-boundary";
 import type { NyxDatabase } from "@/lib/db/client";
@@ -36,8 +38,11 @@ import {
 } from "@/lib/documents/types";
 import {
   prepareAgentWrite,
+  preparePrincipalWrite,
   recordAgentWrite,
+  recordPrincipalWrite,
   replayAgentWrite,
+  replayPrincipalWrite,
 } from "@/lib/documents/idempotency";
 import {
   blockIdNormalization,
@@ -52,13 +57,19 @@ import {
   type NyxdocBlock,
   type NyxdocDocumentV2,
 } from "@/lib/editor/schema";
-import { syncDocumentMediaBindings } from "@/lib/media/bindings";
+import {
+  assertDocumentMediaReferencesAuthorized,
+  syncDocumentMediaBindings,
+} from "@/lib/media/bindings";
 import {
   ApiTokenError,
   authenticateAgentCredential,
   requireTokenDocumentAccess,
   requireTokenParentAccess,
   requireTokenPermission,
+  tokenCanAccessDocument,
+  type ApiTokenRequestContext,
+  type ApiTokenScope,
 } from "@/lib/tokens/service";
 
 type DocumentRow = {
@@ -123,6 +134,8 @@ type DocumentMoveAuthorizationActor = {
   userId?: string | null;
   tokenId?: string | null;
   principalId?: string | null;
+  readonly scopeCeiling?: readonly ApiTokenScope[];
+  readonly requestContext?: ApiTokenRequestContext;
 };
 
 export function requireDocumentMoveAuthorization(
@@ -196,29 +209,16 @@ export function requireDocumentMoveAuthorization(
   if (!actor.tokenId) {
     throw new DocumentServiceError("FORBIDDEN", "문서 이동 작업의 에이전트 연결을 확인할 수 없습니다.");
   }
-  try {
-    const identity = authenticateAgentCredential(database, actor.tokenId, {
-      workspaceId,
-    });
-    if (actor.principalId && identity.globalAgentId !== actor.principalId) {
-      throw new DocumentServiceError("FORBIDDEN", "에이전트 연결과 작업자 신원이 일치하지 않습니다.");
-    }
-    requireTokenPermission(identity, "documents:write", "documents.update");
-    if (options.requireCommitPermission) {
-      requireTokenPermission(identity, "documents:commit", "documents.commit");
-    }
-    requireTokenDocumentAccess(database, identity, documentId);
-    requireTokenParentAccess(database, identity, parentDocumentId);
-  } catch (error) {
-    if (error instanceof DocumentServiceError) throw error;
-    if (error instanceof ApiTokenError) {
-      throw new DocumentServiceError(
-        error.code === "NOT_FOUND" ? "NOT_FOUND" : "FORBIDDEN",
-        error.message,
-      );
-    }
-    throw error;
+  const identity = authenticateCurrentDocumentAgent(database, workspaceId, actor);
+  if (!identity) {
+    throw new DocumentServiceError("FORBIDDEN", "문서 이동 작업의 에이전트 연결을 확인할 수 없습니다.");
   }
+  requireTokenPermission(identity, "documents:write", "documents.update");
+  if (options.requireCommitPermission) {
+    requireTokenPermission(identity, "documents:commit", "documents.commit");
+  }
+  requireTokenDocumentAccess(database, identity, documentId);
+  requireTokenParentAccess(database, identity, parentDocumentId);
 }
 
 const AST_ELEMENT_TYPES = new Set([
@@ -415,25 +415,6 @@ function prepareV2Content(value: unknown) {
   };
 }
 
-function assertContentMediaOwnership(
-  database: NyxDatabase,
-  workspaceId: string,
-  content: NyxdocDocumentV2,
-) {
-  for (const block of content.blocks) {
-    if (block.type !== "img") continue;
-    const owned = database
-      .prepare("SELECT 1 FROM media_assets WHERE id = ? AND workspace_id = ?")
-      .get(block.mediaId, workspaceId);
-    if (!owned) {
-      throw new DocumentServiceError(
-        "INVALID_INPUT",
-        "문서 이미지가 이 워크스페이스의 미디어 저장소에 없습니다.",
-      );
-    }
-  }
-}
-
 function contentDocumentReferences(content: NyxdocDocumentV2) {
   const references: Array<{ blockId: string; documentId: string }> = [];
   for (const block of content.blocks) {
@@ -475,33 +456,38 @@ function documentIsWithinRoot(
   ).get(workspaceId, documentId, workspaceId, rootDocumentId));
 }
 
-function actorDocumentRoot(
+function authenticateCurrentDocumentAgent(
   database: NyxDatabase,
   workspaceId: string,
-  actor: DocumentActor,
+  actor: DocumentMoveAuthorizationActor,
 ) {
-  if (!actor.tokenId) return null;
-  const row = database.prepare(
-    `SELECT membership.root_document_id
-     FROM agent_credentials credential
-     JOIN workspace_agents membership
-       ON membership.agent_identity_id = credential.agent_id
-       AND membership.workspace_id = ?
-     JOIN agent_credential_grant_bindings binding
-       ON binding.credential_id = credential.id
-      AND binding.grant_id = membership.id
-      AND binding.status = 'active'
-      AND binding.revoked_at IS NULL
-     WHERE credential.id = ? AND credential.revoked_at IS NULL
-       AND membership.status = 'active' AND membership.revoked_at IS NULL`,
-  ).get(workspaceId, actor.tokenId) as { root_document_id: string | null } | undefined;
-  if (!row) {
+  if (actor.type !== "agent") return null;
+  if (!actor.tokenId) {
     throw new DocumentServiceError(
       "FORBIDDEN",
-      "이 연결 키는 현재 워크스페이스의 에이전트 접근 권한에 연결되어 있지 않습니다.",
+      "문서 작업의 에이전트 연결을 확인할 수 없습니다.",
     );
   }
-  return row.root_document_id;
+  try {
+    const identity = authenticateAgentCredential(database, actor.tokenId, {
+      workspaceId,
+      clientIp: actor.requestContext?.clientIp,
+      scopeCeiling: actor.scopeCeiling,
+    });
+    if (actor.principalId && identity.globalAgentId !== actor.principalId) {
+      throw new DocumentServiceError("FORBIDDEN", "에이전트 연결과 작업자 신원이 일치하지 않습니다.");
+    }
+    return identity;
+  } catch (error) {
+    if (error instanceof DocumentServiceError) throw error;
+    if (error instanceof ApiTokenError) {
+      throw new DocumentServiceError(
+        error.code === "NOT_FOUND" ? "NOT_FOUND" : "FORBIDDEN",
+        error.message,
+      );
+    }
+    throw error;
+  }
 }
 
 function assertContentDocumentReferences(
@@ -883,11 +869,92 @@ function requireParentDocument(
 ) {
   if (parentDocumentId === null) return;
   const parent = database
-    .prepare("SELECT id FROM documents WHERE workspace_id = ? AND id = ? AND status = 'active'")
+    .prepare(
+      `SELECT id FROM documents
+       WHERE workspace_id = ? AND id = ?
+         AND status = 'active' AND lifecycle_state = 'active'`,
+    )
     .get(workspaceId, parentDocumentId);
   if (!parent) {
     throw new DocumentServiceError("INVALID_INPUT", "부모 문서를 찾을 수 없습니다.");
   }
+}
+
+export function resolveRestorableDocumentParent(
+  database: NyxDatabase,
+  workspaceId: string,
+  parentDocumentId: string | null,
+) {
+  if (parentDocumentId === null) return null;
+  const parent = database.prepare(
+    `SELECT 1 FROM documents
+     WHERE workspace_id = ? AND id = ?
+       AND status = 'active' AND lifecycle_state = 'active'`,
+  ).get(workspaceId, parentDocumentId);
+  return parent ? parentDocumentId : null;
+}
+
+function yjsStateWithParentDocumentId(
+  state: Buffer,
+  parentDocumentId: string | null,
+) {
+  const ydoc = new Y.Doc();
+  Y.applyUpdate(ydoc, state, "nyxdoc-trash-restore");
+  ydoc.getMap<unknown>("metadata").set("parentDocumentId", parentDocumentId);
+  return Buffer.from(Y.encodeStateAsUpdate(ydoc));
+}
+
+function activateRestoredCollaborationGeneration(
+  database: NyxDatabase,
+  input: {
+    workspaceId: string;
+    documentId: string;
+    now: string;
+    canonicalParentFallback?: {
+      parentDocumentId: string | null;
+      revisionId: string;
+      revisionNumber: number;
+    };
+  },
+) {
+  if (!input.canonicalParentFallback) {
+    database.prepare(
+      `UPDATE document_collaboration_states
+       SET generation = generation + 1, seeded_at = ?, updated_at = ?
+       WHERE workspace_id = ? AND document_id = ?`,
+    ).run(input.now, input.now, input.workspaceId, input.documentId);
+    return;
+  }
+  const state = database.prepare(
+    `SELECT yjs_state, committed_yjs_state
+     FROM document_collaboration_states
+     WHERE workspace_id = ? AND document_id = ?`,
+  ).get(input.workspaceId, input.documentId) as {
+    yjs_state: Buffer;
+    committed_yjs_state: Buffer;
+  } | undefined;
+  if (!state) return;
+  database.prepare(
+    `UPDATE document_collaboration_states
+     SET generation = generation + 1, yjs_state = ?, committed_yjs_state = ?,
+         base_revision_id = ?, base_revision_number = ?, seeded_at = ?, updated_at = ?
+     WHERE workspace_id = ? AND document_id = ?`,
+  ).run(
+    yjsStateWithParentDocumentId(
+      state.yjs_state,
+      input.canonicalParentFallback.parentDocumentId,
+    ),
+    yjsStateWithParentDocumentId(
+      state.committed_yjs_state,
+      input.canonicalParentFallback.parentDocumentId,
+    ),
+    input.canonicalParentFallback.revisionId,
+    input.canonicalParentFallback.revisionNumber,
+    input.now,
+    input.now,
+    input.workspaceId,
+    input.documentId,
+  );
 }
 
 function nextTreeOrder(
@@ -903,6 +970,33 @@ function nextTreeOrder(
     )
     .get(workspaceId, parentDocumentId) as { next_order: number };
   return Number(row.next_order);
+}
+
+function normalizeRestoredSiblingOrders(
+  database: NyxDatabase,
+  workspaceId: string,
+  parentDocumentIds: Set<string | null>,
+  restoredDocumentIds: Set<string>,
+) {
+  const updateOrder = database.prepare("UPDATE documents SET tree_order = ? WHERE id = ?");
+  for (const parentDocumentId of parentDocumentIds) {
+    const siblings = database.prepare(
+      `SELECT id, tree_order, created_at
+       FROM documents
+       WHERE workspace_id = ? AND status = 'active' AND lifecycle_state = 'active'
+         AND parent_document_id IS ?`,
+    ).all(workspaceId, parentDocumentId) as Array<{
+      id: string;
+      tree_order: number;
+      created_at: string;
+    }>;
+    siblings.sort((left, right) =>
+      Number(left.tree_order) - Number(right.tree_order)
+      || Number(restoredDocumentIds.has(right.id)) - Number(restoredDocumentIds.has(left.id))
+      || left.created_at.localeCompare(right.created_at)
+      || left.id.localeCompare(right.id));
+    siblings.forEach((sibling, index) => updateOrder.run((index + 1) * 100, sibling.id));
+  }
 }
 
 function wouldCreateDocumentCycle(
@@ -990,6 +1084,7 @@ export function reorderDocumentTree(
   actor: DocumentActor,
   documentId: string,
   input: {
+    requestId?: string;
     targetDocumentId: string;
     position: DocumentTreeDropPosition;
   },
@@ -998,7 +1093,21 @@ export function reorderDocumentTree(
     throw new DocumentServiceError("INVALID_INPUT", "문서를 자기 자신을 기준으로 이동할 수 없습니다.");
   }
 
+  const idempotency = preparePrincipalWrite(
+    actor,
+    "reorder_document_tree",
+    input.requestId,
+    workspaceId,
+    documentId,
+    {
+      targetDocumentId: input.targetDocumentId,
+      position: input.position,
+    },
+  );
+
   return database.transaction(() => {
+    const replayed = replayPrincipalWrite<DocumentTreeReorderResult>(database, idempotency);
+    if (replayed) return replayed;
     const selected = database
       .prepare(
         `SELECT id, parent_document_id, tree_order, current_revision_id
@@ -1019,17 +1128,35 @@ export function reorderDocumentTree(
     const destinationParentDocumentId = input.position === "inside"
       ? target.id
       : target.parent_document_id;
-    if (source.parent_document_id !== destinationParentDocumentId) {
+    if (destinationParentDocumentId === documentId) {
       throw new DocumentServiceError(
         "INVALID_INPUT",
-        "문서의 상위 위치가 아직 이동 대상과 일치하지 않습니다.",
+        "문서를 자기 자신의 하위 문서로 옮길 수 없습니다.",
       );
     }
+    if (
+      destinationParentDocumentId !== null
+      && wouldCreateDocumentCycle(
+        database,
+        workspaceId,
+        documentId,
+        destinationParentDocumentId,
+      )
+    ) {
+      throw new DocumentServiceError("INVALID_INPUT", "하위 문서 아래로 옮기면 문서 트리가 순환합니다.");
+    }
+    requireDocumentMoveAuthorization(
+      database,
+      workspaceId,
+      documentId,
+      destinationParentDocumentId,
+      actor,
+    );
     if (!source.current_revision_id) {
       throw new DocumentServiceError("INVALID_INPUT", "저장된 리비전이 없는 문서는 이동할 수 없습니다.");
     }
 
-    const siblings = database
+    const destinationSiblings = database
       .prepare(
         `SELECT id, tree_order
          FROM documents
@@ -1040,7 +1167,7 @@ export function reorderDocumentTree(
         id: string;
         tree_order: number;
       }>;
-    const previousOrder = siblings.map((document) => document.id);
+    const previousOrder = destinationSiblings.map((document) => document.id);
     const nextOrder = previousOrder.filter((id) => id !== documentId);
     if (input.position === "inside") {
       nextOrder.push(documentId);
@@ -1052,9 +1179,23 @@ export function reorderDocumentTree(
       nextOrder.splice(targetIndex + (input.position === "after" ? 1 : 0), 0, documentId);
     }
 
-    const unchanged = previousOrder.every((id, index) => nextOrder[index] === id);
+    const parentChanged = source.parent_document_id !== destinationParentDocumentId;
+    if (parentChanged) {
+      throw new DocumentServiceError(
+        "INVALID_INPUT",
+        "상위 문서 변경은 정본 메타데이터 이동 경로를 통해 처리해야 합니다.",
+        {
+          documentId,
+          currentParentDocumentId: source.parent_document_id,
+          destinationParentDocumentId,
+        },
+      );
+    }
+    const orderChanged = previousOrder.length !== nextOrder.length
+      || previousOrder.some((id, index) => nextOrder[index] !== id);
+    const unchanged = !orderChanged;
     if (unchanged) {
-      return {
+      const result: DocumentTreeReorderResult = {
         documentId,
         parentDocumentId: destinationParentDocumentId,
         targetDocumentId: input.targetDocumentId,
@@ -1064,6 +1205,8 @@ export function reorderDocumentTree(
         eventCursor: null,
         unchanged: true,
       };
+      recordPrincipalWrite(database, idempotency, result);
+      return result;
     }
 
     const updateOrder = database.prepare("UPDATE documents SET tree_order = ? WHERE id = ?");
@@ -1078,7 +1221,7 @@ export function reorderDocumentTree(
       createdAt: new Date().toISOString(),
     });
 
-    return {
+    const result: DocumentTreeReorderResult = {
       documentId,
       parentDocumentId: destinationParentDocumentId,
       targetDocumentId: input.targetDocumentId,
@@ -1088,6 +1231,8 @@ export function reorderDocumentTree(
       eventCursor,
       unchanged: false,
     };
+    recordPrincipalWrite(database, idempotency, result);
+    return result;
   }).immediate();
 }
 
@@ -1299,16 +1444,23 @@ export function createDocument(
     },
   );
   const title = cleanTitle(input.title);
-  let parentDocumentId = input.parentDocumentId ?? null;
+  const requestedParentDocumentId = input.parentDocumentId ?? null;
   const documentType = cleanDocumentType(input.documentType) ?? null;
   const workflowStatus = cleanWorkflowStatus(input.workflowStatus) ?? "draft";
   const tags = cleanTags(input.tags) ?? [];
   const summary = cleanSummary(input.summary, `${actor.label}가 문서를 만들었습니다.`);
 
   return database.transaction(() => {
+    const identity = authenticateCurrentDocumentAgent(database, workspaceId, actor);
+    if (identity) {
+      requireTokenPermission(identity, "documents:write", "documents.create");
+    }
+    const actorRootDocumentId = identity?.scopeMode === "document_tree"
+      ? identity.rootDocumentId
+      : null;
     const replayed = replayAgentWrite<DocumentMutationResult>(database, idempotency);
     if (replayed) return replayed;
-    const actorRootDocumentId = actorDocumentRoot(database, workspaceId, actor);
+    let parentDocumentId = requestedParentDocumentId;
     if (actorRootDocumentId) {
       if (parentDocumentId === null) parentDocumentId = actorRootDocumentId;
       if (!documentIsWithinRoot(database, workspaceId, parentDocumentId, actorRootDocumentId)) {
@@ -1324,12 +1476,27 @@ export function createDocument(
     );
     const normalization = blockIdNormalization(normalizedV2.repairs);
     const persistedV2 = prepareV2Content(normalizedV2.content);
-    assertContentMediaOwnership(database, workspaceId, persistedV2.content);
+    assertDocumentMediaReferencesAuthorized(database, {
+      workspaceId,
+      actor,
+      content: persistedV2.content,
+      agentCanReadDocument: actor.type === "agent"
+        ? (mediaDocumentId) => (
+            actorRootDocumentId === null
+            || documentIsWithinRoot(
+              database,
+              workspaceId,
+              mediaDocumentId,
+              actorRootDocumentId,
+            )
+          )
+        : undefined,
+    });
     assertContentDocumentReferences(
       database,
       workspaceId,
       persistedV2.content,
-      actorDocumentRoot(database, workspaceId, actor),
+      actorRootDocumentId,
     );
     const now = new Date().toISOString();
     const blocks: PreparedBlockInput[] = persistedV2.blocks;
@@ -1499,7 +1666,12 @@ export function updateDocument(
     if (current.content_schema_version !== 2) {
       throw new DocumentServiceError("INVALID_INPUT", "정본 AST v2 본문이 없는 문서입니다.");
     }
-    const actorRootDocumentId = actorDocumentRoot(database, workspaceId, actor);
+    const identity = actor.tokenId
+      ? authenticateCurrentDocumentAgent(database, workspaceId, actor)
+      : null;
+    const actorRootDocumentId = identity?.scopeMode === "document_tree"
+      ? identity.rootDocumentId
+      : null;
     if (
       actorRootDocumentId
       && !documentIsWithinRoot(database, workspaceId, documentId, actorRootDocumentId)
@@ -1537,12 +1709,27 @@ export function updateDocument(
       : prepareV2Content(normalizedV2.content);
     const blocks: PreparedBlockInput[] | undefined = preparedV2?.blocks;
     if (preparedV2) {
-      assertContentMediaOwnership(database, workspaceId, preparedV2.content);
+      assertDocumentMediaReferencesAuthorized(database, {
+        workspaceId,
+        actor,
+        content: preparedV2.content,
+        agentCanReadDocument: actor.type === "agent"
+          ? (mediaDocumentId) => (
+              actorRootDocumentId === null
+              || documentIsWithinRoot(
+                database,
+                workspaceId,
+                mediaDocumentId,
+                actorRootDocumentId,
+              )
+            )
+          : undefined,
+      });
       assertContentDocumentReferences(
         database,
         workspaceId,
         preparedV2.content,
-        actorDocumentRoot(database, workspaceId, actor),
+        actorRootDocumentId,
       );
     }
 
@@ -2123,6 +2310,28 @@ function trashBatchForRoot(
   } | undefined;
 }
 
+function restoredParentIsWithinDocumentTree(
+  database: NyxDatabase,
+  workspaceId: string,
+  parentDocumentId: string | null,
+  rootDocumentId: string,
+  restoredParents: ReadonlyMap<string, string | null>,
+) {
+  let currentId = parentDocumentId;
+  const visited = new Set<string>();
+  while (currentId) {
+    if (currentId === rootDocumentId) return true;
+    if (visited.has(currentId)) return false;
+    visited.add(currentId);
+    if (restoredParents.has(currentId)) {
+      currentId = restoredParents.get(currentId) ?? null;
+      continue;
+    }
+    return documentIsWithinRoot(database, workspaceId, currentId, rootDocumentId);
+  }
+  return false;
+}
+
 export function restoreTrashedDocument(
   database: NyxDatabase,
   workspaceId: string,
@@ -2130,8 +2339,23 @@ export function restoreTrashedDocument(
   rootDocumentId: string,
 ): TrashMutationResult {
   return database.transaction(() => {
+    if (actor.type === "human") {
+      requireHumanWorkspacePermission(
+        database,
+        workspaceId,
+        actor.userId,
+        "documents.restore",
+      );
+    }
+    const identity = authenticateCurrentDocumentAgent(database, workspaceId, actor);
+    if (identity) {
+      requireTokenPermission(identity, "documents:write", "documents.restore");
+    }
     const batch = trashBatchForRoot(database, workspaceId, rootDocumentId);
     if (!batch) throw new DocumentServiceError("NOT_FOUND", "휴지통 문서를 찾을 수 없습니다.");
+    if (identity && !tokenCanAccessDocument(database, identity, rootDocumentId, true)) {
+      throw new DocumentServiceError("FORBIDDEN", "이 연결의 허용 범위 밖에 있는 문서입니다.");
+    }
     const rows = database.prepare(
       `SELECT id, title, current_revision_id, original_parent_document_id, original_tree_order
        FROM documents
@@ -2148,6 +2372,45 @@ export function restoreTrashedDocument(
       throw new DocumentServiceError("NOT_FOUND", "복구할 문서 기록을 찾을 수 없습니다.");
     }
     const restoringIds = new Set(rows.map((row) => row.id));
+    const restorePlans = rows.map((row) => {
+      const parentId = row.original_parent_document_id;
+      const parentIsAvailable = !parentId
+        || restoringIds.has(parentId)
+        || Boolean(database.prepare(
+          `SELECT 1 FROM documents
+           WHERE id = ? AND workspace_id = ? AND lifecycle_state = 'active' AND status = 'active'`,
+        ).get(parentId, workspaceId));
+      return {
+        row,
+        restoredParentDocumentId: parentIsAvailable ? parentId : null,
+      };
+    });
+    const restoredParents = new Map<string, string | null>(restorePlans.map((plan) => [
+      plan.row.id,
+      plan.restoredParentDocumentId,
+    ] as const));
+    if (identity?.scopeMode === "document_tree") {
+      const scopedRootDocumentId = identity.rootDocumentId;
+      if (
+        !scopedRootDocumentId
+        || restorePlans.some((plan) => (
+          plan.row.id !== scopedRootDocumentId
+          && !restoredParentIsWithinDocumentTree(
+            database,
+            workspaceId,
+            plan.restoredParentDocumentId,
+            scopedRootDocumentId,
+            restoredParents,
+          )
+        ))
+      ) {
+        throw new DocumentServiceError(
+          "FORBIDDEN",
+          "범위 제한 연결은 문서를 허용 범위 밖이나 워크스페이스 최상위로 복구할 수 없습니다.",
+        );
+      }
+    }
+    const restoredParentDocumentIds = new Set<string | null>();
     const now = new Date().toISOString();
     const restore = database.prepare(
       `UPDATE documents
@@ -2158,39 +2421,73 @@ export function restoreTrashedDocument(
            original_tree_order = NULL, updated_at = ?
        WHERE id = ? AND workspace_id = ? AND lifecycle_state = 'trashed'`,
     );
-    const activateFreshCollaborationGeneration = database.prepare(
-      `UPDATE document_collaboration_states
-       SET generation = generation + 1, seeded_at = ?, updated_at = ?
-       WHERE workspace_id = ? AND document_id = ?`,
-    );
-    for (const row of rows) {
+    for (const { row, restoredParentDocumentId } of restorePlans) {
       const parentId = row.original_parent_document_id;
-      const parentIsAvailable = !parentId
-        || restoringIds.has(parentId)
-        || Boolean(database.prepare(
-          `SELECT 1 FROM documents
-           WHERE id = ? AND workspace_id = ? AND lifecycle_state = 'active' AND status = 'active'`,
-        ).get(parentId, workspaceId));
+      restoredParentDocumentIds.add(restoredParentDocumentId);
       restore.run(
-        parentIsAvailable ? parentId : null,
+        restoredParentDocumentId,
         row.original_tree_order ?? 0,
         now,
         row.id,
         workspaceId,
       );
-      activateFreshCollaborationGeneration.run(now, now, workspaceId, row.id);
-      insertEvent(database, {
-        workspaceId,
-        documentId: row.id,
-        revisionId: row.current_revision_id!,
-        eventType: "restored",
-        actor,
-        summary: row.id === rootDocumentId
-          ? `${actor.label}가 “${row.title}” 문서를 휴지통에서 복구했습니다.`
-          : `${actor.label}가 상위 문서와 함께 “${row.title}” 문서를 복구했습니다.`,
-        createdAt: now,
-      });
+      const summary = row.id === rootDocumentId
+        ? `${actor.label}가 “${row.title}” 문서를 휴지통에서 복구했습니다.`
+        : `${actor.label}가 상위 문서와 함께 “${row.title}” 문서를 복구했습니다.`;
+      if (restoredParentDocumentId !== parentId) {
+        const restoredDocument = getDocument(database, workspaceId, row.id);
+        const revisionNumber = restoredDocument.revisionNumber + 1;
+        const revision = appendCanonicalRevision(database, {
+          workspaceId,
+          documentId: row.id,
+          revisionNumber,
+          baseRevisionId: row.current_revision_id,
+          content: restoredDocument.content,
+          title: restoredDocument.title,
+          parentDocumentId: restoredParentDocumentId,
+          metadata: {
+            documentType: restoredDocument.documentType,
+            workflowStatus: restoredDocument.workflowStatus,
+            tags: restoredDocument.tags,
+          },
+          actor,
+          summary,
+          eventType: "restored",
+          createdAt: now,
+        });
+        activateRestoredCollaborationGeneration(database, {
+          workspaceId,
+          documentId: row.id,
+          now,
+          canonicalParentFallback: {
+            parentDocumentId: restoredParentDocumentId,
+            revisionId: revision.revisionId,
+            revisionNumber,
+          },
+        });
+      } else {
+        activateRestoredCollaborationGeneration(database, {
+          workspaceId,
+          documentId: row.id,
+          now,
+        });
+        insertEvent(database, {
+          workspaceId,
+          documentId: row.id,
+          revisionId: row.current_revision_id!,
+          eventType: "restored",
+          actor,
+          summary,
+          createdAt: now,
+        });
+      }
     }
+    normalizeRestoredSiblingOrders(
+      database,
+      workspaceId,
+      restoredParentDocumentIds,
+      restoringIds,
+    );
     database.prepare("DELETE FROM document_trash_batches WHERE id = ? AND workspace_id = ?")
       .run(batch.id, workspaceId);
     recordWorkspaceAuditEvent(database, {
@@ -2439,23 +2736,31 @@ function parseRevisionSnapshot(snapshotJson: string) {
   }
 }
 
-function parseRevisionDocumentMetadata(value: string, fallback: DocumentMetadata): DocumentMetadata {
+function parseRevisionDocumentMetadata(value: string): DocumentMetadata {
+  let parsed: unknown;
   try {
-    const parsed = JSON.parse(value) as Partial<DocumentMetadata>;
-    const workflowStatus = parsed.workflowStatus;
-    return {
-      documentType: typeof parsed.documentType === "string" ? parsed.documentType : null,
-      workflowStatus:
-        workflowStatus === "draft" || workflowStatus === "review" || workflowStatus === "final"
-          ? workflowStatus
-          : fallback.workflowStatus,
-      tags: Array.isArray(parsed.tags)
-        ? parsed.tags.filter((tag): tag is string => typeof tag === "string")
-        : fallback.tags,
-    };
+    parsed = JSON.parse(value) as unknown;
   } catch {
-    return fallback;
+    throw new DocumentServiceError("INVALID_INPUT", "이 리비전의 메타데이터 스냅샷을 읽을 수 없습니다.");
   }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new DocumentServiceError("INVALID_INPUT", "이 리비전의 메타데이터 스냅샷을 읽을 수 없습니다.");
+  }
+  const metadata = parsed as Partial<DocumentMetadata>;
+  const workflowStatus = metadata.workflowStatus;
+  if (
+    (metadata.documentType !== null && typeof metadata.documentType !== "string")
+    || (workflowStatus !== "draft" && workflowStatus !== "review" && workflowStatus !== "final")
+    || !Array.isArray(metadata.tags)
+    || metadata.tags.some((tag) => typeof tag !== "string")
+  ) {
+    throw new DocumentServiceError("INVALID_INPUT", "이 리비전의 메타데이터 스냅샷을 읽을 수 없습니다.");
+  }
+  return {
+    documentType: metadata.documentType,
+    workflowStatus,
+    tags: metadata.tags as string[],
+  };
 }
 
 export function getDocumentRevisionSnapshot(
@@ -2491,6 +2796,9 @@ export function getDocumentRevisionSnapshot(
     document_metadata_json: string;
   } | undefined;
   if (!row) throw new DocumentServiceError("NOT_FOUND", "리비전을 찾을 수 없습니다.");
+  if (row.title_snapshot === null) {
+    throw new DocumentServiceError("INVALID_INPUT", "이 리비전의 제목 스냅샷을 읽을 수 없습니다.");
+  }
 
   return {
     id: row.id,
@@ -2502,11 +2810,9 @@ export function getDocumentRevisionSnapshot(
     actorAvatarMediaId: row.actor_avatar_media_id,
     source: row.source,
     createdAt: row.created_at,
-    title: row.title_snapshot ?? document.title,
-    parentDocumentId: row.title_snapshot === null
-      ? document.parent_document_id
-      : row.parent_document_id_snapshot,
-    metadata: parseRevisionDocumentMetadata(row.document_metadata_json, documentMetadata(document)),
+    title: row.title_snapshot,
+    parentDocumentId: row.parent_document_id_snapshot,
+    metadata: parseRevisionDocumentMetadata(row.document_metadata_json),
     content: parseRevisionSnapshot(row.snapshot_json),
   };
 }
@@ -2543,6 +2849,9 @@ export function getDocumentRevisionSnapshotByNumber(
     document_metadata_json: string;
   } | undefined;
   if (!row) throw new DocumentServiceError("NOT_FOUND", "리비전을 찾을 수 없습니다.");
+  if (row.title_snapshot === null) {
+    throw new DocumentServiceError("INVALID_INPUT", "이 리비전의 제목 스냅샷을 읽을 수 없습니다.");
+  }
   return {
     id: row.id,
     number: Number(row.revision_number),
@@ -2553,11 +2862,9 @@ export function getDocumentRevisionSnapshotByNumber(
     actorAvatarMediaId: row.actor_avatar_media_id,
     source: row.source,
     createdAt: row.created_at,
-    title: row.title_snapshot ?? document.title,
-    parentDocumentId: row.title_snapshot === null
-      ? document.parent_document_id
-      : row.parent_document_id_snapshot,
-    metadata: parseRevisionDocumentMetadata(row.document_metadata_json, documentMetadata(document)),
+    title: row.title_snapshot,
+    parentDocumentId: row.parent_document_id_snapshot,
+    metadata: parseRevisionDocumentMetadata(row.document_metadata_json),
     content: parseRevisionSnapshot(row.snapshot_json),
   };
 }
@@ -2708,7 +3015,11 @@ export function restoreDocumentRevision(
       requestId,
       baseRevision,
       title: targetRevision.title,
-      parentDocumentId: targetRevision.parentDocumentId,
+      parentDocumentId: resolveRestorableDocumentParent(
+        database,
+        workspaceId,
+        targetRevision.parentDocumentId,
+      ),
       documentType: targetRevision.metadata.documentType,
       workflowStatus: targetRevision.metadata.workflowStatus,
       tags: targetRevision.metadata.tags,

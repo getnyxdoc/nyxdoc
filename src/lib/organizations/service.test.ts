@@ -1,5 +1,8 @@
 import { randomUUID } from "node:crypto";
-import { afterEach, describe, expect, it } from "vitest";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   assignAgentToWorkspace,
   createAccountAgent,
@@ -9,7 +12,8 @@ import {
   listWorkspaceAgentMemberships,
 } from "@/lib/agents/service";
 import { getHumanWorkspacePrincipal } from "@/lib/authz/permissions";
-import type { NyxDatabase } from "@/lib/db/client";
+import { openDatabase, type NyxDatabase } from "@/lib/db/client";
+import { runAppMigrations } from "@/lib/db/migrations";
 import {
   acceptOrganizationInvitation,
   addOrganizationTeamMember,
@@ -39,10 +43,85 @@ import { setDocumentHumanGrant } from "@/lib/sharing/access";
 import { createTestDatabase, createTestUser } from "@/test/fixture";
 
 const databases: NyxDatabase[] = [];
+const temporaryDatabaseDirectories: string[] = [];
 
 afterEach(() => {
   while (databases.length > 0) databases.pop()?.close();
+  while (temporaryDatabaseDirectories.length > 0) {
+    rmSync(temporaryDatabaseDirectories.pop()!, { recursive: true, force: true });
+  }
 });
+
+function createSharedTestDatabases() {
+  const directory = mkdtempSync(path.join(tmpdir(), "nyxdoc-organization-owner-race-"));
+  temporaryDatabaseDirectories.push(directory);
+  const databasePath = path.join(directory, "nyxdoc.db");
+  const primary = openDatabase(databasePath);
+  primary.exec(`
+    CREATE TABLE user (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      email TEXT NOT NULL UNIQUE,
+      emailVerified INTEGER NOT NULL DEFAULT 1,
+      image TEXT,
+      createdAt INTEGER NOT NULL,
+      updatedAt INTEGER NOT NULL
+    );
+    CREATE TABLE verification (
+      id TEXT PRIMARY KEY,
+      identifier TEXT NOT NULL,
+      value TEXT NOT NULL,
+      expiresAt TEXT NOT NULL,
+      createdAt TEXT NOT NULL,
+      updatedAt TEXT NOT NULL
+    );
+  `);
+  runAppMigrations(primary);
+  const contender = openDatabase(databasePath);
+  // Make the second connection report a held immediate transaction straight
+  // away. That lets this test deterministically exercise the same interleave
+  // that would otherwise race across two application processes.
+  contender.pragma("busy_timeout = 0");
+  databases.push(primary, contender);
+  return { primary, contender };
+}
+
+/**
+ * Runs a mutation with a second connection changing state in the small window
+ * immediately before the first connection acquires its write lock.  This is a
+ * deterministic stand-in for two server processes receiving concurrent
+ * requests; it catches pre-transaction authorization and stale audit reads.
+ */
+function withBeforeImmediateRace(
+  database: NyxDatabase,
+  beforeImmediate: () => void,
+): NyxDatabase {
+  const transaction = database.transaction.bind(database);
+  let fired = false;
+  return new Proxy(database, {
+    get(target, property, receiver) {
+      if (property !== "transaction") {
+        const value = Reflect.get(target, property, receiver);
+        return typeof value === "function" ? value.bind(target) : value;
+      }
+      return (work: Parameters<NyxDatabase["transaction"]>[0]) => {
+        const runner = transaction(work);
+        const run = <T>(invoke: () => T) => {
+          if (!fired) {
+            fired = true;
+            beforeImmediate();
+          }
+          return invoke();
+        };
+        return {
+          immediate: () => run(() => runner.immediate()),
+          deferred: () => run(() => runner.deferred()),
+          exclusive: () => run(() => runner.exclusive()),
+        };
+      };
+    },
+  }) as NyxDatabase;
+}
 
 function setupOrganization(database: NyxDatabase, name = "Junglan") {
   const owner = createTestUser(database, {
@@ -374,6 +453,367 @@ describe("organization, team, and namespace boundaries", () => {
         expect.objectContaining({ userId: admin.user.id, role: "owner" }),
         expect.objectContaining({ userId: owner.user.id, role: "member" }),
       ]));
+  });
+
+  it("serializes two database connections that try to demote each other's last co-owner", () => {
+    const { primary, contender } = createSharedTestDatabases();
+    const { owner: firstOwner, organization } = setupOrganization(primary, "Owner demotion race");
+    const secondOwner = createTestUser(primary, {
+      name: "Second owner",
+      email: "second-owner-race@example.com",
+    });
+    inviteAndAccept(primary, {
+      organizationId: organization.id,
+      owner: firstOwner.user,
+      invited: secondOwner.user,
+      role: "admin",
+    });
+    updateOrganizationMemberRole(primary, {
+      organizationId: organization.id,
+      userId: firstOwner.user.id,
+      targetUserId: secondOwner.user.id,
+      actorLabel: firstOwner.user.name,
+      role: "owner",
+    });
+
+    let contenderSucceeded = false;
+    let contenderError: unknown;
+    let interleaved = false;
+    const originalPrepare = primary.prepare.bind(primary);
+    vi.spyOn(primary, "prepare").mockImplementation(((source: string) => {
+      const statement = originalPrepare(source);
+      if (interleaved || !source.includes("SELECT COUNT(*) AS count FROM organization_members")) {
+        return statement;
+      }
+      return new Proxy(statement, {
+        get(target, property) {
+          if (property === "get") {
+            return (...args: unknown[]) => {
+              // Read the stale count first. Before this fix, this was the gap
+              // between the owner check and BEGIN IMMEDIATE.
+              const result = target.get(...args);
+              interleaved = true;
+              try {
+                updateOrganizationMemberRole(contender, {
+                  organizationId: organization.id,
+                  userId: secondOwner.user.id,
+                  targetUserId: firstOwner.user.id,
+                  actorLabel: secondOwner.user.name,
+                  role: "member",
+                });
+                contenderSucceeded = true;
+              } catch (error) {
+                contenderError = error;
+              }
+              return result;
+            };
+          }
+          const value = Reflect.get(target, property, target);
+          return typeof value === "function" ? value.bind(target) : value;
+        },
+      });
+    }) as typeof primary.prepare);
+
+    updateOrganizationMemberRole(primary, {
+      organizationId: organization.id,
+      userId: firstOwner.user.id,
+      targetUserId: secondOwner.user.id,
+      actorLabel: firstOwner.user.name,
+      role: "member",
+    });
+
+    expect(interleaved).toBe(true);
+    expect(contenderSucceeded).toBe(false);
+    expect(String((contenderError as Error | undefined)?.message)).toMatch(/database is locked/i);
+    expect(primary.prepare(
+      "SELECT COUNT(*) AS count FROM organization_members WHERE organization_id = ? AND role = 'owner'",
+    ).get(organization.id)).toEqual({ count: 1 });
+    expect(listOrganizationMembers(primary, organization.id, firstOwner.user.id)).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ userId: firstOwner.user.id, role: "owner" }),
+        expect.objectContaining({ userId: secondOwner.user.id, role: "member" }),
+      ]),
+    );
+    expect(() => updateOrganizationMemberRole(contender, {
+      organizationId: organization.id,
+      userId: secondOwner.user.id,
+      targetUserId: firstOwner.user.id,
+      actorLabel: secondOwner.user.name,
+      role: "member",
+    })).toThrowError(expect.objectContaining({ code: "FORBIDDEN" }));
+  });
+
+  it("serializes two database connections that try to remove each other's last co-owner", () => {
+    const { primary, contender } = createSharedTestDatabases();
+    const { owner: firstOwner, organization } = setupOrganization(primary, "Owner removal race");
+    const secondOwner = createTestUser(primary, {
+      name: "Second owner",
+      email: "second-owner-removal-race@example.com",
+    });
+    inviteAndAccept(primary, {
+      organizationId: organization.id,
+      owner: firstOwner.user,
+      invited: secondOwner.user,
+      role: "admin",
+    });
+    updateOrganizationMemberRole(primary, {
+      organizationId: organization.id,
+      userId: firstOwner.user.id,
+      targetUserId: secondOwner.user.id,
+      actorLabel: firstOwner.user.name,
+      role: "owner",
+    });
+
+    let contenderSucceeded = false;
+    let contenderError: unknown;
+    let interleaved = false;
+    const originalPrepare = primary.prepare.bind(primary);
+    vi.spyOn(primary, "prepare").mockImplementation(((source: string) => {
+      const statement = originalPrepare(source);
+      if (interleaved || !source.includes("SELECT COUNT(*) AS count FROM organization_members")) {
+        return statement;
+      }
+      return new Proxy(statement, {
+        get(target, property) {
+          if (property === "get") {
+            return (...args: unknown[]) => {
+              const result = target.get(...args);
+              interleaved = true;
+              try {
+                removeOrganizationMember(contender, {
+                  organizationId: organization.id,
+                  userId: secondOwner.user.id,
+                  targetUserId: firstOwner.user.id,
+                  actorLabel: secondOwner.user.name,
+                });
+                contenderSucceeded = true;
+              } catch (error) {
+                contenderError = error;
+              }
+              return result;
+            };
+          }
+          const value = Reflect.get(target, property, target);
+          return typeof value === "function" ? value.bind(target) : value;
+        },
+      });
+    }) as typeof primary.prepare);
+
+    removeOrganizationMember(primary, {
+      organizationId: organization.id,
+      userId: firstOwner.user.id,
+      targetUserId: secondOwner.user.id,
+      actorLabel: firstOwner.user.name,
+    });
+
+    expect(interleaved).toBe(true);
+    expect(contenderSucceeded).toBe(false);
+    expect(String((contenderError as Error | undefined)?.message)).toMatch(/database is locked/i);
+    expect(primary.prepare(
+      "SELECT COUNT(*) AS count FROM organization_members WHERE organization_id = ? AND role = 'owner'",
+    ).get(organization.id)).toEqual({ count: 1 });
+    expect(listOrganizationMembers(primary, organization.id, firstOwner.user.id)).toEqual([
+      expect.objectContaining({ userId: firstOwner.user.id, role: "owner" }),
+    ]);
+    expect(() => removeOrganizationMember(contender, {
+      organizationId: organization.id,
+      userId: secondOwner.user.id,
+      targetUserId: firstOwner.user.id,
+      actorLabel: secondOwner.user.name,
+    })).toThrowError(expect.objectContaining({ code: "NOT_FOUND" }));
+  });
+
+  it("rejects invitation, team, and workspace-grant writes when a manager loses access before BEGIN IMMEDIATE", () => {
+    const { primary, contender } = createSharedTestDatabases();
+    const { owner, organization } = setupOrganization(primary, "Manager authorization race");
+    const manager = createTestUser(primary, {
+      name: "Manager",
+      email: "manager-authorization-race@example.com",
+    });
+    const target = createTestUser(primary, {
+      name: "Target",
+      email: "target-authorization-race@example.com",
+    });
+    inviteAndAccept(primary, {
+      organizationId: organization.id,
+      owner: owner.user,
+      invited: manager.user,
+      role: "admin",
+    });
+    inviteAndAccept(primary, {
+      organizationId: organization.id,
+      owner: owner.user,
+      invited: target.user,
+    });
+    const workspace = createWorkspace(primary, owner.user, "Authorization workspace", "en", {
+      organizationId: organization.id,
+    });
+    const team = createOrganizationTeam(primary, {
+      organizationId: organization.id,
+      userId: owner.user.id,
+      actorLabel: owner.user.name,
+      name: "Authorization team",
+    });
+
+    const demoteManager = () => {
+      contender.prepare(
+        `UPDATE organization_members SET role = 'member', updated_at = ?
+         WHERE organization_id = ? AND user_id = ?`,
+      ).run("2026-08-09T00:00:00.000Z", organization.id, manager.user.id);
+    };
+    const restoreManager = () => {
+      primary.prepare(
+        `UPDATE organization_members SET role = 'admin', updated_at = ?
+         WHERE organization_id = ? AND user_id = ?`,
+      ).run("2026-08-09T00:01:00.000Z", organization.id, manager.user.id);
+    };
+
+    expect(() => createOrganizationInvitation(withBeforeImmediateRace(primary, demoteManager), {
+      organizationId: organization.id,
+      userId: manager.user.id,
+      actorLabel: manager.user.name,
+      email: "blocked-invite@example.com",
+      role: "member",
+    })).toThrowError(expect.objectContaining({ code: "FORBIDDEN" }));
+    expect(primary.prepare(
+      "SELECT 1 FROM organization_invitations WHERE organization_id = ? AND email = ?",
+    ).get(organization.id, "blocked-invite@example.com")).toBeUndefined();
+
+    restoreManager();
+    expect(() => addOrganizationTeamMember(withBeforeImmediateRace(primary, demoteManager), {
+      organizationId: organization.id,
+      userId: manager.user.id,
+      actorLabel: manager.user.name,
+      teamId: team.id,
+      targetUserId: target.user.id,
+    })).toThrowError(expect.objectContaining({ code: "FORBIDDEN" }));
+    expect(primary.prepare(
+      "SELECT 1 FROM team_members WHERE team_id = ? AND user_id = ?",
+    ).get(team.id, target.user.id)).toBeUndefined();
+
+    restoreManager();
+    expect(() => upsertOrganizationWorkspaceMemberGrant(withBeforeImmediateRace(primary, demoteManager), {
+      organizationId: organization.id,
+      userId: manager.user.id,
+      actorLabel: manager.user.name,
+      workspaceId: workspace.id,
+      targetUserId: target.user.id,
+      role: "editor",
+    })).toThrowError(expect.objectContaining({ code: "FORBIDDEN" }));
+    expect(primary.prepare(
+      "SELECT 1 FROM workspace_members WHERE workspace_id = ? AND user_id = ?",
+    ).get(workspace.id, target.user.id)).toBeUndefined();
+
+    expect(listOrganizationAuditEvents(primary, organization.id, owner.user.id, 100)
+      .map((event) => event.action)).not.toEqual(expect.arrayContaining([
+      "organization.invitation_created",
+      "organization.team_member_added",
+      "organization.member_workspace_assigned",
+    ]));
+  });
+
+  it("reads the current workspace-grant state inside BEGIN IMMEDIATE before auditing", () => {
+    const { primary, contender } = createSharedTestDatabases();
+    const { owner, organization } = setupOrganization(primary, "Current grant audit race");
+    const member = createTestUser(primary, {
+      name: "Grant member",
+      email: "grant-member-audit-race@example.com",
+    });
+    inviteAndAccept(primary, {
+      organizationId: organization.id,
+      owner: owner.user,
+      invited: member.user,
+    });
+    const workspace = createWorkspace(primary, owner.user, "Current grant workspace", "en", {
+      organizationId: organization.id,
+    });
+    const team = createOrganizationTeam(primary, {
+      organizationId: organization.id,
+      userId: owner.user.id,
+      actorLabel: owner.user.name,
+      name: "Current grant team",
+    });
+    upsertOrganizationWorkspaceMemberGrant(primary, {
+      organizationId: organization.id,
+      userId: owner.user.id,
+      actorLabel: owner.user.name,
+      workspaceId: workspace.id,
+      targetUserId: member.user.id,
+      role: "viewer",
+    });
+    upsertOrganizationWorkspaceTeamGrant(primary, {
+      organizationId: organization.id,
+      userId: owner.user.id,
+      actorLabel: owner.user.name,
+      workspaceId: workspace.id,
+      teamId: team.id,
+      role: "viewer",
+    });
+
+    const racedMemberDatabase = withBeforeImmediateRace(primary, () => {
+      contender.prepare(
+        "UPDATE workspace_members SET access_role = 'editor' WHERE workspace_id = ? AND user_id = ?",
+      ).run(workspace.id, member.user.id);
+    });
+    upsertOrganizationWorkspaceMemberGrant(racedMemberDatabase, {
+      organizationId: organization.id,
+      userId: owner.user.id,
+      actorLabel: owner.user.name,
+      workspaceId: workspace.id,
+      targetUserId: member.user.id,
+      role: "admin",
+    });
+
+    const racedTeamDatabase = withBeforeImmediateRace(primary, () => {
+      contender.prepare(
+        "UPDATE workspace_team_grants SET access_role = 'editor' WHERE workspace_id = ? AND team_id = ?",
+      ).run(workspace.id, team.id);
+    });
+    upsertOrganizationWorkspaceTeamGrant(racedTeamDatabase, {
+      organizationId: organization.id,
+      userId: owner.user.id,
+      actorLabel: owner.user.name,
+      workspaceId: workspace.id,
+      teamId: team.id,
+      role: "admin",
+    });
+
+    const events = listOrganizationAuditEvents(primary, organization.id, owner.user.id, 100);
+    const memberEvent = events.find((event) => event.action === "organization.member_workspace_role_updated")!;
+    const teamEvent = events.find((event) => event.action === "organization.team_workspace_role_updated")!;
+    expect(memberEvent.metadata).toMatchObject({ userId: member.user.id, before: "editor", after: "admin" });
+    expect(teamEvent.metadata).toMatchObject({ teamId: team.id, before: "editor", after: "admin" });
+  });
+
+  it("does not create an organization workspace or self-admin grant after the actor is demoted", () => {
+    const { primary, contender } = createSharedTestDatabases();
+    const { owner, organization } = setupOrganization(primary, "Workspace creation authorization race");
+    const manager = createTestUser(primary, {
+      name: "Workspace manager",
+      email: "workspace-manager-race@example.com",
+    });
+    inviteAndAccept(primary, {
+      organizationId: organization.id,
+      owner: owner.user,
+      invited: manager.user,
+      role: "admin",
+    });
+
+    const racedDatabase = withBeforeImmediateRace(primary, () => {
+      contender.prepare(
+        `UPDATE organization_members SET role = 'member', updated_at = ?
+         WHERE organization_id = ? AND user_id = ?`,
+      ).run("2026-08-09T00:02:00.000Z", organization.id, manager.user.id);
+    });
+    expect(() => createWorkspace(racedDatabase, manager.user, "Blocked organization workspace", "en", {
+      organizationId: organization.id,
+    })).toThrowError(expect.objectContaining({ code: "FORBIDDEN" }));
+
+    expect(primary.prepare(
+      "SELECT 1 FROM workspaces WHERE name = ?",
+    ).get("Blocked organization workspace")).toBeUndefined();
+    expect(listOrganizationAuditEvents(primary, organization.id, owner.user.id, 100)
+      .map((event) => event.action)).not.toContain("organization.workspace_created");
   });
 
   it("rejects cross-organization team grants and agent assignments", () => {

@@ -80,54 +80,63 @@ async function main() {
     }
   }
 
-  const candidates = scan();
+  let candidates = scan();
   let backupGenerationId: string | null = null;
   if (apply && candidates.length > 0) {
-    const generation = await backup.createBackupGeneration({
+    const protectedRepair = await backup.withVerifiedDestructiveOperationBackup({
+      baseUrl: config.getCollaborationInternalUrl(),
+      secret: config.getCollaborationSecret(),
       databasePath,
       mediaRoot: config.getMediaRoot(),
       backupRoot: config.getBackupRoot(),
       sourceRevision: process.env.NYXDOC_SOURCE_REVISION?.trim() || "draft-node-id-repair",
-    });
-    const verified = await backup.verifyBackupGeneration(generation.generationPath);
-    backupGenerationId = verified.manifest.generationId;
-
-    const database = databaseModule.openDatabase(databasePath);
-    try {
-      database.transaction(() => {
-        for (const candidate of candidates) {
-          const current = candidate.repaired.find((item) => item.field === "yjs_state");
-          const committed = candidate.repaired.find((item) => item.field === "committed_yjs_state");
-          const result = database.prepare(
-            `UPDATE document_collaboration_states
-             SET yjs_state = ?, committed_yjs_state = ?,
-                 draft_version = draft_version + ?, updated_at = ?
-             WHERE workspace_id = ? AND document_id = ? AND generation = ?
-               AND yjs_state = ? AND committed_yjs_state = ?`,
-          ).run(
-            current?.repairedState ?? candidate.row.yjs_state,
-            committed?.repairedState ?? candidate.row.committed_yjs_state,
-            current ? 1 : 0,
-            new Date().toISOString(),
-            candidate.row.workspace_id,
-            candidate.row.document_id,
-            candidate.row.generation,
-            candidate.row.yjs_state,
-            candidate.row.committed_yjs_state,
-          );
-          if (result.changes !== 1) {
-            throw new Error(`Draft changed during repair; no data was written: ${candidate.row.document_id}`);
-          }
+      operation: async (verified) => {
+        const protectedCandidates = scan();
+        const database = databaseModule.openDatabase(databasePath);
+        try {
+          database.transaction(() => {
+            for (const candidate of protectedCandidates) {
+              const current = candidate.repaired.find((item) => item.field === "yjs_state");
+              const committed = candidate.repaired.find((item) => item.field === "committed_yjs_state");
+              const result = database.prepare(
+                `UPDATE document_collaboration_states
+                 SET yjs_state = ?, committed_yjs_state = ?,
+                     draft_version = draft_version + ?, updated_at = ?
+                 WHERE workspace_id = ? AND document_id = ? AND generation = ?
+                   AND yjs_state = ? AND committed_yjs_state = ?`,
+              ).run(
+                current?.repairedState ?? candidate.row.yjs_state,
+                committed?.repairedState ?? candidate.row.committed_yjs_state,
+                current ? 1 : 0,
+                new Date().toISOString(),
+                candidate.row.workspace_id,
+                candidate.row.document_id,
+                candidate.row.generation,
+                candidate.row.yjs_state,
+                candidate.row.committed_yjs_state,
+              );
+              if (result.changes !== 1) {
+                throw new Error(`Draft changed during repair; no data was written: ${candidate.row.document_id}`);
+              }
+            }
+          })();
+        } finally {
+          database.close();
         }
-      })();
-    } finally {
-      database.close();
-    }
 
-    const remaining = scan();
-    if (remaining.length > 0) {
-      throw new Error(`Missing or duplicate node IDs remain in ${remaining.length} collaboration states.`);
-    }
+        const remaining = scan();
+        if (remaining.length > 0) {
+          throw new Error(`Missing or duplicate node IDs remain in ${remaining.length} collaboration states.`);
+        }
+        return {
+          candidates: protectedCandidates,
+          backupGenerationId: verified.manifest.generationId,
+        };
+      },
+      onWarning: (warning) => console.warn(`Draft repair backup warning: ${warning}`),
+    });
+    candidates = protectedRepair.result.candidates;
+    backupGenerationId = protectedRepair.result.backupGenerationId;
   }
 
   console.log(JSON.stringify({

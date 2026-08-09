@@ -1,6 +1,5 @@
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import path from "node:path";
-import { WORKSPACE_PERMISSIONS, type WorkspacePermission } from "@/lib/authz/permissions";
 import type { NyxDatabase } from "@/lib/db/client";
 import { bindMediaAssetToDocument } from "@/lib/media/bindings";
 import {
@@ -11,10 +10,10 @@ import {
   type SupportedImageMimeType,
 } from "@/lib/media/service";
 import {
+  authenticateAgentCredential,
   requireTokenDocumentAccess,
   requireTokenPermission,
   type ApiTokenIdentity,
-  type ApiTokenScope,
 } from "@/lib/tokens/service";
 
 export const AGENT_MEDIA_UPLOAD_TICKET_TTL_SECONDS = 5 * 60;
@@ -53,18 +52,6 @@ function normalizeFilename(value: string) {
     throw new MediaServiceError("INVALID_INPUT", "이미지 파일 이름이 필요합니다.");
   }
   return normalized.slice(0, 255);
-}
-
-function parseStringList<T extends string>(raw: string, allowed?: readonly T[]) {
-  try {
-    const parsed = JSON.parse(raw);
-    if (!Array.isArray(parsed)) return [];
-    return parsed.filter((value): value is T => (
-      typeof value === "string" && (!allowed || allowed.includes(value as T))
-    ));
-  } catch {
-    return [];
-  }
 }
 
 function requireDocumentBoundary(
@@ -189,125 +176,27 @@ function readTicket(database: NyxDatabase, ticketId: string) {
   return row;
 }
 
-function requireCurrentTicketAccess(database: NyxDatabase, ticket: UploadTicketRow, now: string) {
-  const current = database.prepare(
-    `SELECT credential.scopes_json, credential.created_by_user_id,
-            credential.agent_id AS global_agent_id, credential.token_prefix,
-            credential.expires_at AS credential_expires_at,
-            credential.revoked_at, agent.status AS agent_status,
-            agent.display_name, agent.avatar_media_id,
-            membership.status AS membership_status,
-            membership.revoked_at AS membership_revoked_at,
-            membership.access_profile, membership.capabilities_json, membership.root_document_id,
-            membership.scope_mode,
-            binding.id AS binding_id,
-            COALESCE(state.last_event_cursor, 0) AS last_event_cursor,
-            workspace.lifecycle_state,
-            ownership.owner_type, ownership.owner_user_id,
-            ownership.organization_id, agent_owner.owner_type AS agent_owner_type,
-            agent_owner.owner_user_id AS agent_owner_user_id,
-            agent_owner.organization_id AS agent_organization_id,
-            organization.lifecycle_state AS organization_lifecycle_state,
-            approval.id AS approval_id, organization_member.id AS organization_member_id
-     FROM agent_credentials credential
-     JOIN agents agent ON agent.id = credential.agent_id
-     JOIN workspace_agents membership
-       ON membership.id = ?
-      AND membership.workspace_id = ?
-      AND membership.agent_identity_id = credential.agent_id
-     JOIN agent_credential_grant_bindings binding
-       ON binding.credential_id = credential.id
-      AND binding.grant_id = membership.id
-      AND binding.status = 'active'
-      AND binding.revoked_at IS NULL
-     LEFT JOIN agent_credential_workspace_state state
-       ON state.credential_id = credential.id
-      AND state.workspace_id = membership.workspace_id
-     JOIN workspaces workspace ON workspace.id = membership.workspace_id
-     JOIN workspace_ownership ownership ON ownership.workspace_id = workspace.id
-     JOIN agent_ownership agent_owner ON agent_owner.agent_id = credential.agent_id
-     LEFT JOIN organizations organization ON organization.id = ownership.organization_id
-     LEFT JOIN organization_agent_approvals approval
-       ON approval.organization_id = ownership.organization_id
-      AND approval.agent_id = credential.agent_id
-      AND approval.revoked_at IS NULL
-     LEFT JOIN organization_members organization_member
-       ON organization_member.organization_id = ownership.organization_id
-      AND organization_member.user_id = agent_owner.owner_user_id
-     WHERE credential.id = ?`,
-  ).get(ticket.workspace_agent_id, ticket.workspace_id, ticket.credential_id) as {
-    avatar_media_id: string | null;
-    agent_organization_id: string | null;
-    agent_owner_type: "personal" | "organization";
-    agent_owner_user_id: string | null;
-    agent_status: string;
-    approval_id: string | null;
-    access_profile: ApiTokenIdentity["accessProfile"];
-    binding_id: string;
-    capabilities_json: string;
-    credential_expires_at: string | null;
-    created_by_user_id: string;
-    display_name: string;
-    global_agent_id: string;
-    last_event_cursor: number;
-    lifecycle_state: string;
-    membership_status: string;
-    membership_revoked_at: string | null;
-    organization_id: string | null;
-    organization_lifecycle_state: string | null;
-    organization_member_id: string | null;
-    owner_type: "personal" | "organization";
-    owner_user_id: string | null;
-    revoked_at: string | null;
-    root_document_id: string | null;
-    scope_mode: ApiTokenIdentity["scopeMode"];
-    scopes_json: string;
-    token_prefix: string;
-  } | undefined;
-
-  const namespaceAllowed = current?.owner_type === "personal"
-    ? current.agent_owner_type === "personal"
-      && current.agent_owner_user_id === current.owner_user_id
-    : current?.agent_owner_type === "organization"
-      ? current.agent_organization_id === current.organization_id
-      : Boolean(current?.approval_id && current.organization_member_id);
-  if (
-    !current
-    || current.revoked_at
-    || (current.credential_expires_at && current.credential_expires_at <= now)
-    || current.agent_status !== "active"
-    || current.membership_status !== "active"
-    || current.membership_revoked_at
-    || current.lifecycle_state !== "active"
-    || (current.owner_type === "organization" && current.organization_lifecycle_state !== "active")
-    || !namespaceAllowed
-  ) {
+function requireCurrentTicketAccess(
+  database: NyxDatabase,
+  ticket: UploadTicketRow,
+  clientIp: string | null,
+) {
+  let identity: ApiTokenIdentity;
+  try {
+    identity = authenticateAgentCredential(database, ticket.credential_id, {
+      workspaceId: ticket.workspace_id,
+      clientIp,
+    });
+  } catch {
     throw new MediaServiceError("UNAUTHORIZED", "업로드 권한을 발급한 연결이 더 이상 유효하지 않습니다.");
   }
-
-  const scopes = parseStringList<ApiTokenScope>(current.scopes_json);
-  const capabilities = parseStringList<WorkspacePermission>(
-    current.capabilities_json,
-    WORKSPACE_PERMISSIONS,
-  );
-  const identity: ApiTokenIdentity = {
-    id: ticket.credential_id,
-    globalAgentId: current.global_agent_id,
-    agentId: ticket.workspace_agent_id,
-    workspaceId: ticket.workspace_id,
-    userId: current.created_by_user_id,
-    name: current.display_name,
-    avatarMediaId: current.avatar_media_id,
-    accessProfile: current.access_profile,
-    capabilities,
-    bindingId: current.binding_id,
-    prefix: current.token_prefix,
-    scopes,
-    lastEventCursor: Number(current.last_event_cursor),
-    rootDocumentId: current.root_document_id,
-    scopeMode: current.scope_mode,
-    ipAllowlist: [],
-  };
+  if (
+    identity.id !== ticket.credential_id
+    || identity.agentId !== ticket.workspace_agent_id
+    || identity.workspaceId !== ticket.workspace_id
+  ) {
+    throw new MediaServiceError("UNAUTHORIZED", "업로드 권한의 연결 범위가 더 이상 일치하지 않습니다.");
+  }
   try {
     requireTokenPermission(identity, "documents:write", "media.upload");
   } catch {
@@ -321,6 +210,7 @@ export async function consumeAgentMediaUploadTicket(
   input: {
     authorization: string | null;
     bytes: ArrayBuffer | Uint8Array;
+    clientIp?: string | null;
     ticketId: string;
   },
   options: { mediaRoot?: string; now?: Date } = {},
@@ -332,37 +222,43 @@ export async function consumeAgentMediaUploadTicket(
   if (!match || match[1].length > 200) {
     throw new MediaServiceError("NOT_FOUND", "업로드 권한을 찾을 수 없습니다.");
   }
-  const ticket = readTicket(database, input.ticketId);
-  if (!secureHashMatches(ticket.token_hash, hashSecret(match[1]))) {
-    throw new MediaServiceError("NOT_FOUND", "업로드 권한을 찾을 수 없습니다.");
-  }
-
   const now = options.now ?? new Date();
   const nowIso = now.toISOString();
-  if (ticket.consumed_at) {
-    throw new MediaServiceError("CONFLICT", "이미 사용된 일회용 업로드 권한입니다.");
-  }
-  if (ticket.expires_at <= nowIso) {
-    throw new MediaServiceError("EXPIRED", "이미지 업로드 권한이 만료되었습니다.");
-  }
-  const currentIdentity = requireCurrentTicketAccess(database, ticket, nowIso);
-  if (ticket.document_id) {
-    try {
-      requireDocumentBoundary(database, currentIdentity, ticket.document_id);
-    } catch (error) {
-      if (error instanceof MediaServiceError) throw error;
-      throw new MediaServiceError("UNAUTHORIZED", "이미지를 연결할 문서 범위가 더 이상 허용되지 않습니다.");
+  const acquired = database.transaction(() => {
+    const ticket = readTicket(database, input.ticketId);
+    if (!secureHashMatches(ticket.token_hash, hashSecret(match[1]))) {
+      throw new MediaServiceError("NOT_FOUND", "업로드 권한을 찾을 수 없습니다.");
     }
-  }
-
-  const consumed = database.prepare(
-    `UPDATE agent_media_upload_tickets
-     SET consumed_at = ?
-     WHERE id = ? AND token_hash = ? AND consumed_at IS NULL AND expires_at > ?`,
-  ).run(nowIso, ticket.id, ticket.token_hash, nowIso);
-  if (consumed.changes !== 1) {
-    throw new MediaServiceError("CONFLICT", "이미 사용되었거나 만료된 업로드 권한입니다.");
-  }
+    if (ticket.consumed_at) {
+      throw new MediaServiceError("CONFLICT", "이미 사용된 일회용 업로드 권한입니다.");
+    }
+    if (ticket.expires_at <= nowIso) {
+      throw new MediaServiceError("EXPIRED", "이미지 업로드 권한이 만료되었습니다.");
+    }
+    const currentIdentity = requireCurrentTicketAccess(
+      database,
+      ticket,
+      input.clientIp ?? null,
+    );
+    if (ticket.document_id) {
+      try {
+        requireDocumentBoundary(database, currentIdentity, ticket.document_id);
+      } catch (error) {
+        if (error instanceof MediaServiceError) throw error;
+        throw new MediaServiceError("UNAUTHORIZED", "이미지를 연결할 문서 범위가 더 이상 허용되지 않습니다.");
+      }
+    }
+    const consumed = database.prepare(
+      `UPDATE agent_media_upload_tickets
+       SET consumed_at = ?
+       WHERE id = ? AND token_hash = ? AND consumed_at IS NULL AND expires_at > ?`,
+    ).run(nowIso, ticket.id, ticket.token_hash, nowIso);
+    if (consumed.changes !== 1) {
+      throw new MediaServiceError("CONFLICT", "이미 사용되었거나 만료된 업로드 권한입니다.");
+    }
+    return { ticket, currentIdentity };
+  }).immediate();
+  const { ticket, currentIdentity } = acquired;
 
   const media = await storeMediaAsset(database, {
     bytes: input.bytes,

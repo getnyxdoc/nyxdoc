@@ -37,7 +37,7 @@ fixture, `src/**/*.test.ts`의 Vitest 테스트, `e2e/`의 Playwright 테스트,
 | `compose-lifecycle` | `install.sh --build` → 보존 uninstall → 재설치 → 확인된 purge | PR의 Compose 데이터 생명주기 게이트 |
 | `build-candidate` | 한 번의 multi-arch build를 candidate 태그와 immutable manifest digest로 push | release 후보의 provenance 고정 |
 | `qualify-candidate` | exact digest fresh install → health/MCP → 보존 재설치 → 직전 stable에서 update → DB integrity/MCP | release blocking Compose·HTTP·MCP·upgrade 게이트 |
-| `promote-image` | receipt의 candidate digest·commit·필수 matrix를 확인한 뒤 같은 manifest에 semver/latest 태그 부여 | 검증한 이미지와 공개한 이미지가 같은지 보장 |
+| `promote-image` | receipt를 확인하고 semver image → final Git tag → mutable aliases 순서로 직렬 publication | 구형 updater도 image 없는 최종 Git tag를 볼 수 없게 보장 |
 
 Forgejo와 GitHub CI의 `integration`은 임시 SQLite DB를 만들고 실제 Next 개발
 서버를 띄운다. `scripts/test-agent-connect-http.ts`는 과거 형식의 agent ID와
@@ -48,24 +48,84 @@ Forgejo와 GitHub CI의 `integration`은 임시 SQLite DB를 만들고 실제 Ne
 검사도 전용 browser vertical 디렉터리에만 적용되며, 현재 `e2e/`의 UI 계약
 mock을 release evidence로 승격시키는 장치가 아니다.
 
-GitHub release workflow는 `quality` 뒤에 multi-arch 후보 이미지를 한 번만
+GitHub release workflow는 final tag push가 아니라 `main`을 대상으로 한
+`workflow_dispatch`와 명시적 `X.Y.Z` 입력으로 시작한다. 입력 버전은
+`package.json`·`CHANGELOG.md`와 일치해야 하고, 선택한 source revision은 `main`의
+ancestor여야 한다. `quality` 뒤에 multi-arch 후보 이미지를 한 번만
 `candidate-<run>` 태그로 push하고, Buildx가 반환한 immutable manifest digest를
 `qualify-candidate`에 전달한다. 이 job은 새 GitHub runner를 ephemeral Linux
 qualification 환경으로 사용한다. Compose에는 tag가 아니라
 `ghcr.io/getnyxdoc/nyxdoc@sha256:…`만 주입하며, registry에서 다시 확인한 digest와
 Compose config의 image reference가 다르면 실패한다.
 
+이 digest는 release CI의 후보 검증·승격 경계다. 일반 운영자의 `install.sh`와
+`update.sh`는 체크아웃 버전에 맞는 `ghcr.io/getnyxdoc/nyxdoc:X.Y.Z` 릴리스 태그를
+사용하며, 그 태그는 이 qualification을 통과한 같은 manifest digest에만 승격된다.
+historical upgrade에 쓰는 baseline 태그도 존재 여부만으로 신뢰하지 않는다. 후보와
+baseline 모두 pull한 뒤 OCI `org.opencontainers.image.revision` label 및 runtime
+`Config.Env`의 `NYXDOC_SOURCE_REVISION`이 각각 선택된 Git commit과 정확히 일치해야 한다. 재태그되었거나 다른
+source commit에서 만든 baseline은 migration rehearsal 전에 hard fail한다.
+
 qualification은 exact digest의 fresh install, gateway/collaboration health,
 실제 계정 생성·세션 확인, 두 브라우저 세션의 실제 `/collaboration` WebSocket 동기화와 명시적
 저장·새로고침 보존, gateway를 통한 컨테이너 안의 실제 `test:mcp-http`,
 normal uninstall 뒤 volume 보존 재설치, 직전 stable source/image에서 후보
-source/image로의 `update.sh`, SQLite `integrity_check`, 다시 한 번의 인증·MCP
+source/image로의 `update-bootstrap.sh`, SQLite `integrity_check`, 다시 한 번의 인증·MCP
 HTTP 및 기존 계정 브라우저 vertical을 수행한다. baseline에서 만든 실제 authenticated workspace의 SQLite
-row count가 upgrade 뒤 감소하지 않는지도 확인한다. 결과는 artifact로
-보존되는 `nyxdoc-release-qualification/v1` receipt다. `promote-image`는 receipt의
-digest·commit·필수 matrix를 다시 검증하며, 하나라도 빠지면 public semver/latest
-태그나 GitHub Release를 만들지 않는다. 승격은 재빌드가 아니라 같은 manifest
-digest에 태그만 추가한다.
+row count가 upgrade 뒤 감소하지 않는지도 보조적으로 확인한다. 또한 baseline gateway에서 고정 이름과
+명시적 block ID를 가진 부모·중첩 문서, 두 canonical revision, 미커밋 working draft, 실제 media bytes를
+만든다. 후보 upgrade 뒤에는 같은 gateway API로 document/revision/media ID, canonical snapshot,
+revision 수, draft 상태와 본문, media byte hash를 정확히 대조한다. 같은 미커밋 객체 집합은 normal
+uninstall/reinstall 뒤와, verified backup을 새 빈 전용 Compose volume에 restore한 뒤에도 다시
+대조하며, 마지막으로 후보 gateway에서 draft를 commit한 뒤 clean 상태로 다시 읽는다. 결과는 artifact로
+보존되는 `nyxdoc-release-qualification/v1` receipt다. `promote-image`는 전역
+publication lock 아래 receipt의 digest·commit·필수 matrix를 다시 검증하며,
+하나라도 빠지면 public semver image, final Git tag, mutable alias 또는 GitHub
+Release를 만들지 않는다. publication 순서는 반드시 다음과 같다.
+
+historical baseline이 `0.25.17`이면 qualification은 후보 release의 standalone
+`update-bootstrap.sh`를 실행한다. qualification은 실제 baseline WebSocket으로 마지막 Yjs
+변경을 먼저 보낸다. bridge는 source와 image를 정확히 `0.25.18`로 고정하고 baseline
+gateway를 닫은 뒤 collaboration health가 연결 0을 보고하는지 확인한다. collaboration이
+아직 살아 있는 상태에서 verified backup을 만들고 manifest digest가 담긴 handoff receipt를
+기록한 다음에만 collaboration을 멈추고 설치된 구버전 `update.sh`를 호출한다. 후보가 뜬 뒤에는
+그 bridge backup의 SQLite/Yjs 상태를 직접 열어 직전 WebSocket 변경과 전체 working draft가
+정확히 들어 있는지 대조한다. `historical-update-bootstrap`,
+`historical-websocket-mutation`, `historical-legacy-bridge-backup` check 중 하나라도 없거나
+통과하지 않으면 후보 승격은 실패한다. 이 경계는 단순 대기 시간이나 불완전한 legacy 종료
+hook에 의존하지 않는다.
+
+1. qualified digest에 exact `X.Y.Z` image tag를 붙이고 registry에서 같은 digest인지 확인한다.
+2. 그 뒤에만 exact source revision을 가리키는 final `vX.Y.Z` Git tag를 만들거나 기존 tag를 검증한다.
+3. final Git tag를 다시 읽어 source revision을 확인한 뒤 `X.Y`와 `latest` alias를 이동한다.
+4. 마지막으로 changelog 요약을 포함한 GitHub Release를 만들거나 복구한다.
+
+따라서 final Git tag를 먼저 고르는 v0.25.17 updater도 pull 가능한 같은 semver
+image 없이 새 release를 관찰할 수 없다. tag push 자체는 release workflow를
+trigger하지 않는다. 중간 실패를 재실행할 때 exact semver image가 이미 있으면
+OCI label과 runtime source revision을 확인하고 그 immutable image를 다시
+qualification한다. 기존 final Git tag와 source revision이 다르거나, final Git
+tag만 있고 semver image가 없으면 자동으로 덮어쓰거나 수선하지 않고 실패한다.
+
+전역 publication lock을 기다리던 이전 버전 작업이 최신 버전 뒤에 실행될 수도
+있다. 예를 들어 `0.25.19`가 `latest`와 `0.25`를 먼저 갱신한 뒤 `0.25.18` 작업이
+실행되면, `0.25.18`의 immutable image·final Git tag·GitHub Release는 끝까지
+완결하되 두 mutable alias는 최신 버전을 가리키므로 각각 명시적으로 건너뛴다.
+alias가 stable immutable tag의 digest에 매핑되지 않거나 registry가 손상된 digest를
+반환하면 다른 alias를 하나도 움직이기 전에 fail closed한다.
+
+공식 stable updater의 release 탐색 경계는 이미지가 아니라
+`NYXDOC_UPDATE_AUTHORITY`다. `official`은 canonical GitHub stable tag를 따르며,
+운영자가 명시적으로 선택한 경우에만 unrelated checkout을 그 commit으로 전환한다.
+`origin`은 Forgejo·다른 mirror·fork를 포함해 현재 `origin`의 stable tag만 따르며,
+GHCR 이미지를 쓰고 있어도 GitHub history로 자동 교차하지 않는다. 새 production
+설치는 `official`, 개발 예시는 `origin`을 기록한다. 이전 설치에 값이 없으면 한 번만
+기존 이미지 기반 동작을 호환한 뒤 명시값으로 고정한다. `main`/`--build`는 항상
+`origin` 권한을 요구한다.
+
+승격은 재빌드가 아니라 같은 manifest digest에 태그만 추가한다. 승격 직전에도 candidate manifest digest, OCI revision
+label, runtime source-revision environment를 다시 확인하므로, qualification 이후 registry state가 바뀌어도
+잘못된 이미지나 alias를 publish하지 않는다.
 
 `compose.yaml`은 단일 이미지에서 다음 세 프로세스를 묶는다.
 
@@ -271,7 +331,8 @@ historical fixture와 그 사건이 침범한 경계에 대한 실제 vertical�
 
 브라우저 증거는 receipt 옆 `playwright/fresh`와 `playwright/historical-upgrade`에 로그·trace·실패
 캡처로 보존한다. receipt는 두 단계 각각의 실제 session과 collaboration WebSocket check가 모두
-`passed`가 아니면 검증되지 않으며, 검증되지 않은 후보는 semver/latest로 승격할 수 없다.
+`passed`가 아니면 검증되지 않으며, historical fixture의 단계별 ID·revision·draft·media hash와
+backup/isolated restore digest도 함께 기록한다. 검증되지 않은 후보는 semver/latest로 승격할 수 없다.
 
 설치·업데이트가 실패하면 자동으로 production을 rollback하거나 데이터를
    덮어쓰지 않는다. 실패한 VM과 증거를 보존하고 원인을 조사한 뒤 새 VM에서

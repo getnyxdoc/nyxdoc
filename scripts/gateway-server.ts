@@ -12,6 +12,9 @@ const server = createGatewayServer({
   appUrl: process.env.NYXDOC_GATEWAY_APP_URL || "http://app:3000",
   collaborationUrl:
     process.env.NYXDOC_GATEWAY_COLLABORATION_URL || "http://collaboration:3101",
+  collaborationClientIpSecret: process.env.NYXDOC_COLLABORATION_SECRET,
+  publishedHost: process.env.NYXDOC_HTTP_HOST,
+  trustedProxyCidrs: process.env.NYXDOC_GATEWAY_TRUSTED_PROXY_CIDRS,
 });
 const port = gatewayPort();
 

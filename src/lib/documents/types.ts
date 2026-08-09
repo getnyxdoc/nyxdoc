@@ -1,5 +1,9 @@
 import type { NyxdocBlock, NyxdocDocumentV2 } from "@/lib/editor/schema";
 import type { BlockIdNormalization } from "@/lib/documents/block-ids";
+import type {
+  ApiTokenRequestContext,
+  ApiTokenScope,
+} from "@/lib/tokens/service";
 
 export type DocumentActorType = "system" | "human" | "agent";
 export type DocumentMutationSource = "seed" | "web" | "mcp" | "api" | "rollback" | "migration";
@@ -9,6 +13,8 @@ export type DocumentActor = {
   userId: string;
   tokenId?: string;
   principalId?: string;
+  readonly scopeCeiling?: readonly ApiTokenScope[];
+  readonly requestContext?: ApiTokenRequestContext;
   avatarMediaId?: string | null;
   label: string;
   source: DocumentMutationSource;

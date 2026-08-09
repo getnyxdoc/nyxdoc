@@ -102,6 +102,11 @@ AST와 전체 JSON Schema는 기본 응답에 포함되지 않는다.
 `receiptHasUncommittedChanges`가 원 실행 직후 상태를, 같은 이름의 `current*` 필드와 최상위 필드가
 현재 상태를 나타낸다. 다음 쓰기의 `expectedDraftVersion`에는 최상위 `draftVersion`을 사용한다.
 
+`committedDraftVersion`은 현재 generation에서 마지막 명시적 commit이 관찰한 초안 버전이라는
+진단 정보다. 정본 metadata 변경 뒤 body 초안을 그대로 rebase하거나 no-op 정규화가 일어난 경우에는
+현재 `draftVersion`과의 단순 대소 비교만으로 미저장 여부를 판정할 수 없다. 저장 필요 여부의 유일한
+공개 판정값은 `hasUncommittedChanges`이며, 클라이언트는 이 boolean을 사용해야 한다.
+
 receipt에 없는 ID를 호출자가 추측해서는 안 된다. 특히 초안만 바꾼 응답에 새 정본 리비전 ID가
 없다는 것은 새 리비전이 생성되지 않았다는 뜻이다. 같은 `requestId`의 성공 재시도는 같은 원 실행
 receipt와 normalization remap을 반환하되, 다른 참여자가 초안을 전진시켰다면 현재 관찰 필드는

@@ -18,6 +18,36 @@ import { assertSameOrigin } from "@/lib/http/origin";
 
 export const runtime = "nodejs";
 
+export async function GET(
+  request: Request,
+  context: { params: Promise<{ documentId: string }> },
+) {
+  try {
+    const { session, workspace } = await requireWorkspaceSession(request);
+    const { documentId } = await context.params;
+    requireHumanDocumentPermission(
+      sqlite,
+      workspace.id,
+      documentId,
+      session.user.id,
+      "documents.read",
+    );
+    const document = getDocument(sqlite, workspace.id, documentId);
+    const state = ensureCollaborationState(sqlite, workspace.id, documentId);
+    return Response.json({
+      document,
+      workingDocument: {
+        generation: state.generation,
+        draftVersion: state.draftVersion,
+        committedDraftVersion: state.committedDraftVersion,
+        hasUncommittedChanges: state.hasUncommittedChanges,
+      },
+    }, { headers: { "cache-control": "no-store" } });
+  } catch (error) {
+    return apiErrorResponse(error);
+  }
+}
+
 export async function PUT(
   request: Request,
   context: { params: Promise<{ documentId: string }> },
@@ -56,12 +86,22 @@ export async function PUT(
       );
     }
     const state = ensureCollaborationState(sqlite, workspace.id, documentId);
+    if (body.content === undefined && state.hasUncommittedChanges) {
+      throw new DocumentServiceError(
+        "DRAFT_CONFLICT",
+        "공유 초안에 저장되지 않은 본문 변경이 있어 메타데이터만 확정할 수 없습니다.",
+        {
+          expectedDraftVersion: body.expectedDraftVersion,
+          currentDraftVersion: state.draftVersion,
+        },
+      );
+    }
     const actor = { ...humanDocumentActor(session.user), source: "api" as const };
     const result = await replaceAndCommitWorkingDocumentThroughGateway({
       roomName: state.roomName,
       actor,
       requestId: body.requestId,
-      expectedDraftVersion: state.draftVersion,
+      expectedDraftVersion: body.expectedDraftVersion,
       replacement: {
         title: body.title,
         parentDocumentId: body.parentDocumentId,

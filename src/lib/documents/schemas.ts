@@ -40,6 +40,7 @@ export const updateDocumentSchema = z
   .object({
     requestId: requestIdSchema.optional(),
     baseRevision: z.number().int().positive(),
+    expectedDraftVersion: z.number().int().nonnegative(),
     title: z.string().min(1).max(200).optional(),
     parentDocumentId: z.string().uuid().nullable().optional(),
     documentType: documentTypeSchema.optional(),
@@ -69,6 +70,7 @@ export const agentUpdateDocumentSchema = updateDocumentSchema.and(z.object({
 export const reorderDocumentSchema = z.object({
   targetDocumentId: z.string().uuid(),
   position: z.enum(["before", "inside", "after"]),
+  requestId: requestIdSchema,
 }).strict();
 
 const workingDocumentReplacementFields = {
@@ -119,6 +121,7 @@ export const restoreWorkingRevisionSchema = z.object({
 }).strict();
 
 export const discardWorkingDocumentSchema = z.object({
+  requestId: requestIdSchema,
   documentId: z.string().uuid(),
   ...documentDraftCasFields,
 }).strict();
@@ -128,6 +131,7 @@ export const archiveDocumentSchema = z.object({
 });
 
 export const restoreDocumentRevisionSchema = z.object({
+  requestId: requestIdSchema,
   baseRevision: z.number().int().positive(),
   ...documentDraftVersionCasFields,
 }).strict();

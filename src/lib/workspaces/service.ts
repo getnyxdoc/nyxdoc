@@ -337,19 +337,24 @@ export function createWorkspace(
     throw new WorkspaceServiceError("INVALID_INPUT", "워크스페이스 이름은 1자 이상 120자 이하여야 합니다.");
   }
   const id = randomUUID();
-  const slug = workspaceSlug(database, name);
+  let slug = "";
   const now = new Date().toISOString();
   const starter = workspaceStarterContent(locale);
   const organizationId = options.organizationId?.trim() || null;
-  if (organizationId) {
-    requireOrganizationPermission(
-      database,
-      organizationId,
-      user.id,
-      "workspaces.manage",
-    );
-  }
   database.transaction(() => {
+    // Organization authorization is intentionally inside the immediate
+    // transaction. Creating an organization workspace also grants the actor
+    // administrator access and creates its starter document, so a stale
+    // permission check would otherwise become a privilege-escalation path.
+    if (organizationId) {
+      requireOrganizationPermission(
+        database,
+        organizationId,
+        user.id,
+        "workspaces.manage",
+      );
+    }
+    slug = workspaceSlug(database, name);
     database.prepare(
       `INSERT INTO workspaces
        (id, name, slug, created_by_user_id, created_at, updated_at)
@@ -423,7 +428,7 @@ export function createWorkspace(
         createdAt: now,
       });
     }
-  })();
+  }).immediate();
   return {
     id,
     name,
@@ -693,7 +698,6 @@ export function purgeWorkspace(
     const mediaAssets = database.prepare(
       "SELECT id, storage_key FROM media_assets WHERE workspace_id = ? ORDER BY storage_key",
     ).all(workspace.id) as Array<{ id: string; storage_key: string }>;
-    const mediaStorageKeys = mediaAssets.map((row) => row.storage_key);
     let clearedProfileAvatars = 0;
     const userHasImageColumn = (database.prepare(
       `PRAGMA table_info("user")`,
@@ -729,6 +733,21 @@ export function purgeWorkspace(
       input.userId,
       input.actorLabel,
     );
+
+    const enqueueMediaCleanup = database.prepare(
+      `INSERT INTO workspace_media_cleanup_queue
+       (id, workspace_id, media_asset_id, storage_key, enqueued_at)
+       VALUES (?, ?, ?, ?, ?)`,
+    );
+    for (const media of mediaAssets) {
+      enqueueMediaCleanup.run(
+        randomUUID(),
+        workspace.id,
+        media.id,
+        media.storage_key,
+        purgedAt,
+      );
+    }
 
     const credentials = database.prepare(
       "SELECT id, workspace_allowlist_json FROM agent_credentials",
@@ -766,7 +785,7 @@ export function purgeWorkspace(
       backupGenerationId: input.backupGenerationId,
       counts,
       clearedProfileAvatars,
-      mediaStorageKeys,
+      mediaCleanupPending: mediaAssets.length,
     };
   }).immediate();
 }

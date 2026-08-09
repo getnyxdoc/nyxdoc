@@ -358,6 +358,125 @@ export async function removeMediaStorageKeys(
   return { removed, failed };
 }
 
+type WorkspaceMediaCleanupRow = {
+  id: string;
+  storage_key: string;
+  workspace_id: string;
+};
+
+export type WorkspaceMediaCleanupResult = {
+  completed: number;
+  failed: Array<{ storageKey: string; error: string }>;
+  pending: number;
+  processed: number;
+};
+
+export async function processWorkspaceMediaCleanupQueue(
+  database: NyxDatabase,
+  options: {
+    mediaRoot?: string;
+    removeStorageKeys?: typeof removeMediaStorageKeys;
+    workspaceId?: string;
+  } = {},
+): Promise<WorkspaceMediaCleanupResult> {
+  const rows = (options.workspaceId
+    ? database.prepare(
+      `SELECT id, workspace_id, storage_key
+       FROM workspace_media_cleanup_queue
+       WHERE status = 'pending' AND workspace_id = ?
+       ORDER BY enqueued_at, id`,
+    ).all(options.workspaceId)
+    : database.prepare(
+      `SELECT id, workspace_id, storage_key
+       FROM workspace_media_cleanup_queue
+       WHERE status = 'pending'
+       ORDER BY enqueued_at, id`,
+    ).all()) as WorkspaceMediaCleanupRow[];
+  const removeStorageKeys = options.removeStorageKeys ?? removeMediaStorageKeys;
+  const mediaRoot = options.mediaRoot ?? getMediaRoot();
+  const failed: WorkspaceMediaCleanupResult["failed"] = [];
+  const findActiveReference = database.prepare(
+    "SELECT workspace_id FROM media_assets WHERE storage_key = ?",
+  );
+  const recordFailure = database.prepare(
+    `UPDATE workspace_media_cleanup_queue
+     SET attempt_count = attempt_count + 1,
+         last_attempt_at = ?, last_error = ?
+     WHERE id = ? AND workspace_id = ? AND storage_key = ? AND status = 'pending'`,
+  );
+  const recordCompletion = database.prepare(
+    `UPDATE workspace_media_cleanup_queue
+     SET status = 'completed', attempt_count = attempt_count + 1,
+         last_attempt_at = ?, completed_at = ?, last_error = NULL
+     WHERE id = ? AND workspace_id = ? AND storage_key = ? AND status = 'pending'`,
+  );
+  let completed = 0;
+
+  for (const row of rows) {
+    let failure: string | null = null;
+    const activeReference = findActiveReference.get(row.storage_key) as
+      | { workspace_id: string }
+      | undefined;
+    if (activeReference) {
+      failure = `Storage key is referenced by active workspace ${activeReference.workspace_id}.`;
+    } else {
+      try {
+        const result = await removeStorageKeys([row.storage_key], mediaRoot);
+        const removalFailure = result.failed.find((entry) => entry.storageKey === row.storage_key);
+        if (removalFailure) {
+          failure = removalFailure.error;
+        } else if (!result.removed.includes(row.storage_key)) {
+          failure = "Storage cleanup did not confirm removal.";
+        }
+      } catch (error) {
+        failure = error instanceof Error ? error.message : String(error);
+      }
+    }
+
+    const attemptedAt = new Date().toISOString();
+    if (failure) {
+      const update = recordFailure.run(
+        attemptedAt,
+        failure.slice(0, 2_000),
+        row.id,
+        row.workspace_id,
+        row.storage_key,
+      );
+      if (update.changes === 1) {
+        failed.push({ storageKey: row.storage_key, error: failure });
+      }
+      continue;
+    }
+
+    const update = recordCompletion.run(
+      attemptedAt,
+      attemptedAt,
+      row.id,
+      row.workspace_id,
+      row.storage_key,
+    );
+    completed += update.changes;
+  }
+
+  const pending = Number(((options.workspaceId
+    ? database.prepare(
+      `SELECT COUNT(*) AS count
+       FROM workspace_media_cleanup_queue
+       WHERE status = 'pending' AND workspace_id = ?`,
+    ).get(options.workspaceId)
+    : database.prepare(
+      `SELECT COUNT(*) AS count
+       FROM workspace_media_cleanup_queue
+       WHERE status = 'pending'`,
+    ).get()) as { count: number }).count);
+  return {
+    processed: completed + failed.length,
+    completed,
+    failed,
+    pending,
+  };
+}
+
 export async function removeUnreferencedDiagnosticMedia(
   database: NyxDatabase,
   mediaIds: string[],

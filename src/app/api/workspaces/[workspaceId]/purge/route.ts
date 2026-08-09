@@ -1,10 +1,10 @@
 import { z } from "zod";
 import { requireVerifiedSession } from "@/data/session";
 import { sqlite } from "@/lib/db/client";
-import { createDestructiveOperationBackup } from "@/lib/db/safety-backup";
+import { withDestructiveOperationBackup } from "@/lib/db/safety-backup";
 import { apiErrorResponse } from "@/lib/http/errors";
 import { assertSameOrigin } from "@/lib/http/origin";
-import { removeMediaStorageKeys } from "@/lib/media/service";
+import { processWorkspaceMediaCleanupQueue } from "@/lib/media/service";
 import {
   purgeWorkspace,
   validateWorkspacePurge,
@@ -31,15 +31,22 @@ export async function DELETE(
       userId: session.user.id,
       confirmationName: body.confirmationName,
     });
-    const backup = await createDestructiveOperationBackup();
-    const workspace = purgeWorkspace(sqlite, {
-      workspaceId,
-      userId: session.user.id,
-      actorLabel: session.user.name,
-      confirmationName: body.confirmationName,
-      backupGenerationId: backup.manifest.generationId,
-    });
-    const cleanup = await removeMediaStorageKeys(workspace.mediaStorageKeys);
+    const protectedOperation = await withDestructiveOperationBackup((backup) =>
+      purgeWorkspace(sqlite, {
+        workspaceId,
+        userId: session.user.id,
+        actorLabel: session.user.name,
+        confirmationName: body.confirmationName,
+        backupGenerationId: backup.manifest.generationId,
+      }));
+    const workspace = protectedOperation.result;
+    if (protectedOperation.warnings.length > 0) {
+      console.warn("[nyxdoc] workspace purge completed with backup barrier warnings", {
+        workspaceId,
+        warnings: protectedOperation.warnings,
+      });
+    }
+    const cleanup = await processWorkspaceMediaCleanupQueue(sqlite, { workspaceId: workspace.id });
     if (cleanup.failed.length > 0) {
       console.error("[nyxdoc] workspace media cleanup incomplete", {
         workspaceId,
@@ -55,7 +62,7 @@ export async function DELETE(
         counts: workspace.counts,
       },
       backupGenerationId: workspace.backupGenerationId,
-      mediaCleanupPending: cleanup.failed.length,
+      mediaCleanupPending: cleanup.pending,
     }, { headers: { "Cache-Control": "no-store" } });
   } catch (error) {
     return apiErrorResponse(error);

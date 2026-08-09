@@ -452,6 +452,9 @@ export function WorkspaceShell({ view }: { view: WorkspaceView }) {
   const bugReports = useAppBugReports();
   const offlineCommitMessage = copy.offlineCommit;
   const router = useRouter();
+  const pendingCollaborationDocDisposalsRef = useRef(
+    new Map<Y.Doc, ReturnType<typeof setTimeout>>(),
+  );
   const collaborationDoc = useMemo(
     () => new Y.Doc({ guid: view.collaboration.roomName }),
     [view.collaboration.roomName],
@@ -534,6 +537,7 @@ export function WorkspaceShell({ view }: { view: WorkspaceView }) {
   const sidebarResizeCleanupRef = useRef<(() => void) | null>(null);
   const documentListRefreshTimerRef = useRef<number | null>(null);
   const documentListRequestRef = useRef<AbortController | null>(null);
+  const lastCanonicalCommitRef = useRef("");
   const expandedDocumentIdsRef = useRef(view.navigation.expandedDocumentIds);
   const navigationActiveDocumentRef = useRef(view.navigation.lastActiveDocumentId);
   const navigationVersionRef = useRef(view.navigation.version);
@@ -758,7 +762,7 @@ export function WorkspaceShell({ view }: { view: WorkspaceView }) {
     view.activeDocument.id,
   ]);
 
-  const refreshDocumentList = useCallback(() => {
+  const refreshDocumentList = useCallback((delay = 180) => {
     if (documentListRefreshTimerRef.current !== null) {
       window.clearTimeout(documentListRefreshTimerRef.current);
     }
@@ -788,7 +792,7 @@ export function WorkspaceShell({ view }: { view: WorkspaceView }) {
           documentListRequestRef.current = null;
         }
       }
-    }, 180);
+    }, delay);
   }, [bugReports, workspaceRequest]);
 
   const reorderDocumentInTree = useCallback(async (
@@ -812,7 +816,11 @@ export function WorkspaceShell({ view }: { view: WorkspaceView }) {
         {
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify({ targetDocumentId, position }),
+          body: JSON.stringify({
+            requestId: `tree-reorder-${globalThis.crypto.randomUUID()}`,
+            targetDocumentId,
+            position,
+          }),
         },
       );
       const body = await response.json().catch(() => ({})) as DocumentReorderApiBody;
@@ -943,6 +951,9 @@ export function WorkspaceShell({ view }: { view: WorkspaceView }) {
     draftVersion: number;
   }) => {
     if (event.documentId !== view.activeDocument.id) return;
+    const eventKey = `${event.documentId}:${event.revisionNumber}:${event.draftVersion}`;
+    if (lastCanonicalCommitRef.current === eventKey) return;
+    lastCanonicalCommitRef.current = eventKey;
     setCollaborativeDirty(false);
     setCollaborativeDraftVersion(event.draftVersion);
     setCollaborativeCommittedDraftVersion(event.draftVersion);
@@ -1007,7 +1018,32 @@ export function WorkspaceShell({ view }: { view: WorkspaceView }) {
     return () => metadata.unobserve(synchronize);
   }, [collaborationDoc]);
 
-  useEffect(() => () => collaborationDoc.destroy(), [collaborationDoc]);
+  useEffect(() => {
+    const pendingDisposals = pendingCollaborationDocDisposalsRef.current;
+    const pendingDisposal = pendingDisposals.get(collaborationDoc);
+    if (pendingDisposal) {
+      clearTimeout(pendingDisposal);
+      pendingDisposals.delete(collaborationDoc);
+    }
+
+    return () => {
+      // React StrictMode replays effect cleanup/setup against the same memoized
+      // resource. Retire the document after that replay can reclaim ownership;
+      // a room change or real unmount has no matching setup and destroys it.
+      const disposal = setTimeout(() => {
+        if (pendingDisposals.get(collaborationDoc) !== disposal) return;
+        // Give the child editor's provider/UndoManager retirement task the
+        // first turn, then destroy their shared Awareness/Y.Doc owner.
+        const destroyDocument = setTimeout(() => {
+          if (pendingDisposals.get(collaborationDoc) !== destroyDocument) return;
+          pendingDisposals.delete(collaborationDoc);
+          collaborationDoc.destroy();
+        }, 0);
+        pendingDisposals.set(collaborationDoc, destroyDocument);
+      }, 0);
+      pendingDisposals.set(collaborationDoc, disposal);
+    };
+  }, [collaborationDoc]);
 
   useLayoutEffect(() => {
     const title = collaborativeTitleRef.current;
@@ -1160,6 +1196,7 @@ export function WorkspaceShell({ view }: { view: WorkspaceView }) {
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
           documentId: view.activeDocument.id,
+          requestId: `draft-discard-${globalThis.crypto.randomUUID()}`,
           expectedGeneration: view.collaboration.generation,
           expectedDraftVersion: collaborativeDraftVersion,
           expectedBaseRevision: view.activeDocument.revisionNumber,
@@ -1331,7 +1368,11 @@ export function WorkspaceShell({ view }: { view: WorkspaceView }) {
         headers: { "content-type": "application/json" },
         body: JSON.stringify(
           editorMode === "edit"
-            ? { ...payload, baseRevision: view.activeDocument.revisionNumber }
+            ? {
+                ...payload,
+                baseRevision: view.activeDocument.revisionNumber,
+                expectedDraftVersion: collaborativeDraftVersion,
+              }
             : payload,
         ),
       },
@@ -1340,7 +1381,7 @@ export function WorkspaceShell({ view }: { view: WorkspaceView }) {
     setPending(false);
     if (!response.ok) {
       setError(
-        body.code === "REVISION_CONFLICT"
+        body.code === "REVISION_CONFLICT" || body.code === "DRAFT_CONFLICT"
           ? copy.documentConflict
           : body.error || copy.documentSaveFailed,
       );
@@ -1381,6 +1422,7 @@ export function WorkspaceShell({ view }: { view: WorkspaceView }) {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
+          requestId: `revision-restore-${globalThis.crypto.randomUUID()}`,
           baseRevision: view.activeDocument.revisionNumber,
           expectedGeneration: view.collaboration.generation,
           expectedDraftVersion: collaborativeDraftVersion,
@@ -1408,11 +1450,22 @@ export function WorkspaceShell({ view }: { view: WorkspaceView }) {
     if (!title || title === dialogDocument.title || documentActionPending) return;
     setDocumentActionPending(true);
     setDocumentActionError("");
+    const currentResponse = await workspaceRequest(`/api/documents/${dialogDocument.id}`, {
+      cache: "no-store",
+    });
+    const currentBody = await responseBody(currentResponse);
+    if (!currentResponse.ok || typeof currentBody.workingDocument?.draftVersion !== "number") {
+      setDocumentActionPending(false);
+      setDocumentActionError(currentBody.error || copy.renameFailed);
+      return;
+    }
     const response = await workspaceRequest(`/api/documents/${dialogDocument.id}`, {
       method: "PUT",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
+        requestId: `document-rename-${globalThis.crypto.randomUUID()}`,
         baseRevision: dialogDocument.revisionNumber,
+        expectedDraftVersion: currentBody.workingDocument.draftVersion,
         title,
         summary: formatCopy(copy.renameSummary, { title }),
       }),
@@ -1421,13 +1474,17 @@ export function WorkspaceShell({ view }: { view: WorkspaceView }) {
     setDocumentActionPending(false);
     if (!response.ok) {
       setDocumentActionError(
-        body.code === "REVISION_CONFLICT"
+        body.code === "REVISION_CONFLICT" || body.code === "DRAFT_CONFLICT"
           ? copy.revisionConflict
           : body.error || copy.renameFailed,
       );
       return;
     }
     setDocumentDialog(null);
+    // router.refresh() refreshes server props, but the navigation tree is kept
+    // in client state while a document is open. Refresh that state explicitly
+    // so a renamed inactive document is visible without navigating away.
+    refreshDocumentList(0);
     router.refresh();
   }
 

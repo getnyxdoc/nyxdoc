@@ -59,7 +59,13 @@ Git 저장소는 소스 코드에 탁월합니다. Nyxdoc은 일반 문서에 �
 
 ## Docker Compose로 시작하기
 
-공식 운영 경로는 Linux와 Docker Compose입니다. 로컬 개발은 Node.js 24를 사용합니다.
+지원하는 자체 호스팅 경로는 Linux, Docker Engine, Docker Compose v2입니다. 수명주기
+스크립트는 Bash/Linux 스크립트이므로 macOS와 Windows Docker Desktop은 로컬 개발에는
+쓸 수 있어도 설치·업데이트·삭제·백업 복구·운영의 지원 대상은 아닙니다. 이 명령은 Linux
+호스트 또는 VM에서 실행하세요. 로컬 개발은 Node.js 24를 사용합니다.
+
+전제조건과 5분 경로는 [오픈소스 신규 사용자 안내](docs/open-source-readiness.md)를
+참고하세요.
 
 로컬에서 시험하려면 한 줄로 복제하고 설치합니다.
 
@@ -68,8 +74,9 @@ git clone https://github.com/getnyxdoc/nyxdoc.git && cd nyxdoc && ./scripts/inst
 ```
 
 설치기는 `.env.production`을 만들고, 서로 다른 비밀값 두 개를 화면에 노출하지
-않고 생성하며, 정확한 릴리스 이미지를 받은 뒤 모든 서비스를 시작하고 상태를
-확인합니다. 현재 소스에서 직접 빌드하려면 `./scripts/install.sh --build`를 사용합니다.
+않고 생성하며, 이 checkout 버전에 맞는 버전 릴리스 이미지를 받은 뒤 모든 서비스를
+시작하고 상태를 확인합니다. 현재 소스에서 직접 빌드하려면
+`./scripts/install.sh --build`를 사용합니다.
 
 [http://localhost:3191](http://localhost:3191)을 엽니다. 최초 계정이 사이트 소유자가
 됩니다. SMTP와 개인 도메인은 없어도 됩니다. 첫 소유자가 만들어진 뒤에는 기본적으로
@@ -83,9 +90,23 @@ git clone https://github.com/getnyxdoc/nyxdoc.git && cd nyxdoc && ./scripts/inst
 ./scripts/uninstall.sh --purge --confirm-purge=nyxdoc
 ```
 
-일반 삭제는 문서·미디어·백업·설정·소스를 보존합니다. 영구 삭제는 Docker 데이터
-볼륨까지 제거하지만 외부 백업 디렉터리·설정·소스는 보존합니다. HTTPS, 백업,
-업데이트, 삭제와 복구는 [DEPLOYMENT.md](DEPLOYMENT.md)를 참고하세요.
+`0.25.17`에서 `0.25.18`로 한 번만 업데이트할 때는 Nyxdoc checkout에서 대신 다음
+명령을 실행합니다.
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/getnyxdoc/nyxdoc/v0.25.18/scripts/update-bootstrap.sh | bash
+```
+
+이 브리지는 공개 협업 경계를 먼저 닫고 이미 받아들인 편집 내용을 모두 저장한 뒤,
+구버전 업데이트기가 백업을 만들게 합니다. `0.25.18`부터는 평소처럼
+`./scripts/update.sh`를 사용합니다.
+
+`update.sh`는 깨끗한 Git checkout이 필요하며 실행 중인 설치를 바꾸기 전 검증된
+백업을 만듭니다. 같은 업데이트가 실패했을 때만 저장된 검증 백업 영수증으로 재개할 수
+있습니다. 일반 삭제는 문서·미디어·백업·설정·소스를 보존합니다. 영구 삭제는 Docker
+데이터 볼륨과 로컬 빌드 이미지를 제거하지만 외부 백업 디렉터리·설정·소스는
+보존합니다. HTTPS, 백업, 업데이트, 삭제와 복구는
+[DEPLOYMENT.md](DEPLOYMENT.md)를 참고하세요.
 
 ## 로컬 개발
 
@@ -107,29 +128,19 @@ npm run build
 
 ## 외부 에이전트 연결
 
-Nyxdoc에서 에이전트 신원과 연결 키를 만듭니다. UI는 MCP 주소, 전송 방식, Bearer 키,
-워크스페이스 접근 프로필과 확인 절차를 한 번에 복사할 수 있는 안내문을 제공합니다.
+로그인 후 **설정 → 워크스페이스 → 에이전트 권한 → 첫 에이전트 연결**을 엽니다.
+에이전트 신원, 접근 프로필, 문서 범위와 연결 키를 선택합니다. 새 키 원문은 한 번만
+표시되며, UI가 MCP 주소·Streamable HTTP·Bearer 인증·확인 절차를 담은 비공개 안내문을
+생성합니다.
 
-```text
-전송 방식: Streamable HTTP
-주소: https://your-nyxdoc.example/mcp
-인증: Bearer <NYXDOC_TOKEN>
-```
-
-연결 직후 `get_capabilities`를 먼저 호출합니다. 현재 스키마, 권한, 워크스페이스 범위와
-지원 도구가 반환됩니다. Agent To-do는 담당 에이전트 기준으로 조회하며 워크스페이스는
-추가 맥락으로 제공합니다. 사람에게 Nyxdoc To-do를 진행하라는 명시적 요청을 받지 않은
-에이전트는 대기 중인 작업을 임의로 시작하면 안 됩니다.
-
-에이전트가 이미지를 넣을 때는 `create_image_upload`가 반환한 5분 일회용 URL에 원본
-바이트를 `PUT`하고, 성공 응답의 `imageBlock`을 문서에 삽입합니다. 이미지나 base64를
-MCP JSON에 싣지 않습니다.
-
-자세한 계약은 [docs/agent-contract.md](docs/agent-contract.md)에 있습니다.
+연결 직후 `get_capabilities`, 이어서 `list_agent_workspaces`를 호출합니다. 전체 5분
+경로와 Codex 설정, OAuth, 이미지 업로드, Agent To-do 경계는
+[docs/open-source-readiness.md](docs/open-source-readiness.md)와
+[docs/agent-contract.md](docs/agent-contract.md)를 참고하세요.
 
 ## 프로젝트 상태
 
-`0.25.0`은 실제 문서에 사용 중인 초기 0.x 버전입니다. 데이터 마이그레이션은 검증된
+`0.25.18`은 실제 문서에 사용 중인 초기 0.x 버전입니다. 데이터 마이그레이션은 검증된
 백업 복제본에서 먼저 연습하는 forward-only 방식이지만, 1.0 전까지 API와 UI의 세부
 사항은 변경될 수 있습니다.
 
@@ -146,6 +157,8 @@ MCP JSON에 싣지 않습니다.
 - [에이전트 프로토콜](docs/agent-contract.md)
 - [Agent To-do](docs/document-tasks.md)
 - [편집기 품질 기준](docs/editor-quality-gate.md)
+- [오픈소스 신규 사용자 안내](docs/open-source-readiness.md)
+- [테스트 및 릴리스 적격성](docs/testing-and-release-qualification.md)
 
 ## 참여와 보안
 

@@ -1,8 +1,15 @@
 import { createHash, randomUUID } from "node:crypto";
 import { slateNodesToInsertDelta, yTextToSlateElement } from "@slate-yjs/core";
 import * as Y from "yjs";
+import {
+  requireCurrentCollaborationAuthorization,
+  type CollaborationAuthorizationContext,
+} from "@/lib/collaboration/authorization";
 import type { NyxDatabase } from "@/lib/db/client";
-import { getDocument } from "@/lib/documents/service";
+import {
+  getDocument,
+  resolveRestorableDocumentParent,
+} from "@/lib/documents/service";
 import type {
   DocumentActor,
   DocumentDetail,
@@ -10,6 +17,10 @@ import type {
   DocumentMetadata,
   DocumentRevisionSnapshot,
 } from "@/lib/documents/types";
+import type {
+  ApiTokenRequestContext,
+  ApiTokenScope,
+} from "@/lib/tokens/service";
 import { DocumentServiceError } from "@/lib/documents/types";
 import {
   NYXDOC_CONTENT_SCHEMA_VERSION,
@@ -25,15 +36,22 @@ import {
 const ROOM_PATTERN = /^nyxdoc:([0-9a-f-]{36}):([0-9a-f-]{36}):g([1-9][0-9]*)$/i;
 const CONTENT_SHARED_TYPE = "content";
 const METADATA_SHARED_TYPE = "metadata";
+const SYNTHETIC_TRAILING_FIELD = "_nyxdocSyntheticTrailing";
 
 export type DraftActor = {
   type: "human" | "agent" | "system";
   userId?: string | null;
   tokenId?: string | null;
   principalId?: string | null;
+  readonly scopeCeiling?: readonly ApiTokenScope[];
+  readonly requestContext?: ApiTokenRequestContext;
   label: string;
   avatarMediaId?: string | null;
   source: "web" | "mcp" | "api" | "rollback" | "migration" | "seed";
+};
+
+export type PersistCollaborationUpdateOptions = {
+  authorizationContext?: CollaborationAuthorizationContext;
 };
 
 export type CollaborationState = {
@@ -113,6 +131,25 @@ function metadataFromDocument(document: Pick<
   };
 }
 
+function editableCollaborationBlocks(blocks: NyxdocDocumentV2["blocks"]): unknown[] {
+  const editableBlocks: unknown[] = structuredClone(blocks);
+  const lastBlock = editableBlocks.at(-1);
+  if (
+    !lastBlock
+    || typeof lastBlock !== "object"
+    || !("type" in lastBlock)
+    || lastBlock.type !== "p"
+  ) {
+    editableBlocks.push({
+      id: randomUUID(),
+      type: "p",
+      [SYNTHETIC_TRAILING_FIELD]: true,
+      children: [{ text: "" }],
+    });
+  }
+  return editableBlocks;
+}
+
 export function createCollaborationYDoc(input: {
   title: string;
   parentDocumentId: string | null;
@@ -124,15 +161,7 @@ export function createCollaborationYDoc(input: {
   const ydoc = new Y.Doc();
   const content = ydoc.get(CONTENT_SHARED_TYPE, Y.XmlText);
   const metadata = ydoc.getMap<unknown>(METADATA_SHARED_TYPE);
-  const editableBlocks = structuredClone(input.content.blocks);
-  const lastBlock = editableBlocks.at(-1);
-  if (!lastBlock || lastBlock.type !== "p") {
-    editableBlocks.push({
-      id: randomUUID(),
-      type: "p",
-      children: [{ text: "" }],
-    });
-  }
+  const editableBlocks = editableCollaborationBlocks(input.content.blocks);
   ydoc.transact(() => {
     content.applyDelta(slateNodesToInsertDelta(editableBlocks as never));
     metadata.set("title", input.title);
@@ -142,6 +171,37 @@ export function createCollaborationYDoc(input: {
     metadata.set("tags", [...input.tags]);
   }, "nyxdoc-seed");
   return ydoc;
+}
+
+function isEmptyParagraph(value: unknown) {
+  if (!value || typeof value !== "object") return false;
+  const block = value as Record<string, unknown>;
+  if (block.type !== "p" || !Array.isArray(block.children) || block.children.length !== 1) {
+    return false;
+  }
+  const child = block.children[0];
+  return Boolean(
+    child
+    && typeof child === "object"
+    && (child as Record<string, unknown>).text === "",
+  );
+}
+
+function isSyntheticTrailingParagraph(value: unknown) {
+  return Boolean(
+    value
+    && typeof value === "object"
+    && (value as Record<string, unknown>)[SYNTHETIC_TRAILING_FIELD] === true
+    && isEmptyParagraph(value),
+  );
+}
+
+function projectCollaborationBlocks(value: unknown) {
+  if (!Array.isArray(value)) return stripNyxdocEditorRuntimeFields(value);
+  const blocks = isSyntheticTrailingParagraph(value.at(-1))
+    ? value.slice(0, -1)
+    : value;
+  return stripNyxdocEditorRuntimeFields(blocks);
 }
 
 export function collaborationYDocFromState(state: Uint8Array) {
@@ -189,7 +249,7 @@ function readCollaborationSnapshotFromYDoc(ydoc: Y.Doc) {
       documentType: metadata.get("documentType"),
       workflowStatus: metadata.get("workflowStatus"),
       tags: metadata.get("tags"),
-      blocks: stripNyxdocEditorRuntimeFields(slateRoot.children),
+      blocks: projectCollaborationBlocks(slateRoot.children),
     },
     repairs,
   };
@@ -313,6 +373,65 @@ function collaborationStateRow(
   ).get(workspaceId, documentId) as CollaborationStateRow | undefined;
 }
 
+function persistLegacyNodeIdNormalization(
+  database: NyxDatabase,
+  row: CollaborationStateRow,
+) {
+  const workingYDoc = collaborationYDocFromState(new Uint8Array(row.yjs_state));
+  const workingRepairs = repairCollaborationYDocNodeIds(workingYDoc);
+  const statesWereIdentical = row.yjs_state.equals(row.committed_yjs_state);
+  const committedYDoc = statesWereIdentical
+    ? workingYDoc
+    : collaborationYDocFromState(new Uint8Array(row.committed_yjs_state));
+  const committedRepairs = statesWereIdentical
+    ? workingRepairs
+    : repairCollaborationYDocNodeIds(committedYDoc);
+  if (workingRepairs.length === 0 && committedRepairs.length === 0) return row;
+
+  const normalizedState = workingRepairs.length > 0
+    ? Buffer.from(Y.encodeStateAsUpdate(workingYDoc))
+    : row.yjs_state;
+  const normalizedCommittedState = committedRepairs.length > 0
+    ? (statesWereIdentical
+        ? normalizedState
+        : Buffer.from(Y.encodeStateAsUpdate(committedYDoc)))
+    : row.committed_yjs_state;
+
+  const compareAndSwap = () => {
+    const result = database.prepare(
+      `UPDATE document_collaboration_states
+       SET yjs_state = ?, committed_yjs_state = ?
+       WHERE workspace_id = ? AND document_id = ? AND generation = ?
+         AND yjs_state = ? AND committed_yjs_state = ?`,
+    ).run(
+      normalizedState,
+      normalizedCommittedState,
+      row.workspace_id,
+      row.document_id,
+      row.generation,
+      row.yjs_state,
+      row.committed_yjs_state,
+    );
+    const winner = collaborationStateRow(database, row.workspace_id, row.document_id);
+    if (!winner) {
+      throw new DocumentServiceError(
+        "COLLABORATION_UNAVAILABLE",
+        "문서의 공유 초안 노드 식별자를 정규화하지 못했습니다.",
+      );
+    }
+    return { winner, won: result.changes === 1 };
+  };
+
+  // Callers such as update persistence already hold an IMMEDIATE transaction.
+  // Otherwise acquire the write reservation before the CAS. A loser must use
+  // the stored winner and never merge its independently generated repair ops.
+  const settled = database.inTransaction
+    ? compareAndSwap()
+    : database.transaction(compareAndSwap).immediate();
+  if (!settled.won) return settled.winner;
+  return settled.winner;
+}
+
 function requireActiveCollaborationDocument(
   database: NyxDatabase,
   workspaceId: string,
@@ -341,7 +460,9 @@ export function ensureCollaborationState(
 ): CollaborationState {
   requireActiveCollaborationDocument(database, workspaceId, documentId);
   const existing = collaborationStateRow(database, workspaceId, documentId);
-  if (existing) return mapCollaborationState(existing);
+  if (existing) {
+    return mapCollaborationState(persistLegacyNodeIdNormalization(database, existing));
+  }
 
   const document = getDocument(database, workspaceId, documentId);
   const ydoc = createCollaborationYDoc({
@@ -370,7 +491,7 @@ export function ensureCollaborationState(
   );
   const inserted = collaborationStateRow(database, workspaceId, documentId);
   if (!inserted) throw new DocumentServiceError("COLLABORATION_UNAVAILABLE", "문서의 공유 초안을 초기화하지 못했습니다.");
-  return mapCollaborationState(inserted);
+  return mapCollaborationState(persistLegacyNodeIdNormalization(database, inserted));
 }
 
 export function loadCollaborationStateByRoom(
@@ -392,8 +513,7 @@ export function persistCollaborationYDoc(
 ) {
   const room = parseCollaborationRoomName(roomName);
   requireActiveCollaborationDocument(database, room.workspaceId, room.documentId);
-  repairCollaborationYDocNodeIds(ydoc);
-  const encoded = Buffer.from(Y.encodeStateAsUpdate(ydoc));
+  const incomingState = Y.encodeStateAsUpdate(ydoc);
   const current = database.prepare(
     `SELECT yjs_state FROM document_collaboration_states
      WHERE workspace_id = ? AND document_id = ? AND generation = ?`,
@@ -402,14 +522,27 @@ export function persistCollaborationYDoc(
     throw new DocumentServiceError("DRAFT_CONFLICT", "공유 초안이 교체되어 현재 변경을 저장하지 못했습니다.");
   }
 
+  // A second collaboration process may have persisted updates after this
+  // Y.Doc was loaded. Never replace that state with a stale full snapshot:
+  // merge both CRDT histories on an isolated document first. This function is
+  // also used by commit fences, so the caller must not be mutated until the
+  // compare-and-swap has succeeded.
+  const currentYDoc = collaborationYDocFromState(new Uint8Array(current.yjs_state));
+  const candidate = collaborationYDocFromState(new Uint8Array(current.yjs_state));
+  Y.applyUpdate(candidate, incomingState, "nyxdoc-persist-merge");
+  repairCollaborationYDocNodeIds(candidate);
+
   // Opening a legacy draft can normalize missing or duplicate IDs in memory.
   // That internal normalization is not a user edit and must not advance the
   // optimistic concurrency token returned to agents. Compare the visible
   // normalized snapshots before deciding whether anything needs persistence.
-  const currentYDoc = collaborationYDocFromState(new Uint8Array(current.yjs_state));
   const currentSnapshot = readCollaborationSnapshotFromYDoc(currentYDoc).snapshot;
-  const nextSnapshot = readCollaborationSnapshotFromYDoc(ydoc).snapshot;
-  if (JSON.stringify(currentSnapshot) === JSON.stringify(nextSnapshot)) return;
+  const nextSnapshot = readCollaborationSnapshotFromYDoc(candidate).snapshot;
+  const encoded = Buffer.from(Y.encodeStateAsUpdate(candidate));
+  if (JSON.stringify(currentSnapshot) === JSON.stringify(nextSnapshot)) {
+    Y.applyUpdate(ydoc, encoded, "nyxdoc-persist-sync");
+    return;
+  }
 
   const result = database.prepare(
     `UPDATE document_collaboration_states
@@ -426,6 +559,7 @@ export function persistCollaborationYDoc(
     current.yjs_state,
   );
   if (result.changes !== 1) throw new DocumentServiceError("DRAFT_CONFLICT", "공유 초안이 교체되어 현재 변경을 저장하지 못했습니다.");
+  Y.applyUpdate(ydoc, encoded, "nyxdoc-persist-sync");
 }
 
 function contributorKey(actor: DraftActor) {
@@ -487,13 +621,13 @@ export function persistCollaborationUpdate(
   roomName: string,
   ydoc: Y.Doc,
   actor: DraftActor,
+  options: PersistCollaborationUpdateOptions = {},
 ) {
   const room = parseCollaborationRoomName(roomName);
-  requireActiveCollaborationDocument(database, room.workspaceId, room.documentId);
   const now = new Date().toISOString();
-  repairCollaborationYDocNodeIds(ydoc);
-  const encoded = Buffer.from(Y.encodeStateAsUpdate(ydoc));
-  database.transaction(() => {
+  const incomingState = Y.encodeStateAsUpdate(ydoc);
+  const persisted = database.transaction(() => {
+    requireActiveCollaborationDocument(database, room.workspaceId, room.documentId);
     const current = database.prepare(
       `SELECT yjs_state FROM document_collaboration_states
        WHERE workspace_id = ? AND document_id = ? AND generation = ?`,
@@ -501,7 +635,33 @@ export function persistCollaborationUpdate(
     if (!current) {
       throw new DocumentServiceError("DRAFT_CONFLICT", "공유 초안이 교체되어 변경을 저장하지 못했습니다.");
     }
-    if (current.yjs_state.equals(encoded)) return;
+
+    // A different collaboration process may have persisted updates after this
+    // Y.Doc was loaded. Merge both CRDT histories on an isolated document while
+    // holding SQLite's write lock so a stale full-state save cannot erase them.
+    // Repairs also stay isolated until every database write has succeeded.
+    const candidate = collaborationYDocFromState(new Uint8Array(current.yjs_state));
+    Y.applyUpdate(candidate, incomingState, "nyxdoc-persist-merge");
+    repairCollaborationYDocNodeIds(candidate);
+    const encoded = Buffer.from(Y.encodeStateAsUpdate(candidate));
+    if (current.yjs_state.equals(encoded)) {
+      return {
+        state: loadCollaborationStateByRoom(database, roomName),
+        update: encoded,
+      };
+    }
+    // The WebSocket preflight is not an authorization lease. Re-resolve the
+    // actor after the IMMEDIATE lock is held and directly before the first
+    // durable draft/accounting mutation. No-op updates intentionally return
+    // above without changing authorization or contributor accounting.
+    requireCurrentCollaborationAuthorization(
+      database,
+      room.workspaceId,
+      room.documentId,
+      actor,
+      "draft.update",
+      options.authorizationContext,
+    );
     const update = database.prepare(
       `UPDATE document_collaboration_states
        SET yjs_state = ?, draft_version = draft_version + 1, updated_at = ?,
@@ -541,8 +701,18 @@ export function persistCollaborationUpdate(
       now,
       now,
     );
-  })();
-  return loadCollaborationStateByRoom(database, roomName);
+    return {
+      state: loadCollaborationStateByRoom(database, roomName),
+      update: encoded,
+    };
+  }).immediate();
+
+  // Keep the caller synchronized with concurrent stored updates and any repair,
+  // but only after the SQLite transaction has committed successfully.
+  Y.applyUpdate(ydoc, persisted.update, {
+    context: { actor, recordedByEndpoint: true },
+  });
+  return persisted.state;
 }
 
 /**
@@ -652,6 +822,34 @@ export function workingDocumentFromYDoc(
   ydoc: Y.Doc,
 ): WorkingDocument {
   const state = loadCollaborationStateByRoom(database, roomName);
+  const document = collaborationDocumentFromYDoc(ydoc);
+  // Drafts seeded before the synthetic marker was introduced contain an
+  // unmarked editor-only paragraph. It is safe to hide only when the committed
+  // draft proves that removing that exact block reproduces the immutable base
+  // revision. A genuine canonical trailing empty paragraph therefore remains.
+  const committed = collaborationDocumentFromYDoc(
+    collaborationYDocFromState(state.committedState),
+  );
+  const committedLast = committed.content.blocks.at(-1);
+  const workingLast = document.content.blocks.at(-1);
+  const canonical = getDocument(database, state.workspaceId, state.documentId);
+  const isLegacySyntheticTrailing = Boolean(
+    state.baseRevisionNumber === canonical.revisionNumber
+    && isEmptyParagraph(committedLast)
+    && isEmptyParagraph(workingLast)
+    && committedLast?.id === workingLast?.id
+    && JSON.stringify(committed.content.blocks.slice(0, -1))
+      === JSON.stringify(canonical.content.blocks),
+  );
+  const projectedDocument = isLegacySyntheticTrailing
+    ? {
+        ...document,
+        content: {
+          ...document.content,
+          blocks: document.content.blocks.slice(0, -1),
+        },
+      }
+    : document;
   return {
     documentId: state.documentId,
     workspaceId: state.workspaceId,
@@ -662,7 +860,7 @@ export function workingDocumentFromYDoc(
     draftVersion: state.draftVersion,
     committedDraftVersion: state.committedDraftVersion,
     hasUncommittedChanges: state.hasUncommittedChanges,
-    ...collaborationDocumentFromYDoc(ydoc),
+    ...projectedDocument,
   };
 }
 
@@ -690,8 +888,9 @@ export function replaceWorkingDocument(
   ydoc.transact(() => {
     if (input.content) {
       const shared = ydoc.get(CONTENT_SHARED_TYPE, Y.XmlText);
+      const editableBlocks = editableCollaborationBlocks(input.content.blocks);
       shared.delete(0, shared.length);
-      shared.applyDelta(slateNodesToInsertDelta(input.content.blocks as never));
+      shared.applyDelta(slateNodesToInsertDelta(editableBlocks as never));
     }
     const metadata = ydoc.getMap<unknown>(METADATA_SHARED_TYPE);
     if (input.title !== undefined) metadata.set("title", input.title);
@@ -739,9 +938,12 @@ export function resetCollaborationState(
         workflowStatus: source.workflowStatus,
         tags: source.tags,
       };
+  const parentDocumentId = "metadata" in source
+    ? resolveRestorableDocumentParent(database, workspaceId, source.parentDocumentId)
+    : source.parentDocumentId;
   const ydoc = createCollaborationYDoc({
     title: source.title,
-    parentDocumentId: source.parentDocumentId,
+    parentDocumentId,
     documentType: metadata.documentType,
     workflowStatus: metadata.workflowStatus,
     tags: metadata.tags,
@@ -934,6 +1136,8 @@ export function documentActorFromDraftActor(actor: DraftActor): DocumentActor {
     userId,
     tokenId: actor.tokenId ?? undefined,
     principalId: actor.principalId ?? userId,
+    ...(actor.scopeCeiling ? { scopeCeiling: actor.scopeCeiling } : {}),
+    ...(actor.requestContext ? { requestContext: actor.requestContext } : {}),
     avatarMediaId: actor.avatarMediaId ?? null,
     label: actor.label,
     source: actor.source,

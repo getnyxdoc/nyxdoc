@@ -9,8 +9,12 @@ import {
 } from "@/lib/collaboration/commands";
 import { assignDocument } from "@/lib/collaboration/service";
 import type { NyxDatabase } from "@/lib/db/client";
-import { createDocument } from "@/lib/documents/service";
+import { archiveDocument, createDocument } from "@/lib/documents/service";
 import { getDocumentWebUrl } from "@/lib/documents/web-url";
+import {
+  provisionMcpOAuthGrant,
+  resolveMcpOAuthIdentity,
+} from "@/lib/mcp/oauth";
 import { createNyxdocMcpServer } from "@/lib/mcp/server";
 import { createOrganization } from "@/lib/organizations/service";
 import {
@@ -764,9 +768,15 @@ describe("Nyxdoc MCP server", () => {
         },
       });
       const initialWorking = (initialWorkingResult.structuredContent as {
-        workingDocument: { draftVersion: number; baseRevisionNumber: number };
+        workingDocument: {
+          draftVersion: number;
+          baseRevisionNumber: number;
+          content: { blocks: Array<{ type: string }> };
+        };
       }).workingDocument;
       expect(initialWorking).toMatchObject({ draftVersion: 0, baseRevisionNumber: 1 });
+      expect(initialWorking.content.blocks).toHaveLength(4);
+      expect(initialWorking.content.blocks.at(-1)).toMatchObject({ type: "table" });
 
       const outlineResult = await client.callTool({
         name: "get_document_outline",
@@ -1323,7 +1333,7 @@ describe("Nyxdoc MCP server", () => {
       });
 
       const benchmarkBlocks = [
-        { id: "benchmark-root", type: "h1", children: [{ text: "Compact benchmark" }] },
+        { id: "benchmark-root", type: "h1", children: [{ text: "Benchmark overview" }] },
         ...Array.from({ length: 44 }, (_, index) => ({
           id: `benchmark-before-${index}`,
           type: "p",
@@ -1462,7 +1472,7 @@ describe("Nyxdoc MCP server", () => {
       });
       const documentId = (target.structuredContent as { document: { id: string } }).document.id;
       const blocks = [
-        { id: "title", type: "h1", children: [{ text: "00-오늘의 소재 요약 목록" }] },
+        { id: "title", type: "h1", children: [{ text: "Threads 소재 개요" }] },
         ...Array.from({ length: 102 }, (_, index) => ({
           id: `threads-item-${index + 1}`,
           type: index % 9 === 0 ? "h2" : "p",
@@ -1861,6 +1871,90 @@ describe("Nyxdoc MCP server", () => {
         documentCount: 2,
         otherCreatorCount: 1,
       });
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  });
+
+  it("keeps a separately trashed child inside its document-tree grant instead of restoring it to root", async () => {
+    const database = createTestDatabase();
+    databases.push(database);
+    const { user, workspace } = createTestUser(database);
+    const human = {
+      type: "human" as const,
+      userId: user.id,
+      principalId: user.id,
+      label: user.name,
+      source: "web" as const,
+    };
+    const parentA = createDocument(database, workspace.id, human, {
+      title: "Grant root A",
+      content: {
+        schemaVersion: 2,
+        blocks: [{ id: "grant-root-a-body", type: "p", children: [{ text: "A" }] }],
+      },
+    });
+    const childB = createDocument(database, workspace.id, human, {
+      title: "Scoped child B",
+      parentDocumentId: parentA.document.id,
+      content: {
+        schemaVersion: 2,
+        blocks: [{ id: "scoped-child-b-body", type: "p", children: [{ text: "B" }] }],
+      },
+    });
+    const token = createWorkspaceToken(database, {
+      workspaceId: workspace.id,
+      userId: user.id,
+      name: "Scoped restore MCP agent",
+      role: "admin",
+      rootDocumentId: parentA.document.id,
+    });
+    const identity = authenticateApiToken(database, `Bearer ${token.token}`);
+
+    archiveDocument(database, workspace.id, human, childB.document.id, { baseRevision: 1 });
+    archiveDocument(database, workspace.id, human, parentA.document.id, { baseRevision: 1 });
+    const before = database.prepare(
+      `SELECT status, lifecycle_state, parent_document_id, original_parent_document_id,
+              tree_order, original_tree_order, trash_batch_id, current_revision_id
+       FROM documents WHERE id = ?`,
+    ).get(childB.document.id);
+
+    const server = createNyxdocMcpServer(database, identity);
+    const client = new Client({ name: "scoped-trash-restore-test", version: "1.0.0" });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await server.connect(serverTransport);
+    await client.connect(clientTransport);
+
+    try {
+      expect((await client.callTool({ name: "list_trash", arguments: {} })).structuredContent)
+        .toMatchObject({
+          trash: expect.arrayContaining([
+            expect.objectContaining({ rootDocumentId: parentA.document.id }),
+            expect.objectContaining({ rootDocumentId: childB.document.id }),
+          ]),
+        });
+
+      const denied = await client.callTool({
+        name: "restore_trashed_document",
+        arguments: { documentId: childB.document.id },
+      });
+      expect(denied.isError).toBe(true);
+      expect(denied.structuredContent).toMatchObject({ code: "FORBIDDEN" });
+      expect(database.prepare(
+        `SELECT status, lifecycle_state, parent_document_id, original_parent_document_id,
+                tree_order, original_tree_order, trash_batch_id, current_revision_id
+         FROM documents WHERE id = ?`,
+      ).get(childB.document.id)).toEqual(before);
+      expect(database.prepare(
+        "SELECT COUNT(*) AS count FROM document_trash_batches WHERE workspace_id = ?",
+      ).get(workspace.id)).toEqual({ count: 2 });
+      expect(database.prepare(
+        "SELECT COUNT(*) AS count FROM document_events WHERE document_id = ? AND event_type = 'restored'",
+      ).get(childB.document.id)).toEqual({ count: 0 });
+      expect(database.prepare(
+        "SELECT COUNT(*) AS count FROM workspace_audit_events WHERE workspace_id = ? AND action = 'document_trash.restored'",
+      ).get(workspace.id)).toEqual({ count: 0 });
     } finally {
       await client.close();
       await server.close();
@@ -2408,6 +2502,86 @@ describe("Nyxdoc MCP server", () => {
         const result = await client.callTool(request);
         expect(result.isError).toBe(true);
       }
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  });
+
+  it("preserves a read-only OAuth scope ceiling through workspace refresh and collaboration dispatch", async () => {
+    const database = createTestDatabase();
+    databases.push(database);
+    const { user, workspace } = createTestUser(database, { name: "OAuth ceiling owner" });
+    const document = createDocument(database, workspace.id, {
+      type: "human",
+      userId: user.id,
+      label: user.name,
+      source: "web",
+    }, {
+      title: "OAuth scope ceiling",
+      content: {
+        schemaVersion: 2,
+        blocks: [{ id: "oauth-ceiling-body", type: "p", children: [{ text: "unchanged" }] }],
+      },
+    }).document;
+    const grant = provisionMcpOAuthGrant(database, {
+      userId: user.id,
+      clientId: "read-only-dispatch-client",
+      clientName: "Read-only Dispatch Client",
+      requestedScopes: "documents:read documents:write documents:commit changes:read",
+      workspaceIds: [workspace.id],
+      accessProfile: "writer",
+      agent: { mode: "new", displayName: "Read-only OAuth dispatch agent" },
+    });
+    const identity = resolveMcpOAuthIdentity(database, {
+      userId: user.id,
+      clientId: grant.clientId,
+      tokenScopes: "documents:read",
+      workspaceId: workspace.id,
+    });
+    const collaboration = createCollaborationCommands({
+      database,
+      provider: createStoredCollaborationDocumentProvider(database),
+    });
+    const server = createNyxdocMcpServer(database, identity, collaboration);
+    const client = new Client({ name: "oauth-scope-ceiling-test", version: "1.0.0" });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await server.connect(serverTransport);
+    await client.connect(clientTransport);
+
+    try {
+      expect((await client.callTool({
+        name: "get_document",
+        arguments: { documentId: document.id },
+      })).isError).not.toBe(true);
+      expect((await client.callTool({
+        name: "get_workspace_context",
+        arguments: { workspaceId: workspace.id },
+      })).structuredContent).toMatchObject({
+        credential: { scopes: ["documents:read"] },
+      });
+
+      const denied = await client.callTool({
+        name: "update_document",
+        arguments: {
+          documentId: document.id,
+          requestId: "oauth-read-only-update-denied-001",
+          expectedDraftVersion: 0,
+          title: "Must remain unchanged",
+        },
+      });
+      expect(denied.isError).toBe(true);
+      expect(denied.structuredContent).toMatchObject({ code: "FORBIDDEN" });
+      expect((await client.callTool({
+        name: "get_working_document",
+        arguments: { documentId: document.id },
+      })).structuredContent).toMatchObject({
+        workingDocument: {
+          title: "OAuth scope ceiling",
+          draftVersion: 0,
+          hasUncommittedChanges: false,
+        },
+      });
     } finally {
       await client.close();
       await server.close();

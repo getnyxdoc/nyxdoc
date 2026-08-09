@@ -1,6 +1,12 @@
-import { createBackupGeneration, verifyBackupGeneration } from "../src/lib/db/backup";
+import { withVerifiedDestructiveOperationBackup } from "../src/lib/db/backup";
 import { openDatabase } from "../src/lib/db/client";
-import { getBackupRoot, getDatabasePath, getMediaRoot } from "../src/lib/config";
+import {
+  getBackupRoot,
+  getCollaborationInternalUrl,
+  getCollaborationSecret,
+  getDatabasePath,
+  getMediaRoot,
+} from "../src/lib/config";
 import { purgeExpiredTrash } from "../src/lib/documents/service";
 
 async function main() {
@@ -18,23 +24,32 @@ async function main() {
       console.log(JSON.stringify({ dueBatches: 0, purgedDocuments: 0 }));
       return;
     }
-    const backupGeneration = await createBackupGeneration({
+    const protectedOperation = await withVerifiedDestructiveOperationBackup({
+      baseUrl: getCollaborationInternalUrl(),
+      secret: getCollaborationSecret(),
       databasePath,
       mediaRoot: getMediaRoot(),
       backupRoot: getBackupRoot(),
       sourceRevision: process.env.NYXDOC_SOURCE_REVISION?.trim() || "scheduled-trash-purge",
+      operation: (backup) => ({
+        backupGenerationId: backup.manifest.generationId,
+        results: purgeExpiredTrash(database, {
+          type: "system",
+          userId: "system",
+          label: "Nyxdoc 보존 정책",
+          source: "web",
+        }, now),
+      }),
+      onWarning(warning) {
+        console.warn("[nyxdoc] scheduled trash purge barrier warning", { warning });
+      },
     });
-    const backup = await verifyBackupGeneration(backupGeneration.generationPath);
-    const results = purgeExpiredTrash(database, {
-      type: "system",
-      userId: "system",
-      label: "Nyxdoc 보존 정책",
-      source: "web",
-    }, now);
+    const { backupGenerationId, results } = protectedOperation.result;
     console.log(JSON.stringify({
       dueBatches: Number(due.count),
       purgedDocuments: results.reduce((total, result) => total + result.documentCount, 0),
-      backupGenerationId: backup.manifest.generationId,
+      backupGenerationId,
+      barrierWarnings: protectedOperation.warnings.length,
     }));
   } finally {
     database.close();

@@ -2,15 +2,29 @@
 
 import Link from "next/link";
 import {
+  type KeyboardEvent as ReactKeyboardEvent,
   type MouseEvent as ReactMouseEvent,
   type PointerEvent as ReactPointerEvent,
+  useCallback,
   useEffect,
   useLayoutEffect,
   useMemo,
   useRef,
   useState,
 } from "react";
-import { ChevronDown, ChevronRight, Ellipsis, FileText, PencilLine, Plus, Trash2 } from "lucide-react";
+import {
+  ChevronDown,
+  ChevronRight,
+  ChevronUp,
+  Ellipsis,
+  FileText,
+  GripVertical,
+  IndentDecrease,
+  IndentIncrease,
+  PencilLine,
+  Plus,
+  Trash2,
+} from "lucide-react";
 import { useI18n } from "@/lib/i18n/client";
 import { formatCopy } from "@/lib/i18n/copy";
 import { localeTag, type AppLocale } from "@/lib/i18n/locales";
@@ -90,6 +104,10 @@ export function DocumentTree({
       rename: "Rename document",
       delete: "Delete document",
       dragToReorder: "Drag {title} to move or reorder it",
+      moveUp: "Move up",
+      moveDown: "Move down",
+      moveIntoPrevious: "Move into previous document",
+      moveOut: "Move out one level",
       reorderFailed: "Could not move the document.",
     },
     ko: {
@@ -103,6 +121,10 @@ export function DocumentTree({
       rename: "문서 이름 변경",
       delete: "문서 삭제",
       dragToReorder: "{title} 문서를 드래그하여 이동 또는 순서 변경",
+      moveUp: "위로 이동",
+      moveDown: "아래로 이동",
+      moveIntoPrevious: "이전 문서 아래로 이동",
+      moveOut: "한 단계 밖으로 이동",
       reorderFailed: "문서를 이동하지 못했습니다.",
     },
     ja: {
@@ -116,6 +138,10 @@ export function DocumentTree({
       rename: "文書名を変更",
       delete: "文書を削除",
       dragToReorder: "{title}をドラッグして移動または並べ替え",
+      moveUp: "上へ移動",
+      moveDown: "下へ移動",
+      moveIntoPrevious: "前の文書の下へ移動",
+      moveOut: "1階層外へ移動",
       reorderFailed: "文書を移動できませんでした。",
     },
   }[locale];
@@ -129,6 +155,7 @@ export function DocumentTree({
   const [reorderPending, setReorderPending] = useState(false);
   const [reorderError, setReorderError] = useState("");
   const menuRef = useRef<HTMLDivElement>(null);
+  const menuTriggerRef = useRef<HTMLButtonElement>(null);
   const treeRef = useRef<HTMLElement>(null);
   const dropTargetRef = useRef<{
     documentId: string;
@@ -136,6 +163,7 @@ export function DocumentTree({
   } | null>(null);
   const suppressNavigationRef = useRef(false);
   const dragInputRef = useRef<"mouse" | "pointer" | null>(null);
+  const activeDragCleanupRef = useRef<(() => void) | null>(null);
   const storageKey = navigationStateKey
     ? `nyxdoc:document-tree:${userId}:${workspaceId}:${navigationStateKey}`
     : null;
@@ -151,6 +179,13 @@ export function DocumentTree({
     () => new Set(expandedDocumentIds.filter((id) => documentIds.has(id))),
     [documentIds, expandedDocumentIds],
   );
+
+  const closeMenu = useCallback((restoreFocus = false) => {
+    setMenu(null);
+    if (restoreFocus) {
+      window.requestAnimationFrame(() => menuTriggerRef.current?.focus());
+    }
+  }, []);
 
   useLayoutEffect(() => {
     const treeElement = treeRef.current;
@@ -170,19 +205,29 @@ export function DocumentTree({
     }
   }, [activeDocumentId, expanded, storageKey]);
 
+  useLayoutEffect(() => {
+    if (!menu) return;
+    const firstEnabledItem = menuRef.current?.querySelector<HTMLButtonElement>(
+      '[role="menuitem"]:not(:disabled)',
+    );
+    (firstEnabledItem ?? menuRef.current)?.focus();
+  }, [menu]);
+
   useEffect(() => {
     if (!menu) return;
     function closeOnOutsidePointer(event: PointerEvent) {
       const target = event.target as Node;
       if (menuRef.current?.contains(target)) return;
       if ((target as Element).closest?.("[data-document-menu-trigger]")) return;
-      setMenu(null);
+      closeMenu();
     }
     function closeOnEscape(event: KeyboardEvent) {
-      if (event.key === "Escape") setMenu(null);
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      closeMenu(true);
     }
     function closeOnViewportChange() {
-      setMenu(null);
+      closeMenu();
     }
     document.addEventListener("pointerdown", closeOnOutsidePointer);
     document.addEventListener("keydown", closeOnEscape);
@@ -194,7 +239,14 @@ export function DocumentTree({
       window.removeEventListener("resize", closeOnViewportChange);
       window.removeEventListener("scroll", closeOnViewportChange, true);
     };
-  }, [menu]);
+  }, [closeMenu, menu]);
+
+  useEffect(() => () => {
+    activeDragCleanupRef.current?.();
+    activeDragCleanupRef.current = null;
+    dragInputRef.current = null;
+    suppressNavigationRef.current = false;
+  }, []);
 
   function toggle(documentId: string) {
     const next = new Set(expanded);
@@ -218,15 +270,44 @@ export function DocumentTree({
     }
   }
 
-  function toggleMenu(event: React.MouseEvent<HTMLButtonElement>, documentId: string) {
+  function toggleMenu(event: ReactMouseEvent<HTMLButtonElement>, documentId: string) {
     const rect = event.currentTarget.getBoundingClientRect();
     const width = 210;
-    const height = 90;
+    const itemCount = (onReorder ? 4 : 0) + (onRename ? 1 : 0) + (onDelete ? 1 : 0);
+    const height = itemCount * 41 + 12;
     const gap = 6;
     const left = Math.max(8, Math.min(rect.right - width, window.innerWidth - width - 8));
     const below = rect.bottom + gap;
     const top = below + height <= window.innerHeight - 8 ? below : Math.max(8, rect.top - height - gap);
+    menuTriggerRef.current = event.currentTarget;
     setMenu((current) => current?.documentId === documentId ? null : { documentId, top, left });
+  }
+
+  function handleMenuKeyDown(event: ReactKeyboardEvent<HTMLDivElement>) {
+    if (event.key === "Tab") {
+      closeMenu();
+      return;
+    }
+    if (event.key === "Escape") {
+      event.preventDefault();
+      closeMenu(true);
+      return;
+    }
+    if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) return;
+    const items = [...(menuRef.current?.querySelectorAll<HTMLButtonElement>(
+      '[role="menuitem"]:not(:disabled)',
+    ) ?? [])];
+    if (items.length === 0) return;
+    event.preventDefault();
+    const activeIndex = items.findIndex((item) => item === document.activeElement);
+    const nextIndex = event.key === "Home"
+      ? 0
+      : event.key === "End"
+        ? items.length - 1
+        : event.key === "ArrowUp"
+          ? (activeIndex <= 0 ? items.length - 1 : activeIndex - 1)
+          : (activeIndex + 1) % items.length;
+    items[nextIndex]?.focus();
   }
 
   function clearDragState() {
@@ -274,6 +355,37 @@ export function DocumentTree({
     else if (clientY > treeRect.bottom - edge) treeElement.scrollTop += 18;
   }
 
+  function resolveDropTargetAtPoint(
+    sourceDocumentId: string,
+    clientX: number,
+    clientY: number,
+  ) {
+    const targetElement = document
+      .elementFromPoint(clientX, clientY)
+      ?.closest<HTMLElement>("[data-document-id]");
+    if (targetElement) {
+      return resolveDropTarget(
+        sourceDocumentId,
+        targetElement.dataset.documentId ?? "",
+        clientY,
+        targetElement,
+      );
+    }
+
+    // Auto-scrolling can move the row out from under a stationary pointer
+    // between two move events. Keep the last valid row while the pointer is
+    // still inside the tree instead of silently turning a valid drop into a
+    // no-op. Leaving the tree (or hovering an explicitly invalid row above)
+    // still clears the target.
+    const treeRect = treeRef.current?.getBoundingClientRect();
+    const insideTree = treeRect
+      && clientX >= treeRect.left
+      && clientX <= treeRect.right
+      && clientY >= treeRect.top
+      && clientY <= treeRect.bottom;
+    return insideTree ? dropTargetRef.current : null;
+  }
+
   async function commitReorder(
     sourceDocumentId: string,
     target: { documentId: string; position: DocumentTreeDropPosition } | null,
@@ -294,8 +406,54 @@ export function DocumentTree({
     }
   }
 
+  function siblingReorderTarget(documentId: string, direction: -1 | 1) {
+    const source = documentsById.get(documentId);
+    if (!source) return null;
+    const siblings = documents
+      .filter((candidate) => candidate.parentDocumentId === source.parentDocumentId)
+      .sort((left, right) => left.treeOrder - right.treeOrder
+        || left.title.localeCompare(right.title, localeTag(locale)));
+    const sourceIndex = siblings.findIndex((candidate) => candidate.id === documentId);
+    const target = siblings[sourceIndex + direction];
+    if (!target) return null;
+    return {
+      documentId: target.id,
+      position: direction < 0 ? "before" as const : "after" as const,
+    };
+  }
+
+  function moveAmongSiblings(documentId: string, direction: -1 | 1) {
+    const target = siblingReorderTarget(documentId, direction);
+    if (!target || reorderPending) return;
+    closeMenu(true);
+    void commitReorder(documentId, target);
+  }
+
+  function indentReorderTarget(documentId: string) {
+    const previousSibling = siblingReorderTarget(documentId, -1);
+    return previousSibling
+      ? { documentId: previousSibling.documentId, position: "inside" as const }
+      : null;
+  }
+
+  function outdentReorderTarget(documentId: string) {
+    const source = documentsById.get(documentId);
+    if (!source?.parentDocumentId) return null;
+    const parent = documentsById.get(source.parentDocumentId);
+    return parent ? { documentId: parent.id, position: "after" as const } : null;
+  }
+
+  function moveToHierarchyTarget(
+    documentId: string,
+    target: { documentId: string; position: DocumentTreeDropPosition } | null,
+  ) {
+    if (!target || reorderPending) return;
+    closeMenu(true);
+    void commitReorder(documentId, target);
+  }
+
   function startPointerReorder(
-    event: ReactPointerEvent<HTMLDivElement>,
+    event: ReactPointerEvent<HTMLElement>,
     documentId: string,
   ) {
     if (
@@ -306,19 +464,45 @@ export function DocumentTree({
       || !event.isPrimary
       || event.button !== 0
     ) return;
-    const target = event.target as Element;
-    if (target.closest("[data-document-tree-action]")) return;
-
     dragInputRef.current = "pointer";
     const pointerId = event.pointerId;
     const startX = event.clientX;
     const startY = event.clientY;
+    const captureTarget = event.currentTarget;
     let active = false;
 
+    // Touch drag owns gestures only on the dedicated handle. Capturing at
+    // pointerdown prevents iOS/WebKit from losing the gesture when the finger
+    // leaves the small handle while the rest of the row remains scrollable.
+    event.preventDefault();
+    try {
+      captureTarget.setPointerCapture(pointerId);
+    } catch {
+      // Some synthetic test events cannot establish capture. The window
+      // listeners below still provide a safe fallback for those events.
+    }
+
+    const releaseCapture = () => {
+      try {
+        if (captureTarget.hasPointerCapture(pointerId)) {
+          captureTarget.releasePointerCapture(pointerId);
+        }
+      } catch {
+        // The browser may already have released capture after pointercancel.
+      }
+    };
+
+    let cleaned = false;
     const removeListeners = () => {
+      if (cleaned) return;
+      cleaned = true;
       window.removeEventListener("pointermove", move);
       window.removeEventListener("pointerup", finish);
       window.removeEventListener("pointercancel", cancel);
+      releaseCapture();
+      if (activeDragCleanupRef.current === removeListeners) {
+        activeDragCleanupRef.current = null;
+      }
     };
     const move = (moveEvent: PointerEvent) => {
       if (moveEvent.pointerId !== pointerId) return;
@@ -331,12 +515,11 @@ export function DocumentTree({
         setReorderError("");
       }
       moveEvent.preventDefault();
-      const targetElement = document
-        .elementFromPoint(moveEvent.clientX, moveEvent.clientY)
-        ?.closest<HTMLElement>("[data-document-id]");
-      const nextTarget = targetElement
-        ? resolveDropTarget(documentId, targetElement.dataset.documentId ?? "", moveEvent.clientY, targetElement)
-        : null;
+      const nextTarget = resolveDropTargetAtPoint(
+        documentId,
+        moveEvent.clientX,
+        moveEvent.clientY,
+      );
       dropTargetRef.current = nextTarget;
       setDropTarget((current) => current && nextTarget
         && current.documentId === nextTarget.documentId
@@ -351,7 +534,11 @@ export function DocumentTree({
       dragInputRef.current = null;
       if (!active) return;
       finishEvent.preventDefault();
-      const finalTarget = dropTargetRef.current;
+      const finalTarget = resolveDropTargetAtPoint(
+        documentId,
+        finishEvent.clientX,
+        finishEvent.clientY,
+      );
       window.setTimeout(() => {
         suppressNavigationRef.current = false;
       }, 0);
@@ -368,6 +555,7 @@ export function DocumentTree({
     window.addEventListener("pointermove", move, { passive: false });
     window.addEventListener("pointerup", finish, { passive: false });
     window.addEventListener("pointercancel", cancel);
+    activeDragCleanupRef.current = removeListeners;
   }
 
   function startMouseReorder(
@@ -383,9 +571,15 @@ export function DocumentTree({
     const startY = event.clientY;
     let active = false;
 
+    let cleaned = false;
     const removeListeners = () => {
+      if (cleaned) return;
+      cleaned = true;
       window.removeEventListener("mousemove", move);
       window.removeEventListener("mouseup", finish);
+      if (activeDragCleanupRef.current === removeListeners) {
+        activeDragCleanupRef.current = null;
+      }
     };
     const move = (moveEvent: MouseEvent) => {
       if (!active && Math.hypot(moveEvent.clientX - startX, moveEvent.clientY - startY) < 6) return;
@@ -397,12 +591,11 @@ export function DocumentTree({
         setReorderError("");
       }
       moveEvent.preventDefault();
-      const targetElement = document
-        .elementFromPoint(moveEvent.clientX, moveEvent.clientY)
-        ?.closest<HTMLElement>("[data-document-id]");
-      const nextTarget = targetElement
-        ? resolveDropTarget(documentId, targetElement.dataset.documentId ?? "", moveEvent.clientY, targetElement)
-        : null;
+      const nextTarget = resolveDropTargetAtPoint(
+        documentId,
+        moveEvent.clientX,
+        moveEvent.clientY,
+      );
       dropTargetRef.current = nextTarget;
       setDropTarget((current) => current && nextTarget
         && current.documentId === nextTarget.documentId
@@ -416,7 +609,11 @@ export function DocumentTree({
       dragInputRef.current = null;
       if (!active) return;
       finishEvent.preventDefault();
-      const finalTarget = dropTargetRef.current;
+      const finalTarget = resolveDropTargetAtPoint(
+        documentId,
+        finishEvent.clientX,
+        finishEvent.clientY,
+      );
       window.setTimeout(() => {
         suppressNavigationRef.current = false;
       }, 0);
@@ -425,6 +622,7 @@ export function DocumentTree({
 
     window.addEventListener("mousemove", move, { passive: false });
     window.addEventListener("mouseup", finish, { passive: false });
+    activeDragCleanupRef.current = removeListeners;
   }
 
   function renderNode(node: DocumentTreeNode, depth: number) {
@@ -434,14 +632,13 @@ export function DocumentTree({
     return (
       <div className={styles.pageTreeBranch} key={node.id}>
         <div
-          className={`${styles.pageTreeRow} ${onRename || onDelete ? styles.pageTreeRowWithMenu : ""} ${isActive ? styles.pageTreeActive : ""}`}
+          className={`${styles.pageTreeRow} ${onRename || onDelete || onReorder ? styles.pageTreeRowWithMenu : ""} ${isActive ? styles.pageTreeActive : ""}`}
           data-active-document={isActive ? "true" : undefined}
           data-document-id={node.id}
           data-reorderable={onReorder ? "true" : undefined}
           data-dragging={draggingDocumentId === node.id ? "true" : undefined}
           data-drop-position={dropTarget?.documentId === node.id ? dropTarget.position : undefined}
           aria-grabbed={onReorder ? draggingDocumentId === node.id : undefined}
-          onPointerDown={(event) => startPointerReorder(event, node.id)}
           onMouseDown={(event) => startMouseReorder(event, node.id)}
           style={{ paddingLeft: `${6 + depth * 15}px` }}
         >
@@ -493,6 +690,16 @@ export function DocumentTree({
               <span>{node.title}</span>
             </Link>
           )}
+          {onReorder && (
+            <span
+              className={styles.pageTreeDragHandle}
+              data-document-tree-drag-handle
+              onPointerDown={(event) => startPointerReorder(event, node.id)}
+              aria-hidden="true"
+            >
+              <GripVertical size={15} />
+            </span>
+          )}
           {onCreateChild && (
             <button
               type="button"
@@ -505,7 +712,7 @@ export function DocumentTree({
               <Plus size={14} />
             </button>
           )}
-          {(onRename || onDelete) && (
+          {(onRename || onDelete || onReorder) && (
             <button
               type="button"
               className={styles.pageTreeMore}
@@ -540,24 +747,60 @@ export function DocumentTree({
         {tree.map((node) => renderNode(node, 0))}
         {reorderError && <p className={styles.pageTreeError} role="alert">{reorderError}</p>}
       </nav>
-      {menu && (onRename || onDelete) && (
+      {menu && (onRename || onDelete || onReorder) && (
         <div
           ref={menuRef}
           className={styles.pageTreeMenuDropdown}
           role="menu"
+          tabIndex={-1}
+          onKeyDown={handleMenuKeyDown}
           style={{ top: menu.top, left: menu.left }}
         >
+          {onReorder && (
+            <>
+              <button
+                type="button"
+                role="menuitem"
+                disabled={!siblingReorderTarget(menu.documentId, -1) || reorderPending}
+                onClick={() => moveAmongSiblings(menu.documentId, -1)}
+              ><ChevronUp size={15} /><span>{copy.moveUp}</span></button>
+              <button
+                type="button"
+                role="menuitem"
+                disabled={!siblingReorderTarget(menu.documentId, 1) || reorderPending}
+                onClick={() => moveAmongSiblings(menu.documentId, 1)}
+              ><ChevronDown size={15} /><span>{copy.moveDown}</span></button>
+              <button
+                type="button"
+                role="menuitem"
+                disabled={!indentReorderTarget(menu.documentId) || reorderPending}
+                onClick={() => moveToHierarchyTarget(
+                  menu.documentId,
+                  indentReorderTarget(menu.documentId),
+                )}
+              ><IndentIncrease size={15} /><span>{copy.moveIntoPrevious}</span></button>
+              <button
+                type="button"
+                role="menuitem"
+                disabled={!outdentReorderTarget(menu.documentId) || reorderPending}
+                onClick={() => moveToHierarchyTarget(
+                  menu.documentId,
+                  outdentReorderTarget(menu.documentId),
+                )}
+              ><IndentDecrease size={15} /><span>{copy.moveOut}</span></button>
+            </>
+          )}
           {onRename && (
             <button type="button" role="menuitem" onClick={() => {
               const documentId = menu.documentId;
-              setMenu(null);
+              closeMenu();
               onRename(documentId);
             }}><PencilLine size={15} /><span>{copy.rename}</span></button>
           )}
           {onDelete && (
             <button type="button" role="menuitem" className={styles.pageTreeMenuDanger} onClick={() => {
               const documentId = menu.documentId;
-              setMenu(null);
+              closeMenu();
               onDelete(documentId);
             }}><Trash2 size={15} /><span>{copy.delete}</span></button>
           )}

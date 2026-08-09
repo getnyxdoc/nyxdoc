@@ -642,13 +642,21 @@ export function resolveMcpOAuthIdentity(
   if (!grant || grant.status !== "active" || grant.revoked_at) {
     throw new McpOAuthError("UNAUTHORIZED", "This OAuth connection is not authorized in Nyxdoc.");
   }
+  if (!listMcpOAuthConsentAgents(database, input.userId).some(
+    (agent) => agent.id === grant.agent_id,
+  )) {
+    throw new McpOAuthError(
+      "UNAUTHORIZED",
+      "The OAuth user no longer has access to the selected Nyxdoc agent.",
+    );
+  }
   const tokenScopes = validateApiScopeDependencies(parseApiScopes(input.tokenScopes));
   const grantedScopes = parseApiScopes(grant.scopes_json);
   const effectiveScopes = tokenScopes.filter((scope) => grantedScopes.includes(scope));
   const identity = authenticateAgentCredential(database, grant.credential_id, {
     workspaceId: input.workspaceId,
     clientIp: input.clientIp,
-    scopeOverride: effectiveScopes,
+    scopeCeiling: effectiveScopes,
   });
   if (identity.globalAgentId !== grant.agent_id) {
     throw new McpOAuthError("UNAUTHORIZED", "The OAuth agent binding is invalid.");

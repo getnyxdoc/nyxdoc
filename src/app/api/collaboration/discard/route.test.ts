@@ -65,6 +65,7 @@ describe("human discard route", () => {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
+        requestId: "human-discard-request-001",
         documentId,
         expectedGeneration: 3,
         expectedDraftVersion: 8,
@@ -79,6 +80,7 @@ describe("human discard route", () => {
       expectedGeneration: 3,
       expectedDraftVersion: 8,
       expectedBaseRevision: 12,
+      requestId: "human-discard-request-001",
       actor: expect.objectContaining({
         type: "human",
         userId: "user-1",

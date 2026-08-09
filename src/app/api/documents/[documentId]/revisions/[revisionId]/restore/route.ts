@@ -35,6 +35,7 @@ export async function POST(
       expectedGeneration: body.expectedGeneration,
       expectedDraftVersion: body.expectedDraftVersion,
       expectedBaseRevision: body.baseRevision,
+      requestId: body.requestId,
       actor,
     }));
   } catch (error) {

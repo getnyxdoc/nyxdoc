@@ -30,6 +30,7 @@ export async function POST(request: Request) {
       expectedGeneration: body.expectedGeneration,
       expectedDraftVersion: body.expectedDraftVersion,
       expectedBaseRevision: body.expectedBaseRevision,
+      requestId: body.requestId,
       actor: {
         type: "human",
         userId: actor.userId,

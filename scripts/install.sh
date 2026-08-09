@@ -53,7 +53,20 @@ fi
 
 chmod 600 "$NYXDOC_ENV_FILE"
 nyxdoc_validate_environment
+if nyxdoc_env_remove NYXDOC_SOURCE_REVISION; then
+  nyxdoc_info "Removed legacy NYXDOC_SOURCE_REVISION override; image provenance is authoritative."
+fi
 mkdir -p "$(nyxdoc_backup_host_path)"
+
+# Existing installations from before v0.25.18 did not record which Git
+# lineage they intended to follow. Preserve their established behavior once,
+# then persist it so future updates never infer authority from an image alone.
+configured_image="$(nyxdoc_env_get NYXDOC_IMAGE)"
+authority="$(nyxdoc_update_authority "$configured_image" "")"
+if ! nyxdoc_update_authority_is_explicit; then
+  nyxdoc_env_set NYXDOC_UPDATE_AUTHORITY "$authority"
+  nyxdoc_info "Persisted NYXDOC_UPDATE_AUTHORITY=$authority for deterministic updates."
+fi
 
 version="$(nyxdoc_package_version)"
 source_revision="$(nyxdoc_source_revision)"
@@ -64,26 +77,49 @@ if $build_local; then
   nyxdoc_compose config --quiet
   nyxdoc_compose build --build-arg "SOURCE_REVISION=$source_revision"
 else
-  image="$(nyxdoc_env_get NYXDOC_IMAGE)"
-  case "$image" in
+  configured_image="$(nyxdoc_env_get NYXDOC_IMAGE)"
+  image="$configured_image"
+  case "$configured_image" in
     ""|nyxdoc-app:*|ghcr.io/getnyxdoc/nyxdoc:*)
       image="ghcr.io/getnyxdoc/nyxdoc:${version}"
-      nyxdoc_env_set NYXDOC_IMAGE "$image"
       ;;
   esac
-  nyxdoc_info "Pulling $image."
-  nyxdoc_compose config --quiet
-  nyxdoc_compose pull app collaboration gateway
+
+  if nyxdoc_is_official_release_image "$image"; then
+    [[ "$source_revision" =~ ^[0-9a-f]{40}$ ]] \
+      || nyxdoc_die "Verified official image installation requires a Git checkout at the release revision."
+    image="$(nyxdoc_pin_official_release_image "$image")"
+    nyxdoc_info "Pulling verified official image $image."
+    NYXDOC_IMAGE="$image" nyxdoc_compose config --quiet
+    NYXDOC_IMAGE="$image" nyxdoc_compose pull app collaboration gateway
+    nyxdoc_verify_official_image_revision "$image" "$source_revision"
+    # Persist only the immutable, provenance-verified digest. A failed pull or
+    # verification must never replace a previously known-good image setting.
+    nyxdoc_env_set NYXDOC_IMAGE "$image"
+  else
+    nyxdoc_info "Pulling $image."
+    NYXDOC_IMAGE="$image" nyxdoc_compose config --quiet
+    NYXDOC_IMAGE="$image" nyxdoc_compose pull app collaboration gateway
+  fi
+fi
+
+running_data_containers="$(nyxdoc_running_containers_using_data_volume)"
+if [ -n "$running_data_containers" ]; then
+  nyxdoc_services_use_image "$image" \
+    || nyxdoc_die "The Nyxdoc data volume is in use by different or incomplete services. Use ./scripts/update.sh for upgrades, or stop the conflicting containers first."
+  nyxdoc_info "The selected image is already running; no offline database migration is required."
+else
+  nyxdoc_run_offline_database_migrations
 fi
 
 nyxdoc_compose up -d --no-build --remove-orphans
 nyxdoc_wait_for_services
+nyxdoc_clear_update_state
 nyxdoc_compose ps
 
 http_port="$(nyxdoc_env_get NYXDOC_HTTP_PORT)"
 http_port="${http_port:-3191}"
-data_volume="$(nyxdoc_env_get NYXDOC_DATA_VOLUME)"
-data_volume="${data_volume:-nyxdoc_data}"
+data_volume="$(nyxdoc_data_volume_name)"
 nyxdoc_info "Installation complete. Open http://localhost:${http_port}"
 nyxdoc_info "Data and media use the Docker volume $data_volume."
 nyxdoc_info "Verified backups are stored at $(nyxdoc_backup_host_path)."

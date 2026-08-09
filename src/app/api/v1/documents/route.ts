@@ -7,7 +7,6 @@ import { apiErrorResponse } from "@/lib/http/errors";
 import { authenticateRequestApiToken } from "@/lib/tokens/request";
 import {
   requireTokenPermission,
-  resolveTokenCreateParent,
   resolveTokenReadRoot,
   tokenDocumentActor,
 } from "@/lib/tokens/service";
@@ -50,12 +49,11 @@ export async function POST(request: Request) {
     const identity = authenticateRequestApiToken(sqlite, request);
     requireTokenPermission(identity, "documents:write", "documents.create");
     const body = agentCreateDocumentSchema.parse(await request.json());
-    const parentDocumentId = resolveTokenCreateParent(sqlite, identity, body.parentDocumentId);
     const result = createDocument(
       sqlite,
       identity.workspaceId,
       tokenDocumentActor(identity, "api"),
-      { ...body, parentDocumentId },
+      body,
     );
     return Response.json(result, { status: 201 });
   } catch (error) {

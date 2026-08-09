@@ -68,6 +68,7 @@ import {
   requestIdSchema,
 } from "@/lib/documents/schemas";
 import {
+  applyDocumentPatch,
   createDocument,
   diffDocumentRevisions,
   getChanges,
@@ -88,8 +89,10 @@ import { getDocumentWebUrl } from "@/lib/documents/web-url";
 import {
   NYXDOC_MAX_DOCUMENT_TEXT_LENGTH,
   NYXDOC_MAX_TOP_LEVEL_BLOCKS,
+  nyxdocBlockText,
   nyxdocDocumentV2Schema,
   parseNyxdocDocumentV2,
+  type NyxdocDocumentV2,
 } from "@/lib/editor/schema";
 import {
   createAgentMediaUploadTicket,
@@ -954,7 +957,90 @@ function mcpErrorMessage(code: string) {
     DRAFT_VERSION_CONFLICT: "The shared draft version or generation changed. Read the working document again before retrying.",
     COLLABORATION_UNAVAILABLE: "The shared draft service is temporarily unavailable.",
     REVISION_CONFLICT: "The document revision changed. Read the current revision before retrying.",
+    INTERNAL_ERROR: "The requested action could not be completed.",
   }[code] ?? "The requested action could not be completed.";
+}
+
+function mcpServiceErrorCode(error: unknown) {
+  if (error instanceof PresenceError) return "FORBIDDEN";
+  if (
+    error instanceof DocumentServiceError
+    || error instanceof ApiTokenError
+    || error instanceof AuthorizationError
+    || error instanceof AdminActionRequestError
+    || error instanceof TaskServiceError
+    || error instanceof MediaServiceError
+  ) return error.code;
+  return null;
+}
+
+function renderReadToolError(error: unknown) {
+  if (error instanceof z.ZodError) {
+    const structuredContent = {
+      error: mcpErrorMessage("INVALID_INPUT"),
+      code: "INVALID_INPUT",
+      errorSource: "runtime_validation",
+    };
+    return {
+      isError: true,
+      content: [{ type: "text" as const, text: error.message }],
+      structuredContent,
+    };
+  }
+  const serviceCode = mcpServiceErrorCode(error);
+  if (serviceCode !== null) {
+    const structuredContent = {
+      error: mcpErrorMessage(serviceCode),
+      code: serviceCode,
+      errorSource: "service",
+    };
+    return {
+      isError: true,
+      content: [{
+        type: "text" as const,
+        text: error instanceof Error ? error.message : mcpErrorMessage(serviceCode),
+      }],
+      structuredContent,
+    };
+  }
+  const structuredContent = {
+    error: mcpErrorMessage("INTERNAL_ERROR"),
+    code: "INTERNAL_ERROR",
+    errorSource: "internal",
+  };
+  return {
+    isError: true,
+    content: [{ type: "text" as const, text: mcpErrorMessage("INTERNAL_ERROR") }],
+    structuredContent,
+  };
+}
+
+function normalizeMcpPageHeading(value: string) {
+  return value
+    .normalize("NFKC")
+    .replace(/\s+/gu, " ")
+    .trim()
+    .toLowerCase();
+}
+
+function assertMcpTitleIsNotLeadingH1(title: string, content: NyxdocDocumentV2) {
+  const firstH1Index = content.blocks.findIndex((block) => block.type === "h1");
+  const firstH1 = content.blocks[firstH1Index];
+  if (!firstH1 || firstH1.type !== "h1") return;
+  const normalizedTitle = normalizeMcpPageHeading(title);
+  if (
+    normalizedTitle.length > 0
+    && normalizedTitle === normalizeMcpPageHeading(nyxdocBlockText(firstH1))
+  ) {
+    throw new DocumentServiceError(
+      "INVALID_INPUT",
+      "The page title must not be repeated as the first H1 in the document body.",
+      {
+        field: `content.blocks[${firstH1Index}]`,
+        rule: "title_not_repeated_as_leading_h1",
+      },
+    );
+  }
 }
 
 async function renderMutationToolResult(
@@ -1051,6 +1137,32 @@ export function createNyxdocMcpServer(
     { name: "nyxdoc", version: capabilities.serverVersion },
     { instructions },
   );
+  type RegisteredTool = ReturnType<McpServer["registerTool"]>;
+  type ToolRegistrationConfig = {
+    annotations?: { readOnlyHint?: boolean };
+    [key: string]: unknown;
+  };
+  type GenericToolCallback = (...arguments_: unknown[]) => unknown;
+  const registerTool = server.registerTool.bind(server) as unknown as (
+    name: string,
+    config: ToolRegistrationConfig,
+    callback: GenericToolCallback,
+  ) => RegisteredTool;
+  server.registerTool = ((
+    name: string,
+    config: ToolRegistrationConfig,
+    callback: GenericToolCallback,
+  ) => {
+    const guardedCallback = async (...callbackArguments: unknown[]) => {
+      try {
+        return await Reflect.apply(callback, undefined, callbackArguments);
+      } catch (error) {
+        if (config.annotations?.readOnlyHint !== true) throw error;
+        return renderReadToolError(error);
+      }
+    };
+    return Reflect.apply(registerTool, undefined, [name, config, guardedCallback]);
+  }) as unknown as McpServer["registerTool"];
   const actor = tokenDocumentActor(identity, "mcp");
   const publicBaseUrl = getSiteSettings(database).publicBaseUrl;
   const documentWebUrl = (workspaceId: string, documentId: string) =>
@@ -1971,6 +2083,7 @@ export function createNyxdocMcpServer(
           sectionId,
           conversion.content,
         );
+        assertMcpTitleIsNotLeadingH1(workingDocument.title, proposedContent);
         const proposed = getDocumentSection(proposedContent, sectionId);
         const alreadyApplied = current.section.sectionHash === proposed.section.sectionHash;
         if (current.section.sectionHash !== expectedSectionHash && !alreadyApplied) {
@@ -2289,6 +2402,8 @@ export function createNyxdocMcpServer(
         workspaceIdentity,
         parentDocumentId,
       );
+      const parsedContent = parseNyxdocDocumentV2(content);
+      assertMcpTitleIsNotLeadingH1(title, parsedContent);
       const result = createDocument(database, workspaceIdentity.workspaceId, actor, {
         idempotencyOperation: "create_document",
         requestId,
@@ -2297,7 +2412,7 @@ export function createNyxdocMcpServer(
         documentType,
         workflowStatus,
         tags,
-        content: parseNyxdocDocumentV2(content),
+        content: parsedContent,
         summary,
       }) as unknown as Record<string, unknown>;
       return { workspaceId: workspaceIdentity.workspaceId, ...result };
@@ -2346,6 +2461,17 @@ export function createNyxdocMcpServer(
       requireTokenDocumentAccess(database, workspaceIdentity, documentId);
       requireTokenParentAccess(database, workspaceIdentity, parentDocumentId);
       const state = ensureCollaborationState(database, workspaceIdentity.workspaceId, documentId);
+      const parsedContent = content === undefined ? undefined : parseNyxdocDocumentV2(content);
+      if (title !== undefined || parsedContent !== undefined) {
+        const { workingDocument } = await collaboration.readWorking({
+          workspaceId: workspaceIdentity.workspaceId,
+          documentId,
+        });
+        assertMcpTitleIsNotLeadingH1(
+          title ?? workingDocument.title,
+          parsedContent ?? workingDocument.content,
+        );
+      }
       const result = await collaboration.replaceWorking({
         roomName: state.roomName,
         actor,
@@ -2357,7 +2483,7 @@ export function createNyxdocMcpServer(
           documentType,
           workflowStatus,
           tags,
-          content: content === undefined ? undefined : parseNyxdocDocumentV2(content),
+          content: parsedContent,
         },
       }) as unknown as Record<string, unknown>;
       return { workspaceId: workspaceIdentity.workspaceId, ...result };
@@ -2413,6 +2539,7 @@ export function createNyxdocMcpServer(
       const conversion = markdownToNyxdocWithReport(markdown, {
         idSeed: `${identity.id}:${workspaceIdentity.workspaceId}:${requestId}`,
       });
+      assertMcpTitleIsNotLeadingH1(title, conversion.content);
       const result = createDocument(database, workspaceIdentity.workspaceId, actor, {
         idempotencyOperation: "create_document_from_markdown",
         requestId,
@@ -2653,6 +2780,14 @@ export function createNyxdocMcpServer(
         idSeed: `${identity.id}:${workspaceIdentity.workspaceId}:${requestId}`,
       });
       const state = ensureCollaborationState(database, workspaceIdentity.workspaceId, documentId);
+      const { workingDocument } = await collaboration.readWorking({
+        workspaceId: workspaceIdentity.workspaceId,
+        documentId,
+      });
+      assertMcpTitleIsNotLeadingH1(
+        title ?? workingDocument.title,
+        conversion.content,
+      );
       const result = await collaboration.replaceWorking({
         roomName: state.roomName,
         actor,
@@ -2697,6 +2832,14 @@ export function createNyxdocMcpServer(
         requireTokenDocumentAccess(database, workspaceIdentity, documentId);
         const parsedOperations = z.array(documentPatchOperationSchema).min(1).max(100)
           .parse(operations);
+        const { workingDocument } = await collaboration.readWorking({
+          workspaceId: workspaceIdentity.workspaceId,
+          documentId,
+        });
+        assertMcpTitleIsNotLeadingH1(
+          workingDocument.title,
+          applyDocumentPatch(workingDocument.content, parsedOperations),
+        );
         const state = ensureCollaborationState(
           database,
           workspaceIdentity.workspaceId,

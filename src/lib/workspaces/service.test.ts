@@ -194,5 +194,8 @@ describe("workspace service", () => {
       backup_generation_id: "verified-backup-generation",
       document_count: 1,
     });
+    expect(database.prepare(
+      "SELECT COUNT(*) AS count FROM workspace_media_cleanup_queue WHERE workspace_id = ?",
+    ).get(workspace.id)).toEqual({ count: 0 });
   });
 });

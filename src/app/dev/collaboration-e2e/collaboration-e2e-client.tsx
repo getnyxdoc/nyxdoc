@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { UnifiedProvider } from "@platejs/yjs";
 import {
   slateNodesToInsertDelta,
@@ -100,6 +100,7 @@ export function CollaborationE2EClient() {
   const [ydocUpdateCount, setYdocUpdateCount] = useState(0);
   const ydoc = useMemo(() => new Y.Doc(), []);
   const provider = useMemo(() => memoryProvider(ydoc), [ydoc]);
+  const destroyYdocTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const collaboration = useMemo<NyxdocEditorCollaboration>(() => ({
     ydoc,
     roomName: "collaboration-e2e",
@@ -118,6 +119,10 @@ export function CollaborationE2EClient() {
   }), [provider, ydoc]);
 
   useEffect(() => {
+    if (destroyYdocTimerRef.current) {
+      clearTimeout(destroyYdocTimerRef.current);
+      destroyYdocTimerRef.current = null;
+    }
     const sharedContent = ydoc.get("content", Y.XmlText);
     const detectAndRepairSharedIds = (_update: Uint8Array, origin: unknown) => {
       setYdocUpdateCount((count) => count + 1);
@@ -138,7 +143,15 @@ export function CollaborationE2EClient() {
     ydoc.on("update", detectAndRepairSharedIds);
     return () => {
       ydoc.off("update", detectAndRepairSharedIds);
-      ydoc.destroy();
+      // React development StrictMode replays setup -> cleanup -> setup. Keep
+      // this fixture's Y.Doc reclaimable for that synchronous replay while
+      // still destroying it after a real page unmount.
+      const destroyTimer = setTimeout(() => {
+        if (destroyYdocTimerRef.current !== destroyTimer) return;
+        destroyYdocTimerRef.current = null;
+        ydoc.destroy();
+      }, 0);
+      destroyYdocTimerRef.current = destroyTimer;
     };
   }, [ydoc]);
 

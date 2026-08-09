@@ -1,19 +1,37 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
+import { readFileSync } from "node:fs";
+import * as Y from "yjs";
 import { afterEach, describe, expect, it } from "vitest";
+import { createCollaborationYDoc } from "@/lib/collaboration/drafts";
 import { openDatabase, type NyxDatabase } from "@/lib/db/client";
 import {
   APP_MIGRATIONS,
   appMigrationChecksum,
   getAppMigrationPlan,
+  isPristineDatabaseForInitialization,
   runAppMigrations,
 } from "@/lib/db/migrations";
 import { captureDatabaseFingerprint } from "@/lib/db/integrity";
+import { createDocument, updateDocument } from "@/lib/documents/service";
+import type { NyxdocDocumentV2 } from "@/lib/editor/schema";
 import { ensurePersonalWorkspace } from "@/lib/workspaces/bootstrap";
 import { authenticateApiToken, createWorkspaceToken } from "@/lib/tokens/service";
 import { createWorkspace } from "@/lib/workspaces/service";
 import { createTestDatabase, createTestUser } from "@/test/fixture";
 
 const databases: NyxDatabase[] = [];
+
+type FrozenMigrationLedger = {
+  format: string;
+  release: string;
+  sourceRevision: string;
+  checksums: Record<string, string>;
+};
+
+const V02517_MIGRATION_LEDGER = JSON.parse(readFileSync(
+  new URL("../../../scripts/test-fixtures/v0.25.17-migration-checksums.json", import.meta.url),
+  "utf8",
+)) as FrozenMigrationLedger;
 
 afterEach(() => {
   while (databases.length > 0) databases.pop()?.close();
@@ -32,6 +50,68 @@ function createUserTable(database: NyxDatabase) {
   `);
 }
 
+describe("pristine database initialization boundary", () => {
+  it("accepts only a database with no user state and an empty migration ledger", () => {
+    const database = openDatabase(":memory:");
+    databases.push(database);
+
+    expect(isPristineDatabaseForInitialization(database)).toBe(true);
+    getAppMigrationPlan(database);
+    expect(isPristineDatabaseForInitialization(database)).toBe(true);
+  });
+
+  it("rejects a recorded migration or any other application table", () => {
+    const migrated = openDatabase(":memory:");
+    databases.push(migrated);
+    getAppMigrationPlan(migrated);
+    migrated.prepare(
+      "INSERT INTO _nyxdoc_migrations (id, applied_at) VALUES ('existing', '2026-08-09T00:00:00.000Z')",
+    ).run();
+    expect(isPristineDatabaseForInitialization(migrated)).toBe(false);
+
+    const populated = openDatabase(":memory:");
+    databases.push(populated);
+    getAppMigrationPlan(populated);
+    populated.exec("CREATE TABLE user_state (id TEXT PRIMARY KEY)");
+    expect(isPristineDatabaseForInitialization(populated)).toBe(false);
+  });
+});
+
+function imageDocumentContent(mediaId: string): NyxdocDocumentV2 {
+  return {
+    schemaVersion: 2,
+    blocks: [{
+      id: randomUUID(),
+      type: "img",
+      mediaId,
+      url: `/api/media/${mediaId}`,
+      children: [{ text: "" }],
+    }],
+  };
+}
+
+function insertMigrationMediaAsset(
+  database: NyxDatabase,
+  workspaceId: string,
+  userId: string,
+) {
+  const mediaId = randomUUID();
+  database.prepare(
+    `INSERT INTO media_assets
+     (id, workspace_id, storage_key, sha256, mime_type, byte_size,
+      original_filename, uploaded_by_user_id, uploaded_by_token_id, created_at)
+     VALUES (?, ?, ?, ?, 'image/png', 1, NULL, ?, NULL, ?)`,
+  ).run(
+    mediaId,
+    workspaceId,
+    `${mediaId}.png`,
+    `sha-${mediaId}`,
+    userId,
+    "2026-08-09T00:00:00.000Z",
+  );
+  return mediaId;
+}
+
 function applyThrough(database: NyxDatabase, lastMigrationId: string) {
   database.exec(`
     CREATE TABLE _nyxdoc_migrations (
@@ -45,6 +125,7 @@ function applyThrough(database: NyxDatabase, lastMigrationId: string) {
   const applied: Array<(typeof APP_MIGRATIONS)[number]> = [];
   for (const migration of APP_MIGRATIONS) {
     database.exec(migration.sql);
+    migration.transform?.apply(database);
     record.run(migration.id);
     applied.push(migration);
     const hasChecksumLedger = Boolean(database.prepare(
@@ -65,7 +146,121 @@ function applyThrough(database: NyxDatabase, lastMigrationId: string) {
   throw new Error(`Unknown migration ${lastMigrationId}.`);
 }
 
+function createRevisionPointerMigrationFixture() {
+  const database = openDatabase(":memory:");
+  databases.push(database);
+  createUserTable(database);
+  applyThrough(database, "0042_bug_report_image_attachments");
+  const user = {
+    id: "revision-pointer-owner",
+    name: "Revision Pointer Owner",
+    email: "revision-pointer-owner@example.com",
+  };
+  database.prepare(
+    "INSERT INTO user (id, name, email, emailVerified, createdAt, updatedAt) VALUES (?, ?, ?, 1, 1, 1)",
+  ).run(user.id, user.name, user.email);
+  const firstWorkspace = ensurePersonalWorkspace(database, user);
+  const secondWorkspace = createWorkspace(database, user, "Revision Pointer Target");
+  const findDocument = database.prepare(
+    `SELECT document.id, document.current_revision_id AS revision_id,
+            revision.revision_number
+     FROM documents document
+     JOIN document_revisions revision ON revision.id = document.current_revision_id
+     WHERE document.workspace_id = ?
+     ORDER BY document.created_at, document.id
+     LIMIT 1`,
+  );
+  const firstDocument = findDocument.get(firstWorkspace.id) as {
+    id: string;
+    revision_id: string;
+    revision_number: number;
+  };
+  const secondDocument = findDocument.get(secondWorkspace.id) as {
+    id: string;
+    revision_id: string;
+    revision_number: number;
+  };
+  database.prepare(
+    `INSERT INTO document_collaboration_states
+     (document_id, workspace_id, generation, yjs_state, committed_yjs_state,
+      base_revision_id, base_revision_number, draft_version, committed_draft_version,
+      seeded_at, updated_at, committed_at)
+     VALUES (?, ?, 1, X'', X'', ?, ?, 0, 0, 'now', 'now', 'now')`,
+  ).run(
+    firstDocument.id,
+    firstWorkspace.id,
+    firstDocument.revision_id,
+    firstDocument.revision_number,
+  );
+  return {
+    database,
+    user,
+    firstWorkspace,
+    secondWorkspace,
+    firstDocument,
+    secondDocument,
+  };
+}
+
 describe("application migration safety", () => {
+  it("accepts the frozen v0.25.17 checksum ledger and migrates it through 0046", () => {
+    expect(V02517_MIGRATION_LEDGER).toMatchObject({
+      format: "nyxdoc-migration-checksums/v0.25.17",
+      release: "v0.25.17",
+      sourceRevision: "2612385641bcb64cb29f5909c94b8f735068c066",
+    });
+    expect(Object.keys(V02517_MIGRATION_LEDGER.checksums)).toHaveLength(42);
+
+    const database = openDatabase(":memory:");
+    databases.push(database);
+    createUserTable(database);
+    applyThrough(database, "0042_bug_report_image_attachments");
+    const replaceChecksum = database.prepare(
+      `UPDATE _nyxdoc_migration_checksums
+       SET checksum_sha256 = ?, source_revision = ?
+       WHERE migration_id = ?`,
+    );
+    for (const [id, checksum] of Object.entries(V02517_MIGRATION_LEDGER.checksums)) {
+      replaceChecksum.run(checksum, V02517_MIGRATION_LEDGER.sourceRevision, id);
+    }
+
+    const historicalMigrations = APP_MIGRATIONS.filter(
+      (migration) => migration.id in V02517_MIGRATION_LEDGER.checksums,
+    );
+    expect(Object.fromEntries(historicalMigrations.map((migration) => [
+      migration.id,
+      appMigrationChecksum(migration),
+    ]))).toEqual(V02517_MIGRATION_LEDGER.checksums);
+    expect(getAppMigrationPlan(database).pending.map((migration) => migration.id)).toEqual([
+      "0043_document_revision_pointer_guards",
+      "0044_document_media_binding_provenance",
+      "0045_collaboration_backup_checkpoint",
+      "0046_workspace_media_cleanup_queue",
+    ]);
+    expect(runAppMigrations(database, { sourceRevision: "candidate-after-v0.25.17" }).appliedIds)
+      .toEqual([
+        "0043_document_revision_pointer_guards",
+        "0044_document_media_binding_provenance",
+        "0045_collaboration_backup_checkpoint",
+        "0046_workspace_media_cleanup_queue",
+      ]);
+    expect(getAppMigrationPlan(database).pending).toEqual([]);
+  });
+
+  it("uses a separate checksum version for executable transforms", () => {
+    const transformed = APP_MIGRATIONS.find(
+      (migration) => migration.id === "0044_document_media_binding_provenance",
+    );
+    expect(transformed?.transform).toBeDefined();
+    expect(appMigrationChecksum(transformed!)).toBe(
+      "5ffe72b23fa3624f79640cc95c2b57a90aa373f00095977a200c5532d5620d04",
+    );
+    expect(appMigrationChecksum({
+      id: transformed!.id,
+      sql: transformed!.sql,
+    })).not.toBe(appMigrationChecksum(transformed!));
+  });
+
   it("records immutable checksums and a successful preservation receipt", () => {
     const database = createTestDatabase();
     databases.push(database);
@@ -139,6 +334,10 @@ describe("application migration safety", () => {
       "0040_media_upload_ticket_binding_guards",
       "0041_document_tree_grants_fail_closed",
       "0042_bug_report_image_attachments",
+      "0043_document_revision_pointer_guards",
+      "0044_document_media_binding_provenance",
+      "0045_collaboration_backup_checkpoint",
+      "0046_workspace_media_cleanup_queue",
     ]);
     expect(after).toEqual(before);
     expect(database.prepare("SELECT COUNT(*) AS count FROM documents").get()).toEqual({ count: 1 });
@@ -202,6 +401,330 @@ describe("application migration safety", () => {
       owner_user_id: "u1",
       organization_id: null,
     }]);
+  });
+
+  it("adds revision pointer guards without rewriting valid canonical or draft rows", () => {
+    const fixture = createRevisionPointerMigrationFixture();
+    const { database, firstDocument, firstWorkspace, secondDocument, secondWorkspace, user } = fixture;
+    const before = captureDatabaseFingerprint(database);
+
+    expect(runAppMigrations(database, { sourceRevision: "revision-pointer-guard-test" }).appliedIds)
+      .toEqual([
+        "0043_document_revision_pointer_guards",
+        "0044_document_media_binding_provenance",
+        "0045_collaboration_backup_checkpoint",
+        "0046_workspace_media_cleanup_queue",
+      ]);
+    expect(captureDatabaseFingerprint(database, before)).toEqual(before);
+    expect(database.prepare(
+      `SELECT name FROM sqlite_master
+       WHERE type = 'trigger' AND name IN (
+         'documents_current_revision_insert',
+         'documents_current_revision_update',
+         'document_revisions_current_pointer_update',
+         'document_revisions_current_pointer_delete',
+         'collaboration_state_base_revision_insert',
+         'collaboration_state_base_revision_update',
+         'document_revisions_collaboration_pointer_update',
+         'document_revisions_collaboration_pointer_delete',
+         'documents_collaboration_workspace_update'
+       ) ORDER BY name`,
+    ).all()).toHaveLength(9);
+
+    expect(() => database.prepare(
+      `INSERT INTO documents
+       (id, workspace_id, title, slug, current_revision_id, created_by_user_id,
+        created_at, updated_at)
+       VALUES ('invalid-current-insert', ?, 'Invalid', 'invalid-current-insert', ?, ?, 'now', 'now')`,
+    ).run(firstWorkspace.id, secondDocument.revision_id, user.id))
+      .toThrow(/current revision must belong to the same document/);
+    expect(() => database.prepare(
+      "UPDATE documents SET current_revision_id = ? WHERE id = ?",
+    ).run(secondDocument.revision_id, firstDocument.id))
+      .toThrow(/current revision must belong to the same document/);
+    expect(() => database.prepare(
+      `INSERT INTO document_collaboration_states
+       (document_id, workspace_id, generation, yjs_state, committed_yjs_state,
+        base_revision_id, base_revision_number, draft_version, committed_draft_version,
+        seeded_at, updated_at, committed_at)
+       VALUES (?, ?, 1, X'', X'', ?, ?, 0, 0, 'now', 'now', 'now')`,
+    ).run(
+      secondDocument.id,
+      firstWorkspace.id,
+      secondDocument.revision_id,
+      secondDocument.revision_number,
+    )).toThrow(/collaboration state must belong to the document workspace/);
+    expect(() => database.prepare(
+      `INSERT INTO document_collaboration_states
+       (document_id, workspace_id, generation, yjs_state, committed_yjs_state,
+        base_revision_id, base_revision_number, draft_version, committed_draft_version,
+        seeded_at, updated_at, committed_at)
+       VALUES (?, ?, 1, X'', X'', ?, ?, 0, 0, 'now', 'now', 'now')`,
+    ).run(
+      secondDocument.id,
+      secondWorkspace.id,
+      firstDocument.revision_id,
+      firstDocument.revision_number,
+    )).toThrow(/base revision id and number must match the same document/);
+    expect(() => database.prepare(
+      `UPDATE document_collaboration_states
+       SET base_revision_id = ?, base_revision_number = ?
+       WHERE document_id = ?`,
+    ).run(firstDocument.revision_id, firstDocument.revision_number + 1, firstDocument.id))
+      .toThrow(/base revision id and number must match the same document/);
+    expect(() => database.prepare(
+      `UPDATE document_collaboration_states
+       SET base_revision_id = NULL, base_revision_number = 1
+       WHERE document_id = ?`,
+    ).run(firstDocument.id)).toThrow(/base revision id and number must match the same document/);
+    expect(() => database.prepare(
+      "UPDATE document_revisions SET revision_number = revision_number + 1 WHERE id = ?",
+    ).run(firstDocument.revision_id)).toThrow(/base revision cannot be moved or renumbered/);
+    expect(() => database.prepare(
+      "DELETE FROM document_revisions WHERE id = ?",
+    ).run(firstDocument.revision_id)).toThrow(/revision cannot be deleted/);
+
+    database.prepare("UPDATE documents SET slug = 'revision-pointer-transfer-source' WHERE id = ?")
+      .run(firstDocument.id);
+    database.prepare("UPDATE documents SET workspace_id = ? WHERE id = ?")
+      .run(secondWorkspace.id, firstDocument.id);
+    expect(database.prepare(
+      "SELECT workspace_id FROM document_collaboration_states WHERE document_id = ?",
+    ).get(firstDocument.id)).toEqual({ workspace_id: secondWorkspace.id });
+
+    expect(() => database.prepare("DELETE FROM documents WHERE id = ?").run(firstDocument.id))
+      .not.toThrow();
+    expect(database.prepare(
+      "SELECT 1 FROM document_revisions WHERE document_id = ?",
+    ).get(firstDocument.id)).toBeUndefined();
+    expect(database.prepare(
+      "SELECT 1 FROM document_collaboration_states WHERE document_id = ?",
+    ).get(firstDocument.id)).toBeUndefined();
+  });
+
+  it("backfills populated legacy media bindings without conflating current drafts and retained revisions", () => {
+    const database = openDatabase(":memory:");
+    databases.push(database);
+    createUserTable(database);
+    applyThrough(database, "0043_document_revision_pointer_guards");
+    const user = {
+      id: "media-provenance-owner",
+      name: "Media Provenance Owner",
+      email: "media-provenance-owner@example.com",
+    };
+    database.prepare(
+      "INSERT INTO user (id, name, email, emailVerified, createdAt, updatedAt) VALUES (?, ?, ?, 1, 1, 1)",
+    ).run(user.id, user.name, user.email);
+    const workspace = ensurePersonalWorkspace(database, user);
+    const historyMediaId = insertMigrationMediaAsset(database, workspace.id, user.id);
+    const canonicalMediaId = insertMigrationMediaAsset(database, workspace.id, user.id);
+    const draftMediaId = insertMigrationMediaAsset(database, workspace.id, user.id);
+    const staleMediaId = insertMigrationMediaAsset(database, workspace.id, user.id);
+    const actor = {
+      type: "human" as const,
+      userId: user.id,
+      label: user.name,
+      source: "web" as const,
+    };
+    const created = createDocument(database, workspace.id, actor, {
+      title: "Legacy media provenance",
+      content: imageDocumentContent(historyMediaId),
+    }).document;
+    const updated = updateDocument(database, workspace.id, actor, created.id, {
+      baseRevision: created.revisionNumber,
+      content: imageDocumentContent(canonicalMediaId),
+    }).document;
+    const draft = createCollaborationYDoc({
+      title: updated.title,
+      parentDocumentId: updated.parentDocumentId,
+      documentType: updated.documentType,
+      workflowStatus: updated.workflowStatus,
+      tags: updated.tags,
+      content: imageDocumentContent(draftMediaId),
+    });
+    const draftState = Buffer.from(Y.encodeStateAsUpdate(draft));
+    database.prepare(
+      `INSERT INTO document_collaboration_states
+       (document_id, workspace_id, generation, yjs_state, committed_yjs_state,
+        base_revision_id, base_revision_number, draft_version, committed_draft_version,
+        seeded_at, updated_at, committed_at)
+       VALUES (?, ?, 1, ?, ?, ?, ?, 1, 0, 'now', 'now', 'now')`,
+    ).run(
+      updated.id,
+      workspace.id,
+      draftState,
+      draftState,
+      updated.revisionId,
+      updated.revisionNumber,
+    );
+    database.prepare(
+      `INSERT INTO document_media_bindings
+       (workspace_id, document_id, media_id, created_at)
+       VALUES (?, ?, ?, '2026-08-09T00:00:00.000Z')`,
+    ).run(workspace.id, updated.id, staleMediaId);
+    // A normal draft upload already had a legacy binding before 0044; the
+    // migration must reclassify it without creating or deleting any rows.
+    database.prepare(
+      `INSERT INTO document_media_bindings
+       (workspace_id, document_id, media_id, created_at)
+       VALUES (?, ?, ?, '2026-08-09T00:00:00.000Z')`,
+    ).run(workspace.id, updated.id, draftMediaId);
+
+    const before = captureDatabaseFingerprint(database);
+    const rowCountBefore = database.prepare(
+      "SELECT COUNT(*) AS count FROM document_media_bindings WHERE document_id = ?",
+    ).get(updated.id);
+    expect(runAppMigrations(database, { sourceRevision: "media-provenance-backfill-test" }).appliedIds)
+      .toEqual([
+        "0044_document_media_binding_provenance",
+        "0045_collaboration_backup_checkpoint",
+        "0046_workspace_media_cleanup_queue",
+      ]);
+    expect(captureDatabaseFingerprint(database, before)).toEqual(before);
+    expect(database.prepare(
+      "SELECT COUNT(*) AS count FROM document_media_bindings WHERE document_id = ?",
+    ).get(updated.id)).toEqual(rowCountBefore);
+
+    const flags = database.prepare(
+      `SELECT media_id, current_binding, revision_binding
+       FROM document_media_bindings
+       WHERE document_id = ?
+       ORDER BY media_id`,
+    ).all(updated.id) as Array<{
+      media_id: string;
+      current_binding: number;
+      revision_binding: number;
+    }>;
+    expect(new Map(flags.map((row) => [row.media_id, {
+      current: row.current_binding,
+      revision: row.revision_binding,
+    }]))).toEqual(new Map([
+      [historyMediaId, { current: 0, revision: 1 }],
+      [canonicalMediaId, { current: 0, revision: 1 }],
+      [draftMediaId, { current: 1, revision: 0 }],
+      [staleMediaId, { current: 0, revision: 0 }],
+    ]));
+  });
+
+  it("adds an empty backup checkpoint without rewriting existing application data", () => {
+    const database = openDatabase(":memory:");
+    databases.push(database);
+    createUserTable(database);
+    applyThrough(database, "0044_document_media_binding_provenance");
+    database.prepare(
+      "INSERT INTO user (id, name, email, emailVerified, createdAt, updatedAt) VALUES ('checkpoint-owner', 'Checkpoint Owner', 'checkpoint@example.com', 1, 1, 1)",
+    ).run();
+    const workspace = ensurePersonalWorkspace(database, {
+      id: "checkpoint-owner",
+      name: "Checkpoint Owner",
+      email: "checkpoint@example.com",
+    });
+    const before = captureDatabaseFingerprint(database);
+    const documentCount = database.prepare(
+      "SELECT COUNT(*) AS count FROM documents WHERE workspace_id = ?",
+    ).get(workspace.id);
+
+    expect(runAppMigrations(database, { sourceRevision: "backup-checkpoint-test" }).appliedIds)
+      .toEqual([
+        "0045_collaboration_backup_checkpoint",
+        "0046_workspace_media_cleanup_queue",
+      ]);
+    expect(captureDatabaseFingerprint(database, before)).toEqual(before);
+    expect(database.prepare(
+      "SELECT COUNT(*) AS count FROM documents WHERE workspace_id = ?",
+    ).get(workspace.id)).toEqual(documentCount);
+    expect(database.prepare(
+      "SELECT COUNT(*) AS count FROM collaboration_backup_checkpoints",
+    ).get()).toEqual({ count: 0 });
+    expect(database.prepare(
+      "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'collaboration_backup_checkpoints'",
+    ).get()).toEqual({ name: "collaboration_backup_checkpoints" });
+  });
+
+  it("adds the workspace media cleanup queue without rewriting existing application data", () => {
+    const database = openDatabase(":memory:");
+    databases.push(database);
+    createUserTable(database);
+    applyThrough(database, "0045_collaboration_backup_checkpoint");
+    database.prepare(
+      "INSERT INTO user (id, name, email, emailVerified, createdAt, updatedAt) VALUES ('cleanup-owner', 'Cleanup Owner', 'cleanup@example.com', 1, 1, 1)",
+    ).run();
+    const workspace = ensurePersonalWorkspace(database, {
+      id: "cleanup-owner",
+      name: "Cleanup Owner",
+      email: "cleanup@example.com",
+    });
+    const before = captureDatabaseFingerprint(database);
+    const documentCount = database.prepare(
+      "SELECT COUNT(*) AS count FROM documents WHERE workspace_id = ?",
+    ).get(workspace.id);
+
+    expect(runAppMigrations(database, { sourceRevision: "workspace-cleanup-queue-test" }).appliedIds)
+      .toEqual(["0046_workspace_media_cleanup_queue"]);
+    expect(captureDatabaseFingerprint(database, before)).toEqual(before);
+    expect(database.prepare(
+      "SELECT COUNT(*) AS count FROM documents WHERE workspace_id = ?",
+    ).get(workspace.id)).toEqual(documentCount);
+    expect(database.prepare(
+      "SELECT COUNT(*) AS count FROM workspace_media_cleanup_queue",
+    ).get()).toEqual({ count: 0 });
+    expect(database.prepare(
+      `SELECT name FROM sqlite_master
+       WHERE type = 'trigger' AND name = 'workspace_media_cleanup_queue_boundary_insert'`,
+    ).get()).toEqual({ name: "workspace_media_cleanup_queue_boundary_insert" });
+  });
+
+  it("rolls back the pointer-guard migration for an invalid historical current revision", () => {
+    const { database, firstDocument, secondDocument } = createRevisionPointerMigrationFixture();
+    database.prepare("UPDATE documents SET current_revision_id = ? WHERE id = ?")
+      .run(secondDocument.revision_id, firstDocument.id);
+
+    expect(() => runAppMigrations(database, { sourceRevision: "invalid-current-pointer-test" }))
+      .toThrow(/document current revision must belong to the same document/);
+    expect(database.prepare(
+      "SELECT current_revision_id FROM documents WHERE id = ?",
+    ).get(firstDocument.id)).toEqual({ current_revision_id: secondDocument.revision_id });
+    expect(database.prepare(
+      "SELECT 1 FROM _nyxdoc_migrations WHERE id = '0043_document_revision_pointer_guards'",
+    ).get()).toBeUndefined();
+    expect(database.prepare(
+      "SELECT 1 FROM sqlite_master WHERE type = 'trigger' AND name = 'documents_current_revision_insert'",
+    ).get()).toBeUndefined();
+  });
+
+  it("rolls back the pointer-guard migration for a historical collaboration workspace mismatch", () => {
+    const { database, firstDocument, secondWorkspace } = createRevisionPointerMigrationFixture();
+    database.prepare("UPDATE documents SET slug = 'historical-workspace-mismatch' WHERE id = ?")
+      .run(firstDocument.id);
+    database.prepare("UPDATE documents SET workspace_id = ? WHERE id = ?")
+      .run(secondWorkspace.id, firstDocument.id);
+
+    expect(() => runAppMigrations(database, { sourceRevision: "invalid-draft-workspace-test" }))
+      .toThrow(/collaboration state must belong to the document workspace/);
+    expect(database.prepare(
+      "SELECT 1 FROM _nyxdoc_migrations WHERE id = '0043_document_revision_pointer_guards'",
+    ).get()).toBeUndefined();
+    expect(database.prepare(
+      "SELECT 1 FROM sqlite_master WHERE type = 'trigger' AND name = 'documents_current_revision_insert'",
+    ).get()).toBeUndefined();
+  });
+
+  it("rolls back the pointer-guard migration for a historical cross-document draft base", () => {
+    const { database, firstDocument, secondDocument } = createRevisionPointerMigrationFixture();
+    database.prepare(
+      `UPDATE document_collaboration_states
+       SET base_revision_id = ?, base_revision_number = ?
+       WHERE document_id = ?`,
+    ).run(secondDocument.revision_id, secondDocument.revision_number, firstDocument.id);
+
+    expect(() => runAppMigrations(database, { sourceRevision: "invalid-draft-base-test" }))
+      .toThrow(/collaboration base revision id and number must match the same document/);
+    expect(database.prepare(
+      "SELECT 1 FROM _nyxdoc_migrations WHERE id = '0043_document_revision_pointer_guards'",
+    ).get()).toBeUndefined();
+    expect(database.prepare(
+      "SELECT 1 FROM sqlite_master WHERE type = 'trigger' AND name = 'documents_current_revision_insert'",
+    ).get()).toBeUndefined();
   });
 
   it("migrates legacy agent roles and key allowlists into explicit grants and bindings", () => {
@@ -380,6 +903,10 @@ describe("application migration safety", () => {
       .toEqual([
         "0041_document_tree_grants_fail_closed",
         "0042_bug_report_image_attachments",
+        "0043_document_revision_pointer_guards",
+        "0044_document_media_binding_provenance",
+        "0045_collaboration_backup_checkpoint",
+        "0046_workspace_media_cleanup_queue",
       ]);
     expect(database.prepare(
       "SELECT status, scope_mode, root_document_id, revoked_at FROM workspace_agents WHERE id = ?",

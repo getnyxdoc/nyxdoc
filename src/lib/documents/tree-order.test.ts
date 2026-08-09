@@ -78,6 +78,27 @@ describe("document tree ordering", () => {
       .toEqual([["source", 100], ["target", 200], ["after-target", 300]]);
   });
 
+  it.each(["before", "after"] as const)(
+    "preserves an explicit workspace-root parent when moving a child %s a root sibling",
+    (position) => {
+      const result = moveDocumentSummaryInTree([
+        document("source-parent", 100, null),
+        document("source", 100, "source-parent"),
+        document("root-target", 200, null),
+        document("root-after", 300, null),
+      ], "source", "root-target", position);
+
+      expect(result.find((item) => item.id === "source")?.parentDocumentId).toBeNull();
+      expect(result
+        .filter((item) => item.parentDocumentId === null)
+        .sort((left, right) => left.treeOrder - right.treeOrder)
+        .map((item) => item.id))
+        .toEqual(position === "before"
+          ? ["source-parent", "source", "root-target", "root-after"]
+          : ["source-parent", "root-target", "source", "root-after"]);
+    },
+  );
+
   it("rejects moving a document into its own descendant", () => {
     const documents = [
       document("source", 100, null),

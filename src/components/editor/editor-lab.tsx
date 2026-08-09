@@ -2814,6 +2814,17 @@ export function NyxdocRichEditor({
       reuseId: Boolean(collaborationPlugin),
     },
   });
+  const collaborationLifecycleRef = useRef<{
+    active: boolean;
+    awarenessDestroyed: boolean;
+    collaboration: NyxdocEditorCollaboration;
+    destroyTimer: ReturnType<typeof setTimeout> | null;
+    disposed: boolean;
+    editor: typeof editor;
+    initialized: boolean;
+    plugin: NonNullable<typeof collaborationPlugin>;
+    startTimer: ReturnType<typeof setTimeout> | null;
+  } | null>(null);
 
   useEffect(() => {
     let active = true;
@@ -2983,43 +2994,94 @@ export function NyxdocRichEditor({
 
   useEffect(() => {
     if (!collaborationPlugin || !collaboration) return;
-    let active = true;
-    let initialized = false;
-    // React development Strict Mode intentionally replays effects as
-    // setup -> cleanup -> setup. Starting Plate/Yjs synchronously in the
-    // first setup leaves the replayed setup with a provider that has already
-    // been destroyed. Defer startup by one task so the probe setup can be
-    // cancelled without ever creating a WebSocket or IndexedDB provider.
-    const startTimer = setTimeout(() => {
-      if (!active) return;
-      initialized = true;
-      collaboration.onStatusChange?.("connecting");
-      void editor.getApi(YjsPlugin).yjs.init({
-        id: collaboration.roomName,
-        autoConnect: collaboration.autoConnect,
-        // The collaboration service is the only authority that seeds a room.
-        // Passing canonical content here can create the same Slate nodes under
-        // different Yjs client IDs when IndexedDB syncs before Hocuspocus, which
-        // then merges into a duplicated document. `null` explicitly disables
-        // the Plate client-side seed path.
-        value: collaboration.initialValue ?? null,
-        onReady: () => {
-          if (!active) return;
-          collaboration.onReady?.();
-        },
-      }).catch((error: unknown) => {
-        if (!active) return;
-        collaboration.onStatusChange?.(
-          "error",
-          error instanceof Error ? error.message : copy.collaborativeDraftFailed,
-        );
+    let lifecycle = collaborationLifecycleRef.current;
+    if (
+      !lifecycle
+      || lifecycle.disposed
+      || lifecycle.editor !== editor
+      || lifecycle.plugin !== collaborationPlugin
+      || lifecycle.collaboration.ydoc !== collaboration.ydoc
+    ) {
+      const createdLifecycle: NonNullable<typeof collaborationLifecycleRef.current> = {
+        active: false,
+        awarenessDestroyed: false,
+        collaboration,
+        destroyTimer: null,
+        disposed: false,
+        editor,
+        initialized: false,
+        plugin: collaborationPlugin,
+        startTimer: null,
+      };
+      editor.getOptions(YjsPlugin).awareness?.on("destroy", () => {
+        createdLifecycle.awarenessDestroyed = true;
       });
-    }, 0);
+      collaborationLifecycleRef.current = createdLifecycle;
+      lifecycle = createdLifecycle;
+    }
+
+    lifecycle.active = true;
+    lifecycle.collaboration = collaboration;
+    if (lifecycle.destroyTimer) {
+      clearTimeout(lifecycle.destroyTimer);
+      lifecycle.destroyTimer = null;
+    }
+
+    if (!lifecycle.initialized && !lifecycle.startTimer) {
+      const ownedLifecycle = lifecycle;
+      ownedLifecycle.startTimer = setTimeout(() => {
+        ownedLifecycle.startTimer = null;
+        if (!ownedLifecycle.active || ownedLifecycle.disposed) return;
+        const ownedCollaboration = ownedLifecycle.collaboration;
+        if (ownedCollaboration.ydoc.isDestroyed || ownedLifecycle.awarenessDestroyed) {
+          ownedCollaboration.onStatusChange?.(
+            "error",
+            "Collaboration resources were destroyed before initialization.",
+          );
+          return;
+        }
+        ownedLifecycle.initialized = true;
+        ownedCollaboration.onStatusChange?.("connecting");
+        void editor.getApi(YjsPlugin).yjs.init({
+          id: ownedCollaboration.roomName,
+          autoConnect: ownedCollaboration.autoConnect,
+          // The collaboration service is the only authority that seeds a room.
+          // Passing canonical content here can create the same Slate nodes under
+          // different Yjs client IDs when IndexedDB syncs before Hocuspocus, which
+          // then merges into a duplicated document. `null` explicitly disables
+          // the Plate client-side seed path.
+          value: ownedCollaboration.initialValue ?? null,
+          onReady: () => {
+            if (!ownedLifecycle.active || ownedLifecycle.disposed) return;
+            ownedLifecycle.collaboration.onReady?.();
+          },
+        }).catch((error: unknown) => {
+          if (!ownedLifecycle.active || ownedLifecycle.disposed) return;
+          ownedLifecycle.collaboration.onStatusChange?.(
+            "error",
+            error instanceof Error ? error.message : copy.collaborativeDraftFailed,
+          );
+        });
+      }, 0);
+    }
 
     return () => {
-      active = false;
-      clearTimeout(startTimer);
-      if (initialized) editor.getApi(YjsPlugin).yjs.destroy();
+      lifecycle.active = false;
+      if (lifecycle.startTimer) {
+        clearTimeout(lifecycle.startTimer);
+        lifecycle.startTimer = null;
+      }
+      const ownedLifecycle = lifecycle;
+      const destroyTimer = setTimeout(() => {
+        if (ownedLifecycle.active || ownedLifecycle.destroyTimer !== destroyTimer) return;
+        ownedLifecycle.destroyTimer = null;
+        ownedLifecycle.disposed = true;
+        if (ownedLifecycle.initialized) editor.getApi(YjsPlugin).yjs.destroy();
+        if (collaborationLifecycleRef.current === ownedLifecycle) {
+          collaborationLifecycleRef.current = null;
+        }
+      }, 0);
+      lifecycle.destroyTimer = destroyTimer;
     };
   }, [collaboration, collaborationPlugin, copy.collaborativeDraftFailed, editor]);
 
@@ -3147,7 +3209,13 @@ export function NyxdocRichEditor({
     nextValue: Value,
     operationTypes: string[],
   ) => {
-    if (operationTypes.includes("insert_node")) {
+    // CollaborativeNodeIdPlugin assigns IDs before every local Yjs insert and
+    // preserves the canonical IDs carried by remote Yjs events. Repairing a
+    // remote tree from onValueChange writes back into the same Yjs/Jotai
+    // notification cycle and can recursively remount Plate subscribers.
+    // Keep this fallback only for the non-collaborative editor, where there is
+    // no operation-boundary plugin to guarantee IDs.
+    if (!collaboration && operationTypes.includes("insert_node")) {
       const repairs = repairEditorNodeIds(editor, nextValue);
       if (repairs.length > 0) {
         onDiagnostic?.(nodeIdRepairDiagnostic(repairs));
@@ -3188,6 +3256,55 @@ export function NyxdocRichEditor({
     scheduleAutomaticLinkTitles,
     scheduleChangeReport,
   ]);
+
+  // Plate mirrors these callbacks into its Jotai store. Keeping inline
+  // callback identities here made every parent render write new callback
+  // atoms; when a remote Yjs update triggered Slate's onChange subscribers,
+  // those writes could feed back into the same render cycle and exhaust
+  // React's update depth. Stable handlers let remote document updates change
+  // only editor state, not Plate's callback configuration.
+  const handlePlateSelectionChange = useCallback(({
+    selection,
+  }: {
+    selection: PlateEditor["selection"];
+  }) => {
+    const bookmark = stableCaretBookmark(editor, selection);
+    if (bookmark) stableCaretRef.current = bookmark;
+    recordCaretTrace({
+      kind: "selection_change",
+      selection: caretSelectionSnapshot(editor, selection, editorRootRef.current),
+      blockCount: editor.children.length,
+    });
+  }, [editor, recordCaretTrace]);
+
+  const handlePlateValueChange = useCallback(({
+    editor: changedEditor,
+    value: nextValue,
+  }: {
+    editor: PlateEditor;
+    value: Value;
+  }) => {
+    const operationTypes = [...new Set(changedEditor.operations.map((operation) => (
+      diagnosticIdentifier(operation.type)
+    )))].slice(0, 20);
+    const structuralReplacement = operationTypes.includes("insert_node")
+      && operationTypes.includes("remove_node");
+    recordCaretTrace({
+      kind: "value_change",
+      operationTypes,
+      selection: caretSelectionSnapshot(editor, editor.selection, editorRootRef.current),
+      blockCount: nextValue.length,
+    });
+    handleValueChange(nextValue, operationTypes);
+    if (
+      !collaborativeBulkActiveRef.current
+      && editorFocusedRef.current
+      && stableCaretRef.current
+      && (!editor.selection || structuralReplacement)
+    ) {
+      scheduleStableCaretRecovery(structuralReplacement);
+    }
+  }, [editor, handleValueChange, recordCaretTrace, scheduleStableCaretRecovery]);
 
   const commitCollaborativeBulkEdit = useCallback((
     result: CollaborativeBulkEditResult,
@@ -3381,38 +3498,8 @@ export function NyxdocRichEditor({
       <div className={readOnly ? styles.documentView : styles.embeddedEditor}>
         <Plate
           editor={editor}
-          onSelectionChange={({ selection }) => {
-            const bookmark = stableCaretBookmark(editor, selection);
-            if (bookmark) stableCaretRef.current = bookmark;
-            recordCaretTrace({
-              kind: "selection_change",
-              selection: caretSelectionSnapshot(editor, selection, editorRootRef.current),
-              blockCount: editor.children.length,
-            });
-          }}
-          onValueChange={({ editor: changedEditor, value: nextValue }) => {
-            const operationTypes = [...new Set(changedEditor.operations.map((operation) => (
-              diagnosticIdentifier(operation.type)
-            )))].slice(0, 20);
-            const structuralReplacement = operationTypes.includes("insert_node")
-              && operationTypes.includes("remove_node");
-            recordCaretTrace({
-              kind: "value_change",
-              operationTypes,
-              selection: caretSelectionSnapshot(editor, editor.selection, editorRootRef.current),
-              blockCount: nextValue.length,
-            });
-            handleValueChange(nextValue, operationTypes);
-            if (
-              !collaborativeBulkActiveRef.current
-              &&
-              editorFocusedRef.current
-              && stableCaretRef.current
-              && (!editor.selection || structuralReplacement)
-            ) {
-              scheduleStableCaretRecovery(structuralReplacement);
-            }
-          }}
+          onSelectionChange={handlePlateSelectionChange}
+          onValueChange={handlePlateValueChange}
         >
           {!readOnly && (
             <EditorToolbar

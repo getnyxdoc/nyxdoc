@@ -1,24 +1,34 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import { timingSafeEqual } from "node:crypto";
-import { Unauthorized } from "@hocuspocus/common";
-import { Hocuspocus } from "@hocuspocus/server";
+import { randomUUID, timingSafeEqual } from "node:crypto";
+import { existsSync, rmSync, writeFileSync } from "node:fs";
+import { Forbidden, Unauthorized } from "@hocuspocus/common";
+import {
+  Hocuspocus,
+  IncomingMessage as HocuspocusIncomingMessage,
+  MessageType,
+} from "@hocuspocus/server";
 import { WebSocketServer } from "ws";
 import * as Y from "yjs";
 import {
-  WORKSPACE_PERMISSIONS,
   agentPrincipalAllows,
   getHumanDocumentPrincipal,
   humanDocumentPrincipalAllows,
 } from "@/lib/authz/permissions";
+import { assertWorkspaceAgentGrantCanAccessDocument } from "@/lib/agents/workspace-grant-boundary";
 import {
   loadCollaborationStateByRoom,
   parseCollaborationRoomName,
   persistCollaborationUpdate,
   persistCollaborationYDoc,
   repairCollaborationYDocNodeIds,
+  workingDocumentFromYDoc,
   type DraftActor,
 } from "@/lib/collaboration/drafts";
 import { createCollaborationCommands } from "@/lib/collaboration/commands";
+import {
+  collaborationClientIp,
+  normalizedClientIp,
+} from "@/lib/collaboration/client-ip";
 import type {
   ArchiveWorkingTreeRequest,
   CommitWorkingDocumentRequest,
@@ -40,7 +50,7 @@ import {
   getCollaborationPort,
   getCollaborationSecret,
 } from "@/lib/config";
-import { sqlite } from "@/lib/db/client";
+import { sqlite, type NyxDatabase } from "@/lib/db/client";
 import {
   documentPatchOperationSchema,
 } from "@/lib/documents/schemas";
@@ -51,31 +61,47 @@ import {
   type DocumentServiceErrorCode,
 } from "@/lib/documents/types";
 import { nyxdocDocumentV2Schema } from "@/lib/editor/schema";
+import { assertDocumentMediaAssetsBelongToWorkspace } from "@/lib/media/bindings";
+import {
+  API_TOKEN_SCOPES,
+  ApiTokenError,
+  authenticateAgentCredential,
+  type ApiTokenScope,
+} from "@/lib/tokens/service";
 
 type ConnectionContext = {
   actor?: DraftActor;
   claims?: CollaborationTokenClaims;
+  clientIp?: string | null;
+  acceptedMutation?: AcceptedWebSocketMutation;
+  disconnected?: boolean;
   expirationTimer?: ReturnType<typeof setTimeout>;
   recordedByEndpoint?: boolean;
 };
 
-type AgentCredentialRow = {
-  scopes_json: string;
-  root_document_id: string | null;
-  capabilities_json: string;
+type AcceptedWebSocketMutation = {
+  sequence: number;
+  finish: () => void;
 };
 
-function permissionList(value: string) {
-  try {
-    const parsed = JSON.parse(value) as unknown;
-    return Array.isArray(parsed)
-      ? parsed.filter((item): item is (typeof WORKSPACE_PERMISSIONS)[number] =>
-        typeof item === "string" && WORKSPACE_PERMISSIONS.includes(item as (typeof WORKSPACE_PERMISSIONS)[number]))
-      : [];
-  } catch {
-    return [];
-  }
-}
+type BackupBarrierReceipt = {
+  barrierId: string;
+  acquiredAt: string;
+  flushedAt: string;
+  expiresAt: string;
+  flushWatermark: number;
+  loadedDocumentCount: number;
+};
+
+type ActiveBackupBarrier = {
+  barrierId: string;
+  acquiredAt: string;
+  expiresAtMs: number;
+  flushWatermark: number;
+  flushedAt?: string;
+  loadedDocumentCount?: number;
+  expirationTimer: ReturnType<typeof setTimeout>;
+};
 
 const MAX_INTERNAL_BODY_BYTES = 12 * 1024 * 1024;
 const requestFailureContext = new WeakMap<object, Record<string, unknown>>();
@@ -255,6 +281,50 @@ function optionalInteger(value: unknown, field: string) {
   return Number(value);
 }
 
+function parseScopeCeiling(value: unknown) {
+  if (value === undefined) return undefined;
+  if (
+    !Array.isArray(value)
+    || value.length > API_TOKEN_SCOPES.length
+    || value.some((scope) => (
+      typeof scope !== "string"
+      || !API_TOKEN_SCOPES.includes(scope as ApiTokenScope)
+    ))
+  ) {
+    throw new DocumentServiceError(
+      "INVALID_INPUT",
+      "공유 초안 작업자의 권한 상한이 올바르지 않습니다.",
+    );
+  }
+  return Object.freeze(Array.from(new Set(value as ApiTokenScope[])));
+}
+
+function parseRequestContext(value: unknown): DraftActor["requestContext"] {
+  if (value === undefined) return undefined;
+  const context = requireRecord(value);
+  if (Object.keys(context).some((key) => key !== "clientIp")) {
+    throw new DocumentServiceError(
+      "INVALID_INPUT",
+      "공유 초안 작업자의 요청 컨텍스트가 올바르지 않습니다.",
+    );
+  }
+  if (context.clientIp === null) return Object.freeze({ clientIp: null });
+  if (typeof context.clientIp !== "string") {
+    throw new DocumentServiceError(
+      "INVALID_INPUT",
+      "공유 초안 작업자의 클라이언트 IP가 올바르지 않습니다.",
+    );
+  }
+  const clientIp = normalizedClientIp(context.clientIp);
+  if (!clientIp) {
+    throw new DocumentServiceError(
+      "INVALID_INPUT",
+      "공유 초안 작업자의 클라이언트 IP가 올바르지 않습니다.",
+    );
+  }
+  return Object.freeze({ clientIp });
+}
+
 function parseDraftActor(value: unknown): DraftActor {
   const actor = requireRecord(value);
   const type = actor.type;
@@ -265,6 +335,20 @@ function parseDraftActor(value: unknown): DraftActor {
   if (!source || !["web", "mcp", "api", "rollback", "migration", "seed"].includes(String(source))) {
     throw new DocumentServiceError("INVALID_INPUT", "공유 초안 작업 출처가 올바르지 않습니다.");
   }
+  const scopeCeiling = parseScopeCeiling(actor.scopeCeiling);
+  const requestContext = parseRequestContext(actor.requestContext);
+  if (scopeCeiling !== undefined && type !== "agent") {
+    throw new DocumentServiceError(
+      "INVALID_INPUT",
+      "에이전트가 아닌 작업자에는 연결 권한 상한을 지정할 수 없습니다.",
+    );
+  }
+  if (requestContext !== undefined && type !== "agent") {
+    throw new DocumentServiceError(
+      "INVALID_INPUT",
+      "에이전트가 아닌 작업자에는 연결 요청 컨텍스트를 지정할 수 없습니다.",
+    );
+  }
   return {
     type,
     userId: typeof actor.userId === "string" ? actor.userId : null,
@@ -273,34 +357,22 @@ function parseDraftActor(value: unknown): DraftActor {
     label: requireString(actor.label, "actor.label"),
     avatarMediaId: typeof actor.avatarMediaId === "string" ? actor.avatarMediaId : null,
     source: source as DraftActor["source"],
+    ...(scopeCeiling ? { scopeCeiling } : {}),
+    ...(requestContext ? { requestContext } : {}),
   };
 }
 
-function assertAgentDocumentScope(workspaceId: string, documentId: string, rootDocumentId: string | null) {
-  if (!rootDocumentId) return;
-  const allowed = sqlite.prepare(
-    `WITH RECURSIVE ancestors(id, parent_document_id) AS (
-       SELECT id, parent_document_id FROM documents
-       WHERE workspace_id = ? AND id = ? AND status = 'active'
-       UNION ALL
-       SELECT document.id, document.parent_document_id
-       FROM documents document
-       JOIN ancestors ON document.id = ancestors.parent_document_id
-       WHERE document.workspace_id = ? AND document.status = 'active'
-     )
-     SELECT 1 FROM ancestors WHERE id = ? LIMIT 1`,
-  ).get(workspaceId, documentId, workspaceId, rootDocumentId);
-  if (!allowed) throw new DocumentServiceError("FORBIDDEN", "이 연결의 허용 문서 범위를 벗어났습니다.");
-}
-
-function validateWebSocketClaims(token: string, documentName: string) {
-  let claims;
+function validateCurrentWebSocketClaims(
+  claims: CollaborationTokenClaims,
+  documentName: string,
+  clientIp: string | null,
+) {
   try {
-    claims = verifyCollaborationToken(token);
+    assertCollaborationTokenFresh(claims);
   } catch (error) {
     throw new DocumentServiceError(
       "FORBIDDEN",
-      error instanceof Error ? error.message : "협업 토큰을 확인하지 못했습니다.",
+      error instanceof Error ? error.message : "협업 토큰이 만료되었습니다.",
     );
   }
   if (claims.roomName !== documentName) {
@@ -340,40 +412,41 @@ function validateWebSocketClaims(token: string, documentName: string) {
   }
 
   if (claims.actor.type === "agent") {
-    const row = sqlite.prepare(
-      `SELECT credential.scopes_json, membership.root_document_id,
-              membership.capabilities_json
-       FROM agent_credentials credential
-       JOIN agents agent ON agent.id = credential.agent_id
-       JOIN workspace_agents membership
-         ON membership.agent_identity_id = credential.agent_id
-        AND membership.workspace_id = ?
-       JOIN agent_credential_grant_bindings binding
-         ON binding.credential_id = credential.id
-        AND binding.grant_id = membership.id
-        AND binding.status = 'active' AND binding.revoked_at IS NULL
-       JOIN workspaces workspace ON workspace.id = membership.workspace_id
-       WHERE credential.id = ? AND credential.agent_id = ?
-         AND credential.revoked_at IS NULL AND membership.status = 'active'
-         AND membership.revoked_at IS NULL
-         AND agent.status = 'active' AND agent.deleted_at IS NULL AND agent.purged_at IS NULL
-         AND workspace.lifecycle_state = 'active'
-         AND (credential.expires_at IS NULL OR credential.expires_at > ?)`,
-    ).get(
-      claims.workspaceId,
-      claims.actor.tokenId,
-      claims.actor.principalId,
-      new Date().toISOString(),
-    ) as AgentCredentialRow | undefined;
-    if (!row) throw new DocumentServiceError("FORBIDDEN", "에이전트 연결이 만료되었거나 폐기되었습니다.");
-    const scopes = JSON.parse(row.scopes_json) as unknown;
-    if (!Array.isArray(scopes) || !scopes.includes("documents:read")) {
+    if (!claims.actor.tokenId || !claims.actor.principalId) {
+      throw new DocumentServiceError("FORBIDDEN", "에이전트 연결 식별자가 없습니다.");
+    }
+    let identity;
+    try {
+      identity = authenticateAgentCredential(sqlite, claims.actor.tokenId, {
+        workspaceId: claims.workspaceId,
+        clientIp,
+        scopeCeiling: claims.actor.scopeCeiling,
+      });
+    } catch (error) {
+      throw new DocumentServiceError(
+        "FORBIDDEN",
+        error instanceof ApiTokenError
+          ? error.message
+          : "에이전트 연결이 만료되었거나 폐기되었습니다.",
+      );
+    }
+    if (identity.globalAgentId !== claims.actor.principalId) {
+      throw new DocumentServiceError("FORBIDDEN", "에이전트 연결 신원이 일치하지 않습니다.");
+    }
+    if (!identity.scopes.includes("documents:read")) {
       throw new DocumentServiceError("FORBIDDEN", "에이전트에 문서 읽기 권한이 없습니다.");
     }
-    assertAgentDocumentScope(claims.workspaceId, claims.documentId, row.root_document_id);
-    const principal = { capabilities: permissionList(row.capabilities_json) };
-    const writeAllowed = scopes.includes("documents:write") && agentPrincipalAllows(principal, "documents.update");
-    const commitAllowed = scopes.includes("documents:commit") && agentPrincipalAllows(principal, "documents.commit");
+    assertWorkspaceAgentGrantCanAccessDocument(
+      sqlite,
+      claims.workspaceId,
+      identity.agentId,
+      claims.documentId,
+    );
+    const principal = { capabilities: identity.capabilities };
+    const writeAllowed = identity.scopes.includes("documents:write")
+      && agentPrincipalAllows(principal, "documents.update");
+    const commitAllowed = identity.scopes.includes("documents:commit")
+      && agentPrincipalAllows(principal, "documents.commit");
     if (claims.permissions.write && !writeAllowed) {
       throw new DocumentServiceError("FORBIDDEN", "에이전트에 공유 초안 쓰기 권한이 없습니다.");
     }
@@ -384,6 +457,254 @@ function validateWebSocketClaims(token: string, documentName: string) {
   }
 
   throw new DocumentServiceError("FORBIDDEN", "시스템 작업자는 브라우저 협업 연결을 열 수 없습니다.");
+}
+
+function validateWebSocketClaims(token: string, documentName: string, clientIp: string | null) {
+  let claims;
+  try {
+    claims = verifyCollaborationToken(token);
+  } catch (error) {
+    throw new DocumentServiceError(
+      "FORBIDDEN",
+      error instanceof Error ? error.message : "협업 토큰을 확인하지 못했습니다.",
+    );
+  }
+  return validateCurrentWebSocketClaims(claims, documentName, clientIp);
+}
+
+const YJS_SYNC_STEP_TWO = 1;
+const YJS_UPDATE = 2;
+
+function incomingCollaborationMutation(
+  messageData: Uint8Array,
+  expectedDocumentName: string,
+) {
+  const message = new HocuspocusIncomingMessage(messageData);
+  const documentName = message.readVarString();
+  if (documentName !== expectedDocumentName) {
+    throw new DocumentServiceError(
+      "INVALID_INPUT",
+      "협업 메시지와 문서 방이 일치하지 않습니다.",
+    );
+  }
+  const messageType = message.readVarUint();
+  if (messageType !== MessageType.Sync && messageType !== MessageType.SyncReply) {
+    return null;
+  }
+  const syncType = message.readVarUint();
+  if (syncType !== YJS_SYNC_STEP_TWO && syncType !== YJS_UPDATE) {
+    return null;
+  }
+  return message.readVarUint8Array();
+}
+
+function assertIncomingCollaborationMutationValid(
+  database: NyxDatabase,
+  documentName: string,
+  document: Y.Doc,
+  update: Uint8Array,
+) {
+  const candidate = new Y.Doc({ gc: document.gc });
+  try {
+    Y.applyUpdate(
+      candidate,
+      Y.encodeStateAsUpdate(document),
+      "nyxdoc-preflight-baseline",
+    );
+    Y.applyUpdate(candidate, update, "nyxdoc-preflight-update");
+    repairCollaborationYDocNodeIds(candidate);
+    const working = workingDocumentFromYDoc(database, documentName, candidate);
+    assertDocumentMediaAssetsBelongToWorkspace(
+      database,
+      working.workspaceId,
+      working.content,
+    );
+  } finally {
+    candidate.destroy();
+  }
+}
+
+function collaborationMutationChangesDocument(
+  document: Y.Doc,
+  update: Uint8Array,
+) {
+  // Hocuspocus uses the same check for read-only SyncStep2 messages: clients
+  // must be able to acknowledge state they already have without being treated
+  // as writers.
+  return !Y.snapshotContainsUpdate(Y.snapshot(document), update);
+}
+
+let mutationWatermark = 0;
+const acceptedMutations = new Set<number>();
+const quiescenceWaiters = new Set<() => void>();
+const documentMutationTails = new WeakMap<Y.Doc, Promise<void>>();
+let activeBackupBarrier: ActiveBackupBarrier | null = null;
+
+function configuredMilliseconds(
+  name: string,
+  fallback: number,
+  minimum: number,
+  maximum: number,
+) {
+  const configured = Number(process.env[name] || fallback);
+  return Number.isFinite(configured)
+    ? Math.min(maximum, Math.max(minimum, Math.floor(configured)))
+    : fallback;
+}
+
+function backupBarrierLeaseMs() {
+  return configuredMilliseconds(
+    "NYXDOC_BACKUP_BARRIER_LEASE_MS",
+    120_000,
+    100,
+    30 * 60_000,
+  );
+}
+
+function backupBarrierQuiesceTimeoutMs() {
+  return configuredMilliseconds(
+    "NYXDOC_BACKUP_BARRIER_QUIESCE_TIMEOUT_MS",
+    15_000,
+    50,
+    60_000,
+  );
+}
+
+function releaseBackupBarrier(barrierId: string, reason: "released" | "expired") {
+  if (!activeBackupBarrier || activeBackupBarrier.barrierId !== barrierId) return false;
+  clearTimeout(activeBackupBarrier.expirationTimer);
+  activeBackupBarrier = null;
+  if (reason === "expired") {
+    console.warn("[collaboration] backup barrier lease expired; document mutations resumed");
+  }
+  return true;
+}
+
+function armBackupBarrierExpiration(barrier: ActiveBackupBarrier) {
+  clearTimeout(barrier.expirationTimer);
+  const delay = Math.max(1, barrier.expiresAtMs - Date.now());
+  barrier.expirationTimer = setTimeout(() => {
+    releaseBackupBarrier(barrier.barrierId, "expired");
+  }, delay);
+  barrier.expirationTimer.unref();
+}
+
+function assertDocumentMutationAvailable() {
+  if (activeBackupBarrier) {
+    throw new DocumentServiceError(
+      "COLLABORATION_UNAVAILABLE",
+      "검증 백업을 위해 문서 변경을 잠시 멈췄습니다. 잠시 후 다시 시도해주세요.",
+      { reason: "BACKUP_BARRIER_ACTIVE", retryable: true },
+    );
+  }
+}
+
+function beginAcceptedMutation() {
+  assertDocumentMutationAvailable();
+  const sequence = ++mutationWatermark;
+  acceptedMutations.add(sequence);
+  return sequence;
+}
+
+function finishAcceptedMutation(sequence: number) {
+  if (!acceptedMutations.delete(sequence) || acceptedMutations.size > 0) return;
+  for (const resolve of quiescenceWaiters) resolve();
+  quiescenceWaiters.clear();
+}
+
+async function reserveDocumentMutationTurn(document: Y.Doc) {
+  const predecessor = documentMutationTails.get(document) ?? Promise.resolve();
+  let releaseCurrent!: () => void;
+  const current = new Promise<void>((resolve) => {
+    releaseCurrent = resolve;
+  });
+  const tail = predecessor.then(() => current);
+  documentMutationTails.set(document, tail);
+  await predecessor;
+
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    releaseCurrent();
+    void tail.then(() => {
+      if (documentMutationTails.get(document) === tail) {
+        documentMutationTails.delete(document);
+      }
+    });
+  };
+}
+
+function transactionChangesDocument(transaction: Y.Transaction) {
+  return transaction.changed.size > 0 || transaction.deleteSet.clients.size > 0;
+}
+
+function beginAcceptedWebSocketMutation(
+  document: Y.Doc,
+  connection: object,
+  connectionContext: ConnectionContext,
+  releaseMutationTurn: () => void,
+) {
+  const sequence = beginAcceptedMutation();
+  let finished = false;
+
+  const afterTransaction = (transaction: Y.Transaction) => {
+    if (transaction.origin !== connection) return;
+    document.off("afterTransaction", afterTransaction);
+    // Yjs emits afterTransaction even when a duplicate update applies no new
+    // structs or deletes. Such a message never emits Hocuspocus onChange, so
+    // it must close its accounting token here at the actual apply boundary.
+    if (!transactionChangesDocument(transaction)) token.finish();
+  };
+
+  const token: AcceptedWebSocketMutation = {
+    sequence,
+    finish: () => {
+      if (finished) return;
+      finished = true;
+      document.off("afterTransaction", afterTransaction);
+      if (connectionContext.acceptedMutation === token) {
+        connectionContext.acceptedMutation = undefined;
+      }
+      finishAcceptedMutation(sequence);
+      releaseMutationTurn();
+    },
+  };
+  connectionContext.acceptedMutation = token;
+  document.on("afterTransaction", afterTransaction);
+  return token;
+}
+
+async function withAcceptedMutation<T>(callback: () => Promise<T>) {
+  const sequence = beginAcceptedMutation();
+  try {
+    return await callback();
+  } finally {
+    finishAcceptedMutation(sequence);
+  }
+}
+
+async function waitForAcceptedMutations(timeoutMs: number) {
+  if (acceptedMutations.size === 0) return;
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  let waiter: (() => void) | undefined;
+  try {
+    await Promise.race([
+      new Promise<void>((resolve) => {
+        waiter = resolve;
+        quiescenceWaiters.add(resolve);
+      }),
+      new Promise<never>((_, reject) => {
+        timeout = setTimeout(() => reject(new Error(
+          `Timed out waiting for ${acceptedMutations.size} accepted collaboration mutation(s).`,
+        )), timeoutMs);
+        timeout.unref();
+      }),
+    ]);
+  } finally {
+    if (timeout) clearTimeout(timeout);
+    if (waiter) quiescenceWaiters.delete(waiter);
+  }
 }
 
 function statusForError(error: unknown) {
@@ -617,16 +938,53 @@ function parseArchiveRequest(value: unknown): ArchiveWorkingTreeRequest {
   };
 }
 
+function failNextApplyForTests() {
+  const marker = process.env.NYXDOC_TEST_APPLY_FAILURE_MARKER?.trim();
+  if (process.env.NODE_ENV !== "test" || !marker || !existsSync(marker)) return;
+  rmSync(marker, { force: true });
+  throw new Error("injected collaboration apply failure");
+}
+
+async function waitForUpdatePersistenceInterlockForTests() {
+  const basePath = process.env.NYXDOC_TEST_UPDATE_PERSISTENCE_INTERLOCK?.trim();
+  if (process.env.NODE_ENV !== "test" || !basePath) return;
+  const armPath = `${basePath}.arm`;
+  if (!existsSync(armPath)) return;
+
+  const reachedPath = `${basePath}.reached`;
+  const releasePath = `${basePath}.release`;
+  rmSync(armPath, { force: true });
+  writeFileSync(reachedPath, "preflight-complete", "utf8");
+  const deadline = Date.now() + 30_000;
+  try {
+    while (!existsSync(releasePath)) {
+      if (Date.now() >= deadline) {
+        throw new Error("timed out waiting for collaboration persistence interlock release");
+      }
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+  } finally {
+    rmSync(reachedPath, { force: true });
+    rmSync(releasePath, { force: true });
+  }
+}
+
 const hocuspocus = new Hocuspocus({
   name: "nyxdoc-collaboration",
   debounce: 400,
   maxDebounce: 1_500,
   timeout: 30_000,
   unloadImmediately: true,
-  async onAuthenticate({ token, documentName, connectionConfig }) {
-    const { claims, readOnly } = validateWebSocketClaims(token, documentName);
+  async onAuthenticate({ token, documentName, connectionConfig, request }) {
+    const clientIp = collaborationClientIp(request, getCollaborationSecret());
+    const { claims, readOnly } = validateWebSocketClaims(token, documentName, clientIp);
     connectionConfig.readOnly = readOnly;
-    return { actor: claims.actor, claims } satisfies ConnectionContext;
+    return {
+      actor: claims.actor,
+      claims,
+      clientIp,
+      disconnected: false,
+    } satisfies ConnectionContext;
   },
   async connected({ connection, context }) {
     const connectionContext = context as ConnectionContext;
@@ -643,20 +1001,153 @@ const hocuspocus = new Hocuspocus({
       });
     }, delay);
   },
-  async beforeHandleMessage({ connection, context }) {
-    const connectionContext = context as ConnectionContext;
-    if (!connectionContext.claims) return;
+  async beforeHandleMessage({
+    connection,
+    context,
+    document,
+    documentName,
+    update,
+  }) {
+    let mutation: Uint8Array | null;
     try {
-      assertCollaborationTokenFresh(connectionContext.claims);
+      mutation = incomingCollaborationMutation(update, documentName);
     } catch {
-      connection.close({
-        ...Unauthorized,
-        reason: "Collaboration token expired",
-      });
-      throw {
-        ...Unauthorized,
-        reason: "Collaboration token expired",
+      const rejection = {
+        ...Forbidden,
+        reason: "Invalid collaboration update",
       };
+      connection.close(rejection);
+      throw rejection;
+    }
+    // Awareness, stateless traffic, token sync, and Yjs sync step one do not
+    // mutate the authoritative Y.Doc and retain Hocuspocus' normal behavior.
+    if (!mutation) return;
+    const connectionContext = context as ConnectionContext;
+    const releaseMutationTurn = await reserveDocumentMutationTurn(document);
+    let mutationTurnTransferred = false;
+    try {
+      try {
+        if (!collaborationMutationChangesDocument(document, mutation)) return;
+      } catch {
+        const rejection = {
+          ...Forbidden,
+          reason: "Invalid collaboration update",
+        };
+        connection.close(rejection);
+        throw rejection;
+      }
+
+      try {
+        if (connectionContext.disconnected || !connectionContext.claims) {
+          throw new DocumentServiceError(
+            "FORBIDDEN",
+            "협업 연결의 인증 정보를 찾을 수 없습니다.",
+          );
+        }
+        const { readOnly } = validateCurrentWebSocketClaims(
+          connectionContext.claims,
+          documentName,
+          connectionContext.clientIp ?? null,
+        );
+        if (readOnly) {
+          throw new DocumentServiceError(
+            "FORBIDDEN",
+            "이 문서의 공유 초안을 편집할 권한이 없습니다.",
+          );
+        }
+      } catch {
+        const rejection = {
+          ...Unauthorized,
+          reason: "Collaboration authorization is no longer valid",
+        };
+        connection.close(rejection);
+        throw rejection;
+      }
+
+      try {
+        assertIncomingCollaborationMutationValid(
+          sqlite,
+          documentName,
+          document,
+          mutation,
+        );
+      } catch {
+        const rejection = {
+          ...Forbidden,
+          reason: "Invalid collaboration update",
+        };
+        connection.close(rejection);
+        throw rejection;
+      }
+
+      let acceptedMutation: AcceptedWebSocketMutation;
+      try {
+        acceptedMutation = beginAcceptedWebSocketMutation(
+          document,
+          connection,
+          connectionContext,
+          releaseMutationTurn,
+        );
+        mutationTurnTransferred = true;
+      } catch {
+        const rejection = {
+          ...Forbidden,
+          reason: "Verified backup in progress",
+        };
+        connection.close(rejection);
+        throw rejection;
+      }
+
+      try {
+        // Hocuspocus applies and acknowledges the update only after this hook
+        // resolves. Persist an isolated candidate first so a successful sync
+        // status can never race ahead of durable draft storage. A crash after
+        // this point is an at-least-once retry: reconnecting loads the stored
+        // update, while a duplicate Yjs update remains a no-op.
+        await waitForUpdatePersistenceInterlockForTests();
+        failNextApplyForTests();
+        const candidate = new Y.Doc({ gc: document.gc });
+        try {
+          Y.applyUpdate(
+            candidate,
+            Y.encodeStateAsUpdate(document),
+            "nyxdoc-durable-apply-baseline",
+          );
+          Y.applyUpdate(candidate, mutation, "nyxdoc-durable-apply-update");
+          persistCollaborationUpdate(
+            sqlite,
+            documentName,
+            candidate,
+            connectionContext.actor!,
+            {
+              authorizationContext: {
+                clientIp: connectionContext.clientIp ?? null,
+              },
+            },
+          );
+          Y.applyUpdate(
+            document,
+            Y.encodeStateAsUpdate(candidate),
+            connection,
+          );
+        } finally {
+          candidate.destroy();
+        }
+      } catch (error) {
+        acceptedMutation.finish();
+        const authorizationDenied = error instanceof DocumentServiceError
+          && (error.code === "FORBIDDEN" || error.code === "NOT_FOUND");
+        const rejection = {
+          ...(authorizationDenied ? Unauthorized : Forbidden),
+          reason: authorizationDenied
+            ? "Collaboration authorization is no longer valid"
+            : "Collaboration update persistence failed",
+        };
+        connection.close(rejection);
+        throw error;
+      }
+    } finally {
+      if (!mutationTurnTransferred) releaseMutationTurn();
     }
   },
   async onLoadDocument({ documentName, document }) {
@@ -670,30 +1161,46 @@ const hocuspocus = new Hocuspocus({
   },
   async onChange({ documentName, document, context }) {
     const connectionContext = context as ConnectionContext;
-    if (!connectionContext.actor || connectionContext.recordedByEndpoint) return;
-    if (connectionContext.claims) {
-      assertCollaborationTokenFresh(connectionContext.claims);
+    const acceptedMutation = connectionContext.acceptedMutation;
+    try {
+      if (!connectionContext.actor || connectionContext.recordedByEndpoint) return;
+      if (connectionContext.claims) {
+        assertCollaborationTokenFresh(connectionContext.claims);
+      }
+      logNodeIdRepairs(
+        documentName,
+        "change",
+        repairCollaborationYDocNodeIds(document),
+      );
+      const working = workingDocumentFromYDoc(sqlite, documentName, document);
+      assertDocumentMediaAssetsBelongToWorkspace(
+        sqlite,
+        working.workspaceId,
+        working.content,
+      );
+      const state = persistCollaborationUpdate(
+        sqlite,
+        documentName,
+        document,
+        connectionContext.actor,
+        {
+          authorizationContext: {
+            clientIp: connectionContext.clientIp ?? null,
+          },
+        },
+      );
+      const hocuspocusDocument = document as Y.Doc & {
+        broadcastStateless?: (value: string) => void;
+      };
+      hocuspocusDocument.broadcastStateless?.(JSON.stringify({
+        type: "draft-status",
+        documentId: state.documentId,
+        draftVersion: state.draftVersion,
+        hasUncommittedChanges: state.hasUncommittedChanges,
+      }));
+    } finally {
+      acceptedMutation?.finish();
     }
-    logNodeIdRepairs(
-      documentName,
-      "change",
-      repairCollaborationYDocNodeIds(document),
-    );
-    const state = persistCollaborationUpdate(
-      sqlite,
-      documentName,
-      document,
-      connectionContext.actor,
-    );
-    const hocuspocusDocument = document as Y.Doc & {
-      broadcastStateless?: (value: string) => void;
-    };
-    hocuspocusDocument.broadcastStateless?.(JSON.stringify({
-      type: "draft-status",
-      documentId: state.documentId,
-      draftVersion: state.draftVersion,
-      hasUncommittedChanges: state.hasUncommittedChanges,
-    }));
   },
   async onStoreDocument({ documentName, document }) {
     logNodeIdRepairs(
@@ -701,16 +1208,128 @@ const hocuspocus = new Hocuspocus({
       "store",
       repairCollaborationYDocNodeIds(document),
     );
+    const working = workingDocumentFromYDoc(sqlite, documentName, document);
+    assertDocumentMediaAssetsBelongToWorkspace(
+      sqlite,
+      working.workspaceId,
+      working.content,
+    );
     persistCollaborationYDoc(sqlite, documentName, document);
   },
   async onDisconnect({ context }) {
     const connectionContext = context as ConnectionContext;
+    connectionContext.disconnected = true;
     if (connectionContext.expirationTimer) {
       clearTimeout(connectionContext.expirationTimer);
       connectionContext.expirationTimer = undefined;
     }
+    connectionContext.acceptedMutation?.finish();
   },
 });
+
+function persistLoadedDocumentForBackup(documentName: string, document: Y.Doc) {
+  logNodeIdRepairs(
+    documentName,
+    "store",
+    repairCollaborationYDocNodeIds(document),
+  );
+  const working = workingDocumentFromYDoc(sqlite, documentName, document);
+  assertDocumentMediaAssetsBelongToWorkspace(
+    sqlite,
+    working.workspaceId,
+    working.content,
+  );
+  persistCollaborationYDoc(sqlite, documentName, document);
+}
+
+function backupBarrierReceipt(barrier: ActiveBackupBarrier): BackupBarrierReceipt {
+  if (!barrier.flushedAt || barrier.loadedDocumentCount === undefined) {
+    throw new DocumentServiceError(
+      "COLLABORATION_UNAVAILABLE",
+      "백업 장벽이 아직 준비되지 않았습니다.",
+    );
+  }
+  return {
+    barrierId: barrier.barrierId,
+    acquiredAt: barrier.acquiredAt,
+    flushedAt: barrier.flushedAt,
+    expiresAt: new Date(barrier.expiresAtMs).toISOString(),
+    flushWatermark: barrier.flushWatermark,
+    loadedDocumentCount: barrier.loadedDocumentCount,
+  };
+}
+
+async function acquireBackupBarrier() {
+  if (activeBackupBarrier) {
+    throw new DocumentServiceError(
+      "COLLABORATION_UNAVAILABLE",
+      "다른 검증 백업이 이미 진행 중입니다.",
+      { reason: "BACKUP_BARRIER_ALREADY_ACTIVE", retryable: true },
+    );
+  }
+  const acquiredAt = new Date().toISOString();
+  const barrier: ActiveBackupBarrier = {
+    barrierId: randomUUID(),
+    acquiredAt,
+    expiresAtMs: Date.now() + backupBarrierLeaseMs(),
+    flushWatermark: mutationWatermark,
+    expirationTimer: setTimeout(() => undefined, 1),
+  };
+  activeBackupBarrier = barrier;
+  armBackupBarrierExpiration(barrier);
+  try {
+    await waitForAcceptedMutations(backupBarrierQuiesceTimeoutMs());
+    if (activeBackupBarrier !== barrier) {
+      throw new Error("Backup barrier lease expired while waiting for accepted mutations.");
+    }
+    const documents = Array.from(hocuspocus.documents.values());
+    for (const document of documents) {
+      persistLoadedDocumentForBackup(document.name, document);
+    }
+    barrier.loadedDocumentCount = documents.length;
+    barrier.flushedAt = new Date().toISOString();
+    barrier.expiresAtMs = Date.now() + backupBarrierLeaseMs();
+    armBackupBarrierExpiration(barrier);
+    return backupBarrierReceipt(barrier);
+  } catch (error) {
+    releaseBackupBarrier(barrier.barrierId, "released");
+    throw new DocumentServiceError(
+      "COLLABORATION_UNAVAILABLE",
+      "협업 초안을 백업 경계까지 저장하지 못했습니다. 백업을 생성하지 않았습니다.",
+      { cause: error instanceof Error ? error.message : String(error) },
+    );
+  }
+}
+
+function requireActiveBackupBarrier(value: unknown) {
+  const input = requireRecord(value);
+  const barrierId = requireString(input.barrierId, "barrierId");
+  const barrier = activeBackupBarrier;
+  if (!barrier || barrier.barrierId !== barrierId || !barrier.flushedAt) {
+    throw new DocumentServiceError(
+      "COLLABORATION_UNAVAILABLE",
+      "백업 장벽이 만료되었거나 일치하지 않습니다.",
+      { reason: "BACKUP_BARRIER_NOT_ACTIVE" },
+    );
+  }
+  return barrier;
+}
+
+function renewBackupBarrier(value: unknown) {
+  const barrier = requireActiveBackupBarrier(value);
+  barrier.expiresAtMs = Date.now() + backupBarrierLeaseMs();
+  armBackupBarrierExpiration(barrier);
+  return backupBarrierReceipt(barrier);
+}
+
+function releaseRequestedBackupBarrier(value: unknown) {
+  const input = requireRecord(value);
+  const barrierId = requireString(input.barrierId, "barrierId");
+  return {
+    barrierId,
+    released: releaseBackupBarrier(barrierId, "released"),
+  };
+}
 
 async function withDirectDocument<T>(
   roomName: string,
@@ -751,25 +1370,55 @@ async function handleInternalRequest(request: IncomingMessage, response: ServerR
   const body = await readJson(request);
   let result;
   try {
-    result = path === "/internal/drafts/read"
-      ? await collaborationCommands.readWorking(parseReadRequest(body))
-      : path === "/internal/drafts/replace"
-        ? await collaborationCommands.replaceWorking(parseReplaceRequest(body))
-        : path === "/internal/drafts/replace-and-commit"
-          ? await collaborationCommands.replaceAndCommitWorking(parseReplaceAndCommitRequest(body))
-        : path === "/internal/drafts/move-tree"
-          ? await collaborationCommands.moveWorkingDocumentTree(
-              parseMoveWorkingDocumentTreeRequest(body),
-            )
-        : path === "/internal/drafts/patch"
-          ? await collaborationCommands.patchWorking(parsePatchRequest(body))
-          : path === "/internal/drafts/commit"
-            ? await collaborationCommands.commitWorking(parseCommitRequest(body))
-            : path === "/internal/drafts/reset"
-              ? await collaborationCommands.resetWorking(parseResetRequest(body))
-              : path === "/internal/drafts/archive"
-                ? await collaborationCommands.archiveWorkingTree(parseArchiveRequest(body))
-              : null;
+    switch (path) {
+      case "/internal/backup/barrier/acquire":
+        result = await acquireBackupBarrier();
+        break;
+      case "/internal/backup/barrier/renew":
+        result = renewBackupBarrier(body);
+        break;
+      case "/internal/backup/barrier/status":
+        result = backupBarrierReceipt(requireActiveBackupBarrier(body));
+        break;
+      case "/internal/backup/barrier/release":
+        result = releaseRequestedBackupBarrier(body);
+        break;
+      case "/internal/drafts/read":
+        result = await collaborationCommands.readWorking(parseReadRequest(body));
+        break;
+      case "/internal/drafts/replace":
+        result = await withAcceptedMutation(() =>
+          collaborationCommands.replaceWorking(parseReplaceRequest(body)));
+        break;
+      case "/internal/drafts/replace-and-commit":
+        result = await withAcceptedMutation(() =>
+          collaborationCommands.replaceAndCommitWorking(parseReplaceAndCommitRequest(body)));
+        break;
+      case "/internal/drafts/move-tree":
+        result = await withAcceptedMutation(() =>
+          collaborationCommands.moveWorkingDocumentTree(
+            parseMoveWorkingDocumentTreeRequest(body),
+          ));
+        break;
+      case "/internal/drafts/patch":
+        result = await withAcceptedMutation(() =>
+          collaborationCommands.patchWorking(parsePatchRequest(body)));
+        break;
+      case "/internal/drafts/commit":
+        result = await withAcceptedMutation(() =>
+          collaborationCommands.commitWorking(parseCommitRequest(body)));
+        break;
+      case "/internal/drafts/reset":
+        result = await withAcceptedMutation(() =>
+          collaborationCommands.resetWorking(parseResetRequest(body)));
+        break;
+      case "/internal/drafts/archive":
+        result = await withAcceptedMutation(() =>
+          collaborationCommands.archiveWorkingTree(parseArchiveRequest(body)));
+        break;
+      default:
+        result = null;
+    }
   } catch (error) {
     if (error && typeof error === "object") {
       requestFailureContext.set(error, internalRequestContext(body));
@@ -837,6 +1486,9 @@ httpServer.listen(port, "0.0.0.0", () => {
 
 async function shutdown(signal: string) {
   console.log(`[collaboration] received ${signal}; shutting down`);
+  if (activeBackupBarrier) {
+    releaseBackupBarrier(activeBackupBarrier.barrierId, "released");
+  }
   hocuspocus.closeConnections();
   await new Promise<void>((resolve) => httpServer.close(() => resolve()));
   sqlite.close();

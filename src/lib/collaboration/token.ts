@@ -1,4 +1,5 @@
 import { createHmac, randomUUID, timingSafeEqual } from "node:crypto";
+import { isIP } from "node:net";
 import { getCollaborationSecret } from "@/lib/config";
 import type { DraftActor } from "@/lib/collaboration/drafts";
 
@@ -58,6 +59,7 @@ function parseClaims(value: unknown): CollaborationTokenClaims {
   }
   const permissions = value.permissions;
   const actor = value.actor;
+  const requestContext = isRecord(actor) ? actor.requestContext : undefined;
   if (
     typeof value.tokenId !== "string"
     || typeof value.roomName !== "string"
@@ -74,6 +76,20 @@ function parseClaims(value: unknown): CollaborationTokenClaims {
     || (actor.type !== "human" && actor.type !== "agent" && actor.type !== "system")
     || typeof actor.label !== "string"
     || !["web", "mcp", "api", "rollback", "migration", "seed"].includes(String(actor.source))
+    || (
+      requestContext !== undefined
+      && (
+        !isRecord(requestContext)
+        || Object.keys(requestContext).some((key) => key !== "clientIp")
+        || !(
+          requestContext.clientIp === null
+          || (
+            typeof requestContext.clientIp === "string"
+            && isIP(requestContext.clientIp.trim().replace(/^\[|\]$/g, "")) > 0
+          )
+        )
+      )
+    )
   ) {
     throw new Error("협업 토큰의 내용이 올바르지 않습니다.");
   }

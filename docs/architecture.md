@@ -85,6 +85,11 @@ Nyxdoc은 에이전트를 서버 안에서 실행하지 않는다. Codex, OpenCl
 에이전트 `commit_document`처럼 명시적인 작업에서만 생성된다. SSE는 정본 리비전 이벤트,
 presence는 현재 작업 위치를 보완한다.
 
+문서의 부모와 형제 순서는 현재 탐색 트리의 상태다. 이동은 정본 metadata revision을 남기지만,
+같은 부모 안의 `sort_order` 재배치는 본문·제목의 과거 revision snapshot에 포함되지 않는다.
+따라서 과거 리비전을 열어도 당시 사이드바 순서를 재현하는 계약은 아니다. 순서 변경은 현재 트리
+상태와 감사 이벤트로 검증하며, 리비전 복원은 문서 snapshot 복원에만 책임을 둔다.
+
 계정 설정은 사람 프로필·로그인을 소유하고, 에이전트 메뉴는 전역 에이전트 신원·아바타·연결
 키·IP 제한을 소유한다. 워크스페이스 설정은 에이전트 grant·capability·문서 범위·감사를 소유한다.
 사용자 흐름은 워크스페이스 안의 원자적 연결 마법사로 합치되 이 소유권 경계는 유지한다.
@@ -98,6 +103,6 @@ presence는 현재 작업 위치를 보완한다.
 
 - 로컬: `./data/nyxdoc-dev.db`, `http://localhost:3100`
 - 테스트: 메모리 SQLite와 로컬 `/mcp`
-- 운영: Docker volume의 `/data/nyxdoc.db`, HTTP/WebSocket 게이트웨이 loopback `3191`, 협업 서버 점검용 loopback `3192`, Next 앱은 Docker 내부 전용
+- 운영: Docker volume의 `/data/nyxdoc.db`, HTTP/WebSocket 게이트웨이 loopback `3191`, 협업 서버와 Next 앱은 Docker 내부 전용
 
 DB 파일, 인증 비밀, SMTP 비밀번호, API 토큰 원문은 저장소에 커밋하지 않는다. 컨테이너는 비루트 사용자로 실행하고 시작 전에 멱등 마이그레이션을 수행한다.

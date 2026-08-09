@@ -1,33 +1,100 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { randomUUID } from "node:crypto";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   assignAgentToWorkspace,
+  bindAgentCredentialToGrant,
   connectAgentToWorkspace,
   createAccountAgent,
   createAgentCredential,
+  createOrganizationAgent,
   deleteAccountAgent,
   listAccountAgents,
   purgeAccountAgent,
   purgeExpiredAccountAgents,
+  revokeAgentCredential,
   restoreAccountAgent,
   rotateAgentCredential,
   updateAccountAgent,
   updateAgentCredential,
   updateAgentWorkspaceMembership,
 } from "@/lib/agents/service";
-import type { NyxDatabase } from "@/lib/db/client";
+import { listAgentProfilePermissions } from "@/lib/authz/permissions";
+import { openDatabase, type NyxDatabase } from "@/lib/db/client";
+import { runAppMigrations } from "@/lib/db/migrations";
+import { createOrganization } from "@/lib/organizations/service";
 import {
   ApiTokenError,
   authenticateApiToken,
+  listApiTokenWorkspaceIdentities,
   requireTokenScope,
 } from "@/lib/tokens/service";
 import { createWorkspace } from "@/lib/workspaces/service";
 import { createTestDatabase, createTestUser } from "@/test/fixture";
 
 const databases: NyxDatabase[] = [];
+const temporaryPaths: string[] = [];
 
 afterEach(() => {
   while (databases.length) databases.pop()?.close();
+  while (temporaryPaths.length) rmSync(temporaryPaths.pop()!, { recursive: true, force: true });
 });
+
+function createFileTestDatabase() {
+  const directory = mkdtempSync(path.join(tmpdir(), "nyxdoc-agent-service-"));
+  temporaryPaths.push(directory);
+  const databasePath = path.join(directory, "nyxdoc.db");
+  const database = openDatabase(databasePath);
+  database.exec(`
+    CREATE TABLE user (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      email TEXT NOT NULL UNIQUE,
+      emailVerified INTEGER NOT NULL DEFAULT 1,
+      image TEXT,
+      createdAt INTEGER NOT NULL,
+      updatedAt INTEGER NOT NULL
+    );
+    CREATE TABLE verification (
+      id TEXT PRIMARY KEY,
+      identifier TEXT NOT NULL,
+      value TEXT NOT NULL,
+      expiresAt TEXT NOT NULL,
+      createdAt TEXT NOT NULL,
+      updatedAt TEXT NOT NULL
+    );
+  `);
+  runAppMigrations(database);
+  databases.push(database);
+  return { database, databasePath };
+}
+
+function runBeforeNextImmediate(database: NyxDatabase, operation: () => void) {
+  const originalTransaction = database.transaction.bind(database);
+  let interlocked = false;
+  const spy = vi.spyOn(database, "transaction").mockImplementation(
+    ((transactionOperation: () => unknown) => {
+      const runner = originalTransaction(transactionOperation);
+      return Object.assign(
+        () => runner(),
+        {
+          deferred: () => runner.deferred(),
+          immediate: () => {
+            if (!interlocked) {
+              interlocked = true;
+              operation();
+            }
+            return runner.immediate();
+          },
+          exclusive: () => runner.exclusive(),
+        },
+      );
+    }) as unknown as typeof database.transaction,
+  );
+  return { spy, wasInterlocked: () => interlocked };
+}
 
 describe("global agents and workspace memberships", () => {
   it("connects a new agent, workspace role, document scope, and credential atomically", () => {
@@ -306,7 +373,18 @@ describe("global agents and workspace memberships", () => {
       accessProfile: "writer",
       capabilities: expect.arrayContaining(["documents.update", "documents.commit"]),
     });
+    expect(firstIdentity.requestContext).toEqual({ clientIp: "203.0.113.77" });
+    expect(Object.isFrozen(firstIdentity.requestContext)).toBe(true);
     expect(() => requireTokenScope(firstIdentity, "documents:commit")).not.toThrow();
+    expect(listApiTokenWorkspaceIdentities(database, firstIdentity)).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          identity: expect.objectContaining({
+            requestContext: { clientIp: "203.0.113.77" },
+          }),
+        }),
+      ]),
+    );
 
     const secondIdentity = authenticateApiToken(database, `Bearer ${created.token}`, {
       workspaceId: second.id,
@@ -573,5 +651,553 @@ describe("global agents and workspace memberships", () => {
       confirmationName: "Gameroom Main",
       backupGenerationId: "another-backup",
     })).toThrowError(expect.objectContaining({ code: "CONFLICT" }));
+  });
+
+  it("rejects a credential binding when another connection revokes the key before the immediate transaction", () => {
+    const { database, databasePath } = createFileTestDatabase();
+    const { user, workspace: first } = createTestUser(database);
+    const second = createWorkspace(database, user, "Concurrent binding workspace");
+    const agent = createAccountAgent(database, {
+      userId: user.id,
+      displayName: "Concurrent binding agent",
+    });
+    assignAgentToWorkspace(database, {
+      userId: user.id,
+      workspaceId: first.id,
+      agentId: agent.id,
+      accessProfile: "writer",
+    });
+    const secondGrant = assignAgentToWorkspace(database, {
+      userId: user.id,
+      workspaceId: second.id,
+      agentId: agent.id,
+      accessProfile: "writer",
+    });
+    const credential = createAgentCredential(database, {
+      userId: user.id,
+      agentId: agent.id,
+      name: "Concurrent binding key",
+      defaultWorkspaceId: first.id,
+      workspaceAllowlist: [first.id],
+    });
+
+    const concurrent = openDatabase(databasePath);
+    const interlock = runBeforeNextImmediate(database, () => {
+      revokeAgentCredential(concurrent, {
+        userId: user.id,
+        agentId: agent.id,
+        credentialId: credential.credential.id,
+      });
+    });
+    try {
+      expect(() => bindAgentCredentialToGrant(database, {
+        userId: user.id,
+        agentId: agent.id,
+        credentialId: credential.credential.id,
+        grantId: secondGrant.membershipId,
+      })).toThrowError(expect.objectContaining({ code: "CREDENTIAL_REVOKED" }));
+      expect(interlock.wasInterlocked()).toBe(true);
+    } finally {
+      interlock.spy.mockRestore();
+      concurrent.close();
+    }
+
+    expect(database.prepare(
+      `SELECT COUNT(*) AS count FROM agent_credential_grant_bindings
+       WHERE credential_id = ? AND grant_id = ? AND status = 'active' AND revoked_at IS NULL`,
+    ).get(credential.credential.id, secondGrant.membershipId)).toEqual({ count: 0 });
+    expect(database.prepare(
+      "SELECT revoked_at IS NOT NULL AS revoked FROM agent_credentials WHERE id = ?",
+    ).get(credential.credential.id)).toEqual({ revoked: 1 });
+  });
+
+  it("rejects a workspace grant mutation when another connection removes the manager", () => {
+    const { database, databasePath } = createFileTestDatabase();
+    const owner = createTestUser(database, { name: "Concurrent organization owner" });
+    const administrator = createTestUser(database, { name: "Concurrent organization administrator" });
+    const organization = createOrganization(database, {
+      userId: owner.user.id,
+      actorLabel: owner.user.name,
+      name: "Concurrent manager organization",
+    });
+    const memberAddedAt = "2026-08-09T01:00:00.000Z";
+    database.prepare(
+      `INSERT INTO organization_members
+       (id, organization_id, user_id, role, created_at, updated_at)
+       VALUES (?, ?, ?, 'admin', ?, ?)`,
+    ).run(
+      randomUUID(),
+      organization.id,
+      administrator.user.id,
+      memberAddedAt,
+      memberAddedAt,
+    );
+    const workspace = createWorkspace(database, owner.user, "Concurrent manager workspace", "en", {
+      organizationId: organization.id,
+    });
+    const agent = createOrganizationAgent(database, {
+      organizationId: organization.id,
+      userId: administrator.user.id,
+      actorLabel: administrator.user.name,
+      displayName: "Concurrent manager agent",
+    });
+    const grant = assignAgentToWorkspace(database, {
+      userId: administrator.user.id,
+      workspaceId: workspace.id,
+      agentId: agent.id,
+      accessProfile: "writer",
+    });
+    const before = database.prepare(
+      `SELECT access_profile, capabilities_json, status, root_document_id, policy_version
+       FROM workspace_agents WHERE id = ?`,
+    ).get(grant.membershipId);
+
+    const concurrent = openDatabase(databasePath);
+    const interlock = runBeforeNextImmediate(database, () => {
+      concurrent.prepare(
+        "DELETE FROM organization_members WHERE organization_id = ? AND user_id = ?",
+      ).run(organization.id, administrator.user.id);
+    });
+    try {
+      expect(() => updateAgentWorkspaceMembership(database, {
+        userId: administrator.user.id,
+        workspaceId: workspace.id,
+        agentId: agent.id,
+        accessProfile: "reader",
+        rootDocumentId: null,
+      })).toThrowError(expect.objectContaining({ code: "NOT_FOUND" }));
+      expect(interlock.wasInterlocked()).toBe(true);
+    } finally {
+      interlock.spy.mockRestore();
+      concurrent.close();
+    }
+
+    expect(database.prepare(
+      `SELECT access_profile, capabilities_json, status, root_document_id, policy_version
+       FROM workspace_agents WHERE id = ?`,
+    ).get(grant.membershipId)).toEqual(before);
+  });
+
+  it("preserves a concurrently narrowed grant by deriving omitted fields inside the immediate transaction", () => {
+    const { database, databasePath } = createFileTestDatabase();
+    const { user, workspace } = createTestUser(database);
+    const agent = createAccountAgent(database, {
+      userId: user.id,
+      displayName: "Concurrent grant agent",
+    });
+    const grant = assignAgentToWorkspace(database, {
+      userId: user.id,
+      workspaceId: workspace.id,
+      agentId: agent.id,
+      accessProfile: "writer",
+    });
+    const before = database.prepare(
+      "SELECT policy_version FROM workspace_agents WHERE id = ?",
+    ).get(grant.membershipId) as { policy_version: number };
+    const readerCapabilities = listAgentProfilePermissions("reader");
+
+    const concurrent = openDatabase(databasePath);
+    const interlock = runBeforeNextImmediate(database, () => {
+      concurrent.prepare(
+        `UPDATE workspace_agents
+         SET role = 'viewer', access_profile = 'reader', capabilities_json = ?,
+             policy_version = policy_version + 1, updated_at = ?
+         WHERE id = ?`,
+      ).run(
+        JSON.stringify(readerCapabilities),
+        "2026-08-09T02:00:00.000Z",
+        grant.membershipId,
+      );
+    });
+    let updated;
+    try {
+      updated = updateAgentWorkspaceMembership(database, {
+        userId: user.id,
+        workspaceId: workspace.id,
+        agentId: agent.id,
+        rootDocumentId: null,
+      });
+      expect(interlock.wasInterlocked()).toBe(true);
+    } finally {
+      interlock.spy.mockRestore();
+      concurrent.close();
+    }
+
+    expect(updated).toMatchObject({
+      accessProfile: "reader",
+      capabilities: readerCapabilities,
+      policyVersion: before.policy_version + 2,
+    });
+  });
+
+  it("rechecks organization ownership in the final transaction when access is revoked after purge preflight", () => {
+    const { database, databasePath } = createFileTestDatabase();
+    const owner = createTestUser(database, { name: "Organization owner" });
+    const administrator = createTestUser(database, { name: "Organization administrator" });
+    const organization = createOrganization(database, {
+      userId: owner.user.id,
+      actorLabel: owner.user.name,
+      name: "Purge interlock organization",
+    });
+    const memberAddedAt = "2026-08-09T00:00:00.000Z";
+    database.prepare(
+      `INSERT INTO organization_members
+       (id, organization_id, user_id, role, created_at, updated_at)
+       VALUES (?, ?, ?, 'admin', ?, ?)`,
+    ).run(
+      randomUUID(),
+      organization.id,
+      administrator.user.id,
+      memberAddedAt,
+      memberAddedAt,
+    );
+    const workspace = createWorkspace(database, owner.user, "Purge interlock workspace", "en", {
+      organizationId: organization.id,
+    });
+    const agent = createOrganizationAgent(database, {
+      organizationId: organization.id,
+      userId: administrator.user.id,
+      actorLabel: administrator.user.name,
+      displayName: "Purge interlock agent",
+    });
+    const membership = assignAgentToWorkspace(database, {
+      userId: administrator.user.id,
+      workspaceId: workspace.id,
+      agentId: agent.id,
+      accessProfile: "writer",
+    });
+    const credential = createAgentCredential(database, {
+      userId: administrator.user.id,
+      agentId: agent.id,
+      name: "Purge interlock credential",
+      defaultWorkspaceId: workspace.id,
+      workspaceAllowlist: [workspace.id],
+    });
+    deleteAccountAgent(database, {
+      userId: administrator.user.id,
+      agentId: agent.id,
+      now: "2026-08-09T00:01:00.000Z",
+    });
+
+    const beforeTombstone = database.prepare(
+      `SELECT status, deleted_at, purge_after, purged_at
+       FROM agents WHERE id = ?`,
+    ).get(agent.id);
+    const beforeCredentials = database.prepare(
+      `SELECT id, revoked_at FROM agent_credentials
+       WHERE agent_id = ? ORDER BY id`,
+    ).all(agent.id);
+    const beforeBindings = database.prepare(
+      `SELECT credential_id, grant_id, revoked_at
+       FROM agent_credential_grant_bindings
+       WHERE credential_id = ? ORDER BY grant_id`,
+    ).all(credential.credential.id);
+    const beforeAuditCount = database.prepare(
+      `SELECT COUNT(*) AS count FROM workspace_audit_events
+       WHERE action = 'agent.global_purged' AND target_id = ?`,
+    ).get(agent.id) as { count: number };
+
+    const concurrent = openDatabase(databasePath);
+    const originalTransaction = database.transaction.bind(database);
+    let interlocked = false;
+    const transactionSpy = vi.spyOn(database, "transaction").mockImplementation(
+      ((operation: () => unknown) => {
+        const runner = originalTransaction(operation);
+        return Object.assign(
+          () => runner(),
+          {
+            deferred: () => runner.deferred(),
+            immediate: () => {
+              if (!interlocked) {
+                interlocked = true;
+                concurrent.prepare(
+                  "DELETE FROM organization_members WHERE organization_id = ? AND user_id = ?",
+                ).run(organization.id, administrator.user.id);
+              }
+              return runner.immediate();
+            },
+            exclusive: () => runner.exclusive(),
+          },
+        );
+      }) as unknown as typeof database.transaction,
+    );
+
+    try {
+      expect(() => purgeAccountAgent(database, {
+        userId: administrator.user.id,
+        agentId: agent.id,
+        confirmationName: "Purge interlock agent",
+        backupGenerationId: "verified-backup-before-final-transaction",
+        now: "2026-08-09T00:02:00.000Z",
+      })).toThrowError(expect.objectContaining({ code: "NOT_FOUND" }));
+      expect(interlocked).toBe(true);
+    } finally {
+      transactionSpy.mockRestore();
+      concurrent.close();
+    }
+
+    expect(database.prepare(
+      `SELECT status, deleted_at, purge_after, purged_at
+       FROM agents WHERE id = ?`,
+    ).get(agent.id)).toEqual(beforeTombstone);
+    expect(database.prepare(
+      `SELECT id, revoked_at FROM agent_credentials
+       WHERE agent_id = ? ORDER BY id`,
+    ).all(agent.id)).toEqual(beforeCredentials);
+    expect(database.prepare(
+      `SELECT credential_id, grant_id, revoked_at
+       FROM agent_credential_grant_bindings
+       WHERE credential_id = ? ORDER BY grant_id`,
+    ).all(credential.credential.id)).toEqual(beforeBindings);
+    expect(database.prepare(
+      `SELECT COUNT(*) AS count FROM workspace_audit_events
+       WHERE action = 'agent.global_purged' AND target_id = ?`,
+    ).get(agent.id)).toEqual(beforeAuditCount);
+    expect(database.prepare(
+      "SELECT status FROM workspace_agents WHERE id = ?",
+    ).get(membership.membershipId)).toEqual({ status: "disabled" });
+  });
+
+  it("does not create an organization agent after the actor loses organization access", () => {
+    const { database, databasePath } = createFileTestDatabase();
+    const owner = createTestUser(database, { name: "Organization owner" });
+    const administrator = createTestUser(database, { name: "Organization administrator" });
+    const organization = createOrganization(database, {
+      userId: owner.user.id,
+      actorLabel: owner.user.name,
+      name: "Organization agent create interlock",
+    });
+    database.prepare(
+      `INSERT INTO organization_members
+       (id, organization_id, user_id, role, created_at, updated_at)
+       VALUES (?, ?, ?, 'admin', ?, ?)`,
+    ).run(
+      randomUUID(),
+      organization.id,
+      administrator.user.id,
+      "2026-08-09T10:00:00.000Z",
+      "2026-08-09T10:00:00.000Z",
+    );
+
+    const concurrent = openDatabase(databasePath);
+    const interlock = runBeforeNextImmediate(database, () => {
+      concurrent.prepare(
+        "DELETE FROM organization_members WHERE organization_id = ? AND user_id = ?",
+      ).run(organization.id, administrator.user.id);
+    });
+    try {
+      expect(() => createOrganizationAgent(database, {
+        organizationId: organization.id,
+        userId: administrator.user.id,
+        actorLabel: administrator.user.name,
+        displayName: "Must not be created",
+      })).toThrowError(expect.objectContaining({ code: "NOT_FOUND" }));
+      expect(interlock.wasInterlocked()).toBe(true);
+    } finally {
+      interlock.spy.mockRestore();
+      concurrent.close();
+    }
+
+    expect(database.prepare(
+      `SELECT COUNT(*) AS count
+       FROM agents agent JOIN agent_ownership ownership ON ownership.agent_id = agent.id
+       WHERE ownership.organization_id = ?`,
+    ).get(organization.id)).toEqual({ count: 0 });
+  });
+
+  it("serializes organization agent creation at the 250 active-agent limit", () => {
+    const { database, databasePath } = createFileTestDatabase();
+    const owner = createTestUser(database, { name: "Organization owner" });
+    const organization = createOrganization(database, {
+      userId: owner.user.id,
+      actorLabel: owner.user.name,
+      name: "Organization agent limit interlock",
+    });
+    const now = "2026-08-09T10:05:00.000Z";
+    const seed = database.transaction(() => {
+      for (let index = 0; index < 249; index += 1) {
+        const id = randomUUID();
+        database.prepare(
+          `INSERT INTO agents
+           (id, owner_user_id, display_name, avatar_media_id, status,
+            created_by_user_id, created_at, updated_at)
+           VALUES (?, ?, ?, NULL, 'active', ?, ?, ?)`,
+        ).run(id, owner.user.id, `Seed agent ${index}`, owner.user.id, now, now);
+        database.prepare(
+          `INSERT INTO agent_ownership
+           (agent_id, owner_type, owner_user_id, organization_id, created_at, updated_at)
+           VALUES (?, 'organization', NULL, ?, ?, ?)`,
+        ).run(id, organization.id, now, now);
+      }
+    });
+    seed.immediate();
+
+    const concurrent = openDatabase(databasePath);
+    const interlock = runBeforeNextImmediate(database, () => {
+      createOrganizationAgent(concurrent, {
+        organizationId: organization.id,
+        userId: owner.user.id,
+        actorLabel: owner.user.name,
+        displayName: "Concurrent 250th agent",
+      });
+    });
+    try {
+      expect(() => createOrganizationAgent(database, {
+        organizationId: organization.id,
+        userId: owner.user.id,
+        actorLabel: owner.user.name,
+        displayName: "Concurrent 251st agent",
+      })).toThrowError(expect.objectContaining({ code: "INVALID_INPUT" }));
+      expect(interlock.wasInterlocked()).toBe(true);
+    } finally {
+      interlock.spy.mockRestore();
+      concurrent.close();
+    }
+
+    expect(database.prepare(
+      `SELECT COUNT(*) AS count
+       FROM agents agent JOIN agent_ownership ownership ON ownership.agent_id = agent.id
+       WHERE ownership.organization_id = ?
+         AND agent.status = 'active' AND agent.deleted_at IS NULL`,
+    ).get(organization.id)).toEqual({ count: 250 });
+    expect(database.prepare(
+      `SELECT COUNT(*) AS count FROM organization_audit_events
+       WHERE organization_id = ? AND action = 'organization.agent_created'`,
+    ).get(organization.id)).toEqual({ count: 1 });
+  });
+
+  it("does not update an organization agent after the actor loses organization access", () => {
+    const { database, databasePath } = createFileTestDatabase();
+    const owner = createTestUser(database, { name: "Organization owner" });
+    const administrator = createTestUser(database, { name: "Organization administrator" });
+    const organization = createOrganization(database, {
+      userId: owner.user.id,
+      actorLabel: owner.user.name,
+      name: "Organization agent update interlock",
+    });
+    database.prepare(
+      `INSERT INTO organization_members
+       (id, organization_id, user_id, role, created_at, updated_at)
+       VALUES (?, ?, ?, 'admin', ?, ?)`,
+    ).run(randomUUID(), organization.id, administrator.user.id, "2026-08-09T10:10:00.000Z", "2026-08-09T10:10:00.000Z");
+    const agent = createOrganizationAgent(database, {
+      organizationId: organization.id,
+      userId: administrator.user.id,
+      actorLabel: administrator.user.name,
+      displayName: "Original name",
+    });
+
+    const concurrent = openDatabase(databasePath);
+    const interlock = runBeforeNextImmediate(database, () => {
+      concurrent.prepare(
+        "DELETE FROM organization_members WHERE organization_id = ? AND user_id = ?",
+      ).run(organization.id, administrator.user.id);
+    });
+    try {
+      expect(() => updateAccountAgent(database, {
+        userId: administrator.user.id,
+        agentId: agent.id,
+        displayName: "Must not be updated",
+      })).toThrowError(expect.objectContaining({ code: "NOT_FOUND" }));
+      expect(interlock.wasInterlocked()).toBe(true);
+    } finally {
+      interlock.spy.mockRestore();
+      concurrent.close();
+    }
+    expect(database.prepare("SELECT display_name FROM agents WHERE id = ?").get(agent.id))
+      .toEqual({ display_name: "Original name" });
+  });
+
+  it("allows exactly one concurrent organization-agent delete and records one audit event", () => {
+    const { database, databasePath } = createFileTestDatabase();
+    const owner = createTestUser(database, { name: "Organization owner" });
+    const organization = createOrganization(database, {
+      userId: owner.user.id,
+      actorLabel: owner.user.name,
+      name: "Organization agent delete interlock",
+    });
+    const agent = createOrganizationAgent(database, {
+      organizationId: organization.id,
+      userId: owner.user.id,
+      actorLabel: owner.user.name,
+      displayName: "Single delete agent",
+    });
+
+    const concurrent = openDatabase(databasePath);
+    const interlock = runBeforeNextImmediate(database, () => {
+      deleteAccountAgent(concurrent, {
+        userId: owner.user.id,
+        agentId: agent.id,
+        now: "2026-08-09T10:20:00.000Z",
+      });
+    });
+    try {
+      expect(() => deleteAccountAgent(database, {
+        userId: owner.user.id,
+        agentId: agent.id,
+        now: "2026-08-09T10:20:01.000Z",
+      })).toThrowError(expect.objectContaining({ code: "CONFLICT" }));
+      expect(interlock.wasInterlocked()).toBe(true);
+    } finally {
+      interlock.spy.mockRestore();
+      concurrent.close();
+    }
+    expect(database.prepare(
+      "SELECT status, deleted_at FROM agents WHERE id = ?",
+    ).get(agent.id)).toEqual({ status: "disabled", deleted_at: "2026-08-09T10:20:00.000Z" });
+    expect(database.prepare(
+      `SELECT COUNT(*) AS count FROM organization_audit_events
+       WHERE organization_id = ? AND action = 'agent.global_deleted' AND target_id = ?`,
+    ).get(organization.id, agent.id)).toEqual({ count: 1 });
+  });
+
+  it("does not restore an organization agent that a concurrent purge has tombstoned", () => {
+    const { database, databasePath } = createFileTestDatabase();
+    const owner = createTestUser(database, { name: "Organization owner" });
+    const organization = createOrganization(database, {
+      userId: owner.user.id,
+      actorLabel: owner.user.name,
+      name: "Organization agent restore interlock",
+    });
+    const agent = createOrganizationAgent(database, {
+      organizationId: organization.id,
+      userId: owner.user.id,
+      actorLabel: owner.user.name,
+      displayName: "Purged instead of restored",
+    });
+    deleteAccountAgent(database, {
+      userId: owner.user.id,
+      agentId: agent.id,
+      now: "2026-08-09T10:30:00.000Z",
+    });
+
+    const concurrent = openDatabase(databasePath);
+    const interlock = runBeforeNextImmediate(database, () => {
+      purgeAccountAgent(concurrent, {
+        userId: owner.user.id,
+        agentId: agent.id,
+        confirmationName: "Purged instead of restored",
+        backupGenerationId: "verified-before-restore-race",
+        now: "2026-08-09T10:31:00.000Z",
+      });
+    });
+    try {
+      expect(() => restoreAccountAgent(database, {
+        userId: owner.user.id,
+        agentId: agent.id,
+        now: "2026-08-09T10:31:01.000Z",
+      })).toThrowError(expect.objectContaining({ code: "CONFLICT" }));
+      expect(interlock.wasInterlocked()).toBe(true);
+    } finally {
+      interlock.spy.mockRestore();
+      concurrent.close();
+    }
+    expect(database.prepare(
+      "SELECT status, deleted_at, purged_at FROM agents WHERE id = ?",
+    ).get(agent.id)).toEqual({
+      status: "disabled",
+      deleted_at: "2026-08-09T10:30:00.000Z",
+      purged_at: "2026-08-09T10:31:00.000Z",
+    });
   });
 });

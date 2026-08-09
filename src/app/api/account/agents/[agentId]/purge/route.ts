@@ -6,7 +6,7 @@ import {
   validateAccountAgentPurge,
 } from "@/lib/agents/service";
 import { sqlite } from "@/lib/db/client";
-import { createDestructiveOperationBackup } from "@/lib/db/safety-backup";
+import { withDestructiveOperationBackup } from "@/lib/db/safety-backup";
 import { apiErrorResponse } from "@/lib/http/errors";
 import { assertSameOrigin } from "@/lib/http/origin";
 
@@ -32,17 +32,24 @@ export async function DELETE(
       agentId,
       confirmationName: body.confirmationName,
     });
-    const backup = await createDestructiveOperationBackup();
-    const agent = purgeAccountAgent(sqlite, {
-      userId: session.user.id,
-      agentId,
-      confirmationName: body.confirmationName,
-      actorLabel: session.user.name,
-      backupGenerationId: backup.manifest.generationId,
-    });
+    const protectedOperation = await withDestructiveOperationBackup((backup) =>
+      purgeAccountAgent(sqlite, {
+        userId: session.user.id,
+        agentId,
+        confirmationName: body.confirmationName,
+        actorLabel: session.user.name,
+        backupGenerationId: backup.manifest.generationId,
+      }));
+    const agent = protectedOperation.result;
+    if (protectedOperation.warnings.length > 0) {
+      console.warn("[nyxdoc] agent purge completed with backup barrier warnings", {
+        agentId,
+        warnings: protectedOperation.warnings,
+      });
+    }
     return Response.json({
       agent,
-      backupGenerationId: backup.manifest.generationId,
+      backupGenerationId: protectedOperation.backup.manifest.generationId,
     }, { headers: { "Cache-Control": "no-store" } });
   } catch (error) {
     return apiErrorResponse(error);

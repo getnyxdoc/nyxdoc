@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
+import { randomUUID } from "node:crypto";
 import { slateNodesToInsertDelta } from "@slate-yjs/core";
 import * as Y from "yjs";
 import {
@@ -62,7 +63,332 @@ function fixture() {
   return { database, workspace, actor, created, commands };
 }
 
+function liveFixture() {
+  const base = fixture();
+  const state = ensureCollaborationState(
+    base.database,
+    base.workspace.id,
+    base.created.document.id,
+  );
+  const liveDocument = collaborationYDocFromState(state.state);
+  const commands = createCollaborationCommands({
+    database: base.database,
+    provider: {
+      async withDocument(roomName, callback) {
+        expect(roomName).toBe(state.roomName);
+        return await callback(liveDocument);
+      },
+      closeConnections() {},
+    },
+  });
+  return { ...base, state, liveDocument, commands };
+}
+
+function storedDraftSnapshot(database: NyxDatabase, documentId: string) {
+  const row = database.prepare(
+    `SELECT generation, draft_version, yjs_state
+     FROM document_collaboration_states
+     WHERE document_id = ?`,
+  ).get(documentId) as {
+    generation: number;
+    draft_version: number;
+    yjs_state: Buffer;
+  } | undefined;
+  if (!row) throw new Error("expected a stored collaboration draft");
+  return {
+    generation: Number(row.generation),
+    draftVersion: Number(row.draft_version),
+    state: Buffer.from(row.yjs_state),
+  };
+}
+
+function storedDraftAtomicSnapshot(database: NyxDatabase, documentId: string) {
+  const row = database.prepare(
+    `SELECT generation, draft_version, committed_draft_version,
+            base_revision_id, base_revision_number, yjs_state, committed_yjs_state,
+            updated_at, committed_at, last_actor_type, last_actor_principal_id,
+            last_actor_label, last_actor_avatar_media_id
+     FROM document_collaboration_states
+     WHERE document_id = ?`,
+  ).get(documentId) as {
+    generation: number;
+    draft_version: number;
+    committed_draft_version: number;
+    base_revision_id: string | null;
+    base_revision_number: number;
+    yjs_state: Buffer;
+    committed_yjs_state: Buffer;
+    updated_at: string;
+    committed_at: string | null;
+    last_actor_type: string | null;
+    last_actor_principal_id: string | null;
+    last_actor_label: string | null;
+    last_actor_avatar_media_id: string | null;
+  } | undefined;
+  if (!row) throw new Error("expected a stored collaboration draft");
+  return {
+    ...row,
+    yjs_state: Buffer.from(row.yjs_state),
+    committed_yjs_state: Buffer.from(row.committed_yjs_state),
+  };
+}
+
+function storedContributors(database: NyxDatabase, documentId: string) {
+  return database.prepare(
+    `SELECT generation, contributor_key, actor_type, actor_principal_id,
+            actor_label, actor_avatar_media_id, first_edit_at, last_edit_at, update_count
+     FROM document_draft_contributors
+     WHERE document_id = ?
+     ORDER BY generation, contributor_key`,
+  ).all(documentId);
+}
+
+function insertTestMediaAsset(
+  database: NyxDatabase,
+  workspaceId: string,
+  userId: string,
+) {
+  const mediaId = randomUUID();
+  database.prepare(
+    `INSERT INTO media_assets
+     (id, workspace_id, storage_key, sha256, mime_type, byte_size,
+      original_filename, uploaded_by_user_id, uploaded_by_token_id, created_at)
+     VALUES (?, ?, ?, ?, 'image/png', 1, NULL, ?, NULL, ?)`,
+  ).run(
+    mediaId,
+    workspaceId,
+    `${mediaId}.png`,
+    `sha-${mediaId}`,
+    userId,
+    new Date().toISOString(),
+  );
+  return mediaId;
+}
+
+function imageBlock(mediaId: string, id = "draft-image") {
+  return {
+    id,
+    type: "img" as const,
+    mediaId,
+    url: `/api/media/${mediaId}`,
+    children: [{ text: "" }],
+  };
+}
+
+const atomicMutationCases = [
+  {
+    name: "replaceWorking",
+    requestId: "replace-failure-atomicity-001",
+    expectedTitle: "원자적으로 교체한 제목",
+    expectedText: "원자적으로 교체한 본문",
+    run(input: ReturnType<typeof liveFixture>) {
+      return input.commands.replaceWorking({
+        roomName: input.state.roomName,
+        actor: input.actor,
+        requestId: "replace-failure-atomicity-001",
+        expectedDraftVersion: input.state.draftVersion,
+        replacement: {
+          title: "원자적으로 교체한 제목",
+          content: parseNyxdocDocumentV2({
+            schemaVersion: 2,
+            blocks: [{ id: "initial", type: "p", children: [{ text: "원자적으로 교체한 본문" }] }],
+          }),
+        },
+      });
+    },
+  },
+  {
+    name: "patchWorking",
+    requestId: "patch-failure-atomicity-001",
+    expectedTitle: "공유 초안 테스트",
+    expectedText: "원자적으로 패치한 본문",
+    run(input: ReturnType<typeof liveFixture>) {
+      return input.commands.patchWorking({
+        roomName: input.state.roomName,
+        actor: input.actor,
+        requestId: "patch-failure-atomicity-001",
+        expectedDraftVersion: input.state.draftVersion,
+        operations: [{
+          op: "replace_block",
+          blockId: "initial",
+          block: {
+            id: "initial",
+            type: "p",
+            children: [{ text: "원자적으로 패치한 본문" }],
+          },
+        }],
+      });
+    },
+  },
+];
+
 describe("collaboration command engine", () => {
+  it("does not create a revision when a pristine document ends with a table", async () => {
+    const { database, workspace, actor, commands } = fixture();
+    const created = createDocument(database, workspace.id, actor, {
+      title: "표로 끝나는 정본",
+      content: parseNyxdocDocumentV2({
+        schemaVersion: 2,
+        blocks: [{
+          id: "no-op-terminal-table",
+          type: "table",
+          children: [{
+            id: "no-op-terminal-row",
+            type: "tr",
+            children: [{
+              id: "no-op-terminal-cell",
+              type: "td",
+              children: [{
+                id: "no-op-terminal-cell-paragraph",
+                type: "p",
+                children: [{ text: "정본 표" }],
+              }],
+            }],
+          }],
+        }],
+      }),
+    });
+    const state = ensureCollaborationState(database, workspace.id, created.document.id);
+    const before = await commands.readWorking({
+      workspaceId: workspace.id,
+      documentId: created.document.id,
+    });
+
+    expect(before.workingDocument.content.blocks).toHaveLength(1);
+    expect(before.workingDocument.hasUncommittedChanges).toBe(false);
+
+    const committed = await commands.commitWorking({
+      roomName: state.roomName,
+      actor,
+      requestId: "terminal-table-no-op-commit-001",
+      expectedDraftVersion: before.workingDocument.draftVersion,
+    });
+
+    expect(committed.unchanged).toBe(true);
+    expect(committed.document.revisionNumber).toBe(1);
+    expect(committed.document.content).toEqual(created.document.content);
+    expect(committed.workingDocument.hasUncommittedChanges).toBe(false);
+    expect(listDocumentRevisions(database, workspace.id, created.document.id)).toHaveLength(1);
+  });
+
+  it.each(["missing", "foreign"] as const)(
+    "rejects a %s-workspace media reference before replacing the shared draft",
+    async (kind) => {
+      const input = liveFixture();
+      const initial = await input.commands.readWorking({
+        workspaceId: input.workspace.id,
+        documentId: input.created.document.id,
+      });
+      const mediaId = kind === "missing"
+        ? randomUUID()
+        : (() => {
+            const other = createTestUser(input.database, {
+              name: "Foreign Media Owner",
+              email: `foreign-media-${randomUUID()}@example.com`,
+            });
+            return insertTestMediaAsset(
+              input.database,
+              other.workspace.id,
+              other.user.id,
+            );
+          })();
+      const storedBefore = storedDraftSnapshot(
+        input.database,
+        input.created.document.id,
+      );
+
+      await expect(input.commands.replaceWorking({
+        roomName: input.state.roomName,
+        actor: input.actor,
+        expectedDraftVersion: initial.workingDocument.draftVersion,
+        requestId: `invalid-media-replace-${kind}-001`,
+        replacement: {
+          content: parseNyxdocDocumentV2({
+            schemaVersion: 2,
+            blocks: [imageBlock(mediaId)],
+          }),
+        },
+      })).rejects.toMatchObject({ code: "INVALID_INPUT" });
+
+      const storedAfter = storedDraftSnapshot(
+        input.database,
+        input.created.document.id,
+      );
+      expect(storedAfter).toEqual(storedBefore);
+      expect((await input.commands.readWorking({
+        workspaceId: input.workspace.id,
+        documentId: input.created.document.id,
+      })).workingDocument).toMatchObject({
+        draftVersion: initial.workingDocument.draftVersion,
+        content: initial.workingDocument.content,
+      });
+    },
+  );
+
+  it("rejects a foreign-workspace media reference before patching the shared draft", async () => {
+    const input = liveFixture();
+    const initial = await input.commands.readWorking({
+      workspaceId: input.workspace.id,
+      documentId: input.created.document.id,
+    });
+    const other = createTestUser(input.database, {
+      name: "Foreign Patch Media Owner",
+      email: "foreign-patch-media@example.com",
+    });
+    const mediaId = insertTestMediaAsset(
+      input.database,
+      other.workspace.id,
+      other.user.id,
+    );
+    const storedBefore = storedDraftSnapshot(input.database, input.created.document.id);
+
+    await expect(input.commands.patchWorking({
+      roomName: input.state.roomName,
+      actor: input.actor,
+      expectedDraftVersion: initial.workingDocument.draftVersion,
+      requestId: "invalid-media-patch-foreign-001",
+      operations: [{
+        op: "insert_after",
+        anchorBlockId: "initial",
+        blocks: [imageBlock(mediaId, "foreign-patch-image")],
+      }],
+    })).rejects.toMatchObject({ code: "INVALID_INPUT" });
+
+    expect(storedDraftSnapshot(input.database, input.created.document.id)).toEqual(storedBefore);
+    expect((await input.commands.readWorking({
+      workspaceId: input.workspace.id,
+      documentId: input.created.document.id,
+    })).workingDocument).toMatchObject({
+      draftVersion: initial.workingDocument.draftVersion,
+      content: initial.workingDocument.content,
+    });
+  });
+
+  it("does not persist an invalid live media reference through a metadata-only replacement", async () => {
+    const input = liveFixture();
+    const storedBefore = storedDraftSnapshot(input.database, input.created.document.id);
+    replaceWorkingDocument(input.liveDocument, {
+      content: parseNyxdocDocumentV2({
+        schemaVersion: 2,
+        blocks: [imageBlock(randomUUID(), "invalid-live-image")],
+      }),
+    }, "test-invalid-live-media");
+    const invalidLive = await input.commands.readWorking({
+      workspaceId: input.workspace.id,
+      documentId: input.created.document.id,
+    });
+
+    await expect(input.commands.replaceWorking({
+      roomName: input.state.roomName,
+      actor: input.actor,
+      expectedDraftVersion: invalidLive.workingDocument.draftVersion,
+      requestId: "invalid-live-media-metadata-replace-001",
+      replacement: { title: "제목만 변경" },
+    })).rejects.toMatchObject({ code: "INVALID_INPUT" });
+
+    expect(storedDraftSnapshot(input.database, input.created.document.id)).toEqual(storedBefore);
+  });
+
   it("treats CRDT history-only differences as clean when the rendered document is unchanged", async () => {
     const { database, workspace, actor, created, commands } = fixture();
     const state = ensureCollaborationState(database, workspace.id, created.document.id);
@@ -188,6 +514,282 @@ describe("collaboration command engine", () => {
     ).get(created.document.id)).toEqual({ count: initialEventCount.count + 1 });
   });
 
+  it("rejects a collaboration mutation when an OAuth actor ceiling is read-only", async () => {
+    const { database, workspace, actor, created, commands } = fixture();
+    const agent = createAccountAgent(database, {
+      userId: actor.userId,
+      displayName: "Read-only OAuth collaboration agent",
+    });
+    assignAgentToWorkspace(database, {
+      userId: actor.userId,
+      workspaceId: workspace.id,
+      agentId: agent.id,
+      accessProfile: "writer",
+    });
+    const credential = createAgentCredential(database, {
+      userId: actor.userId,
+      agentId: agent.id,
+      name: "broad-backing-credential",
+      scopes: ["documents:read", "documents:write", "documents:commit"],
+      defaultWorkspaceId: workspace.id,
+      workspaceAllowlist: [workspace.id],
+    });
+    const oauthActor = {
+      type: "agent" as const,
+      userId: actor.userId,
+      tokenId: credential.credential.id,
+      principalId: agent.id,
+      label: agent.displayName,
+      source: "mcp" as const,
+      scopeCeiling: Object.freeze(["documents:read"] as const),
+    };
+    const state = ensureCollaborationState(database, workspace.id, created.document.id);
+    const before = storedDraftAtomicSnapshot(database, created.document.id);
+
+    await expect(commands.replaceWorking({
+      roomName: state.roomName,
+      actor: oauthActor,
+      requestId: "oauth-read-only-collaboration-denied-001",
+      expectedDraftVersion: state.draftVersion,
+      replacement: { title: "Must not be written" },
+    })).rejects.toMatchObject({ code: "FORBIDDEN" });
+    expect(storedDraftAtomicSnapshot(database, created.document.id)).toEqual(before);
+  });
+
+  for (const mutation of atomicMutationCases) {
+    for (const failurePoint of ["persistence", "receipt"] as const) {
+      it(`${mutation.name} leaves the live and stored draft unchanged after ${failurePoint} failure and retries`, async () => {
+        const context = liveFixture();
+        const {
+          database,
+          workspace,
+          created,
+          commands,
+          state,
+          liveDocument,
+        } = context;
+        const initialWorking = await commands.readWorking({
+          workspaceId: workspace.id,
+          documentId: created.document.id,
+        });
+        const initialLiveState = Buffer.from(Y.encodeStateAsUpdate(liveDocument));
+        const initialStored = storedDraftSnapshot(database, created.document.id);
+        const triggerName = failurePoint === "persistence"
+          ? "inject_collaboration_persistence_failure"
+          : "inject_collaboration_receipt_failure";
+        database.exec(failurePoint === "persistence"
+          ? `CREATE TEMP TRIGGER ${triggerName}
+             BEFORE UPDATE OF yjs_state ON document_collaboration_states
+             BEGIN
+               SELECT RAISE(ABORT, 'injected collaboration persistence failure');
+             END;`
+          : `CREATE TEMP TRIGGER ${triggerName}
+             BEFORE INSERT ON collaboration_idempotency_requests
+             BEGIN
+               SELECT RAISE(ABORT, 'injected collaboration receipt failure');
+             END;`);
+
+        try {
+          await expect(mutation.run(context)).rejects.toThrow(
+            `injected collaboration ${failurePoint} failure`,
+          );
+        } finally {
+          database.exec(`DROP TRIGGER ${triggerName}`);
+        }
+
+        const afterFailure = await commands.readWorking({
+          workspaceId: workspace.id,
+          documentId: created.document.id,
+        });
+        expect(afterFailure.workingDocument).toEqual(initialWorking.workingDocument);
+        expect(afterFailure.workingDocument).toMatchObject({
+          generation: state.generation,
+          draftVersion: state.draftVersion,
+          content: initialWorking.workingDocument.content,
+        });
+        expect(Buffer.from(Y.encodeStateAsUpdate(liveDocument))).toEqual(initialLiveState);
+        expect(storedDraftSnapshot(database, created.document.id)).toEqual(initialStored);
+        expect(database.prepare(
+          `SELECT COUNT(*) AS count
+           FROM collaboration_idempotency_requests
+           WHERE request_id = ?`,
+        ).get(mutation.requestId)).toEqual({ count: 0 });
+
+        const retried = await mutation.run(context);
+        expect(retried.workingDocument).toMatchObject({
+          generation: state.generation,
+          draftVersion: state.draftVersion + 1,
+          title: mutation.expectedTitle,
+        });
+        expect(retried.workingDocument.content.blocks[0]).toMatchObject({
+          id: "initial",
+          children: [{ text: mutation.expectedText }],
+        });
+        const afterRetryStored = storedDraftSnapshot(database, created.document.id);
+        expect(afterRetryStored).toMatchObject({
+          generation: state.generation,
+          draftVersion: state.draftVersion + 1,
+        });
+        expect(afterRetryStored.state).not.toEqual(initialStored.state);
+        expect(Buffer.from(Y.encodeStateAsUpdate(liveDocument))).toEqual(afterRetryStored.state);
+        expect((await commands.readWorking({
+          workspaceId: workspace.id,
+          documentId: created.document.id,
+        })).workingDocument).toEqual(retried.workingDocument);
+        expect(database.prepare(
+          `SELECT COUNT(*) AS count
+           FROM collaboration_idempotency_requests
+           WHERE request_id = ?`,
+        ).get(mutation.requestId)).toEqual({ count: 1 });
+      });
+    }
+  }
+
+  it("rejects a stale process-local body before patching the latest stored draft", async () => {
+    const { database, workspace, actor, created } = fixture();
+    const state = ensureCollaborationState(database, workspace.id, created.document.id);
+    const staleProcessDocument = collaborationYDocFromState(state.state);
+    const currentProcessDocument = collaborationYDocFromState(state.state);
+    replaceWorkingDocument(currentProcessDocument, {
+      content: parseNyxdocDocumentV2({
+        schemaVersion: 2,
+        blocks: [
+          { id: "initial", type: "p", children: [{ text: "다른 프로세스의 최신 본문" }] },
+          { id: "latest-only", type: "p", children: [{ text: "최신 프로세스에만 있는 블록" }] },
+        ],
+      }),
+    }, { context: { actor, recordedByEndpoint: true } });
+    const current = persistCollaborationUpdate(
+      database,
+      state.roomName,
+      currentProcessDocument,
+      actor,
+    );
+    const beforeStored = storedDraftAtomicSnapshot(database, created.document.id);
+    const beforeStaleProcess = Buffer.from(Y.encodeStateAsUpdate(staleProcessDocument));
+    const staleCommands = createCollaborationCommands({
+      database,
+      provider: {
+        async withDocument(roomName, callback) {
+          expect(roomName).toBe(state.roomName);
+          return await callback(staleProcessDocument);
+        },
+        closeConnections() {},
+      },
+    });
+    const requestId = "stale-process-patch-authoritative-001";
+
+    await expect(staleCommands.patchWorking({
+      roomName: state.roomName,
+      actor,
+      requestId,
+      expectedDraftVersion: current.draftVersion,
+      operations: [{
+        op: "replace_block",
+        blockId: "initial",
+        block: {
+          id: "initial",
+          type: "p",
+          children: [{ text: "오래된 본문을 기준으로 만든 패치" }],
+        },
+      }],
+    })).rejects.toMatchObject({ code: "DRAFT_CONFLICT" });
+
+    expect(storedDraftAtomicSnapshot(database, created.document.id)).toEqual(beforeStored);
+    expect(Buffer.from(Y.encodeStateAsUpdate(staleProcessDocument))).toEqual(beforeStaleProcess);
+    expect(loadCollaborationStateByRoom(database, state.roomName).draftVersion)
+      .toBe(current.draftVersion);
+    expect((await createCollaborationCommands({
+      database,
+      provider: createStoredCollaborationDocumentProvider(database),
+    }).readWorking({
+      workspaceId: workspace.id,
+      documentId: created.document.id,
+    })).workingDocument.content.blocks).toEqual([
+      { id: "initial", type: "p", children: [{ text: "다른 프로세스의 최신 본문" }] },
+      { id: "latest-only", type: "p", children: [{ text: "최신 프로세스에만 있는 블록" }] },
+    ]);
+    expect(database.prepare(
+      "SELECT COUNT(*) AS count FROM collaboration_idempotency_requests WHERE request_id = ?",
+    ).get(requestId)).toEqual({ count: 0 });
+  });
+
+  it("rejects a divergent stale replace-and-commit before merging it and keeps the retry safe", async () => {
+    const { database, workspace, actor, created } = fixture();
+    const state = ensureCollaborationState(database, workspace.id, created.document.id);
+    const staleProcessDocument = collaborationYDocFromState(state.state);
+    const currentProcessDocument = collaborationYDocFromState(state.state);
+    replaceWorkingDocument(currentProcessDocument, {
+      content: parseNyxdocDocumentV2({
+        schemaVersion: 2,
+        blocks: [
+          { id: "initial", type: "p", children: [{ text: "보존해야 하는 최신 본문" }] },
+          { id: "latest-only", type: "p", children: [{ text: "최신 추가 블록" }] },
+        ],
+      }),
+    }, { context: { actor, recordedByEndpoint: true } });
+    const current = persistCollaborationUpdate(
+      database,
+      state.roomName,
+      currentProcessDocument,
+      actor,
+    );
+    replaceWorkingDocument(staleProcessDocument, {
+      content: parseNyxdocDocumentV2({
+        schemaVersion: 2,
+        blocks: [{ id: "initial", type: "p", children: [{ text: "오래된 프로세스의 전체 교체" }] }],
+      }),
+    }, { context: { actor, recordedByEndpoint: true } });
+    const beforeStored = storedDraftAtomicSnapshot(database, created.document.id);
+    const beforeStaleProcess = Buffer.from(Y.encodeStateAsUpdate(staleProcessDocument));
+    const staleCommands = createCollaborationCommands({
+      database,
+      provider: {
+        async withDocument(roomName, callback) {
+          expect(roomName).toBe(state.roomName);
+          return await callback(staleProcessDocument);
+        },
+        closeConnections() {},
+      },
+    });
+    const request = {
+      roomName: state.roomName,
+      actor,
+      requestId: "stale-replace-commit-authoritative-001",
+      expectedDraftVersion: current.draftVersion,
+      replacement: { title: "최신 초안만 저장할 제목" },
+    };
+
+    await expect(staleCommands.replaceAndCommitWorking(request))
+      .rejects.toMatchObject({ code: "DRAFT_CONFLICT" });
+
+    expect(storedDraftAtomicSnapshot(database, created.document.id)).toEqual(beforeStored);
+    expect(Buffer.from(Y.encodeStateAsUpdate(staleProcessDocument))).toEqual(beforeStaleProcess);
+    expect(getDocument(database, workspace.id, created.document.id)).toMatchObject({
+      title: "공유 초안 테스트",
+      revisionNumber: 1,
+      content: created.document.content,
+    });
+    expect(listDocumentRevisions(database, workspace.id, created.document.id)).toHaveLength(1);
+    expect(database.prepare(
+      "SELECT COUNT(*) AS count FROM collaboration_idempotency_requests WHERE request_id = ?",
+    ).get(request.requestId)).toEqual({ count: 0 });
+
+    const retried = await createCollaborationCommands({
+      database,
+      provider: createStoredCollaborationDocumentProvider(database),
+    }).replaceAndCommitWorking(request);
+    expect(retried.document).toMatchObject({
+      title: "최신 초안만 저장할 제목",
+      revisionNumber: 2,
+    });
+    expect(retried.document.content.blocks).toEqual([
+      { id: "initial", type: "p", children: [{ text: "보존해야 하는 최신 본문" }] },
+      { id: "latest-only", type: "p", children: [{ text: "최신 추가 블록" }] },
+    ]);
+    expect(retried.workingDocument.hasUncommittedChanges).toBe(false);
+  });
+
   it("separates an idempotent replay receipt from the current shared draft", async () => {
     const { database, workspace, actor, created, commands } = fixture();
     const state = ensureCollaborationState(database, workspace.id, created.document.id);
@@ -271,6 +873,94 @@ describe("collaboration command engine", () => {
     });
     expect(committed.document.content.blocks[0].id).not.toBe("shared-title");
     expect(committed.document.content.blocks[0].children[0]).toMatchObject({ text: "복구할 초안" });
+  });
+
+  it("rolls back block-ID normalization when commit fails and permits the same retry", async () => {
+    const { database, workspace, actor, created } = fixture();
+    createDocument(database, workspace.id, actor, {
+      title: "블록 ID 소유 문서",
+      content: parseNyxdocDocumentV2({
+        schemaVersion: 2,
+        blocks: [{ id: "atomic-shared-id", type: "h1", children: [{ text: "ID 소유자" }] }],
+      }),
+    });
+    const state = ensureCollaborationState(database, workspace.id, created.document.id);
+    const liveDocument = collaborationYDocFromState(state.state);
+    replaceWorkingDocument(liveDocument, {
+      content: parseNyxdocDocumentV2({
+        schemaVersion: 2,
+        blocks: [{ id: "atomic-shared-id", type: "h1", children: [{ text: "저장할 초안" }] }],
+      }),
+    }, { context: { actor, recordedByEndpoint: true } });
+    const changed = persistCollaborationUpdate(database, state.roomName, liveDocument, actor);
+    const commands = createCollaborationCommands({
+      database,
+      provider: {
+        async withDocument(roomName, callback) {
+          expect(roomName).toBe(state.roomName);
+          return await callback(liveDocument);
+        },
+        closeConnections() {},
+      },
+    });
+    const requestId = "commit-normalization-atomic-retry-001";
+    const beforeStored = storedDraftAtomicSnapshot(database, created.document.id);
+    const beforeLive = Buffer.from(Y.encodeStateAsUpdate(liveDocument));
+    const beforeContributors = database.prepare(
+      `SELECT contributor_key, update_count
+       FROM document_draft_contributors
+       WHERE document_id = ? AND generation = ?
+       ORDER BY contributor_key`,
+    ).all(created.document.id, state.generation);
+    database.exec(`CREATE TEMP TRIGGER inject_normalized_commit_failure
+      BEFORE INSERT ON document_revisions
+      BEGIN
+        SELECT RAISE(ABORT, 'injected normalized commit failure');
+      END;`);
+
+    try {
+      await expect(commands.commitWorking({
+        roomName: state.roomName,
+        actor,
+        requestId,
+        expectedDraftVersion: changed.draftVersion,
+      })).rejects.toThrow("injected normalized commit failure");
+    } finally {
+      database.exec("DROP TRIGGER inject_normalized_commit_failure");
+    }
+
+    expect(storedDraftAtomicSnapshot(database, created.document.id)).toEqual(beforeStored);
+    expect(Buffer.from(Y.encodeStateAsUpdate(liveDocument))).toEqual(beforeLive);
+    expect(database.prepare(
+      `SELECT contributor_key, update_count
+       FROM document_draft_contributors
+       WHERE document_id = ? AND generation = ?
+       ORDER BY contributor_key`,
+    ).all(created.document.id, state.generation)).toEqual(beforeContributors);
+    expect(getDocument(database, workspace.id, created.document.id)).toMatchObject({
+      revisionNumber: 1,
+      content: created.document.content,
+    });
+    expect(listDocumentRevisions(database, workspace.id, created.document.id)).toHaveLength(1);
+    expect(database.prepare(
+      "SELECT COUNT(*) AS count FROM collaboration_idempotency_requests WHERE request_id = ?",
+    ).get(requestId)).toEqual({ count: 0 });
+
+    const retried = await commands.commitWorking({
+      roomName: state.roomName,
+      actor,
+      requestId,
+      expectedDraftVersion: changed.draftVersion,
+    });
+    expect(retried.normalization).toMatchObject({ remappedTopLevelBlockIds: 1 });
+    expect(retried.workingDocument).toMatchObject({
+      draftVersion: changed.draftVersion + 1,
+      committedDraftVersion: changed.draftVersion + 1,
+      hasUncommittedChanges: false,
+    });
+    expect(retried.document).toMatchObject({ revisionNumber: 2 });
+    expect(retried.document.content.blocks[0].id).not.toBe("atomic-shared-id");
+    expect(listDocumentRevisions(database, workspace.id, created.document.id)).toHaveLength(2);
   });
 
   it("replaces and explicitly commits a draft in one retry-safe operation", async () => {
@@ -477,6 +1167,64 @@ describe("collaboration command engine", () => {
       text: "아직 저장하지 않은 본문",
     });
     expect(committed.workingDocument.hasUncommittedChanges).toBe(false);
+  });
+
+  it("rejects a tree move when an OAuth actor ceiling is read-only without changing canonical or draft state", async () => {
+    const { database, workspace, actor, created, commands } = fixture();
+    const parent = createDocument(database, workspace.id, actor, {
+      title: "읽기 전용 OAuth 이동 대상",
+      content: parseNyxdocDocumentV2({
+        schemaVersion: 2,
+        blocks: [{ id: "readonly-parent", type: "p", children: [{ text: "상위 문서" }] }],
+      }),
+    });
+    const agent = createAccountAgent(database, {
+      userId: actor.userId,
+      displayName: "Read-only OAuth tree agent",
+    });
+    assignAgentToWorkspace(database, {
+      userId: actor.userId,
+      workspaceId: workspace.id,
+      agentId: agent.id,
+      accessProfile: "writer",
+    });
+    const credential = createAgentCredential(database, {
+      userId: actor.userId,
+      agentId: agent.id,
+      name: "broad-tree-move-credential",
+      scopes: ["documents:read", "documents:write", "documents:commit"],
+      defaultWorkspaceId: workspace.id,
+      workspaceAllowlist: [workspace.id],
+    });
+    const oauthActor = {
+      type: "agent" as const,
+      userId: actor.userId,
+      tokenId: credential.credential.id,
+      principalId: agent.id,
+      label: agent.displayName,
+      source: "mcp" as const,
+      scopeCeiling: Object.freeze(["documents:read"] as const),
+    };
+    const state = ensureCollaborationState(database, workspace.id, created.document.id);
+    const canonicalBefore = getDocument(database, workspace.id, created.document.id);
+    const revisionsBefore = listDocumentRevisions(database, workspace.id, created.document.id);
+    const draftBefore = storedDraftAtomicSnapshot(database, created.document.id);
+
+    await expect(commands.moveWorkingDocumentTree({
+      roomName: state.roomName,
+      actor: oauthActor,
+      requestId: "oauth-read-only-tree-move-denied-001",
+      expectedGeneration: state.generation,
+      expectedDraftVersion: state.draftVersion,
+      expectedBaseRevision: state.baseRevisionNumber,
+      targetDocumentId: parent.document.id,
+      position: "inside",
+      summary: "읽기 전용 OAuth 세션에서는 이동되면 안 됩니다.",
+    })).rejects.toMatchObject({ code: "FORBIDDEN" });
+
+    expect(getDocument(database, workspace.id, created.document.id)).toEqual(canonicalBefore);
+    expect(listDocumentRevisions(database, workspace.id, created.document.id)).toEqual(revisionsBefore);
+    expect(storedDraftAtomicSnapshot(database, created.document.id)).toEqual(draftBefore);
   });
 
   it("moves a clean document tree without creating a dirty draft", async () => {
@@ -707,6 +1455,382 @@ describe("collaboration command engine", () => {
       baseRevisionNumber: 2,
       hasUncommittedChanges: false,
     });
+  });
+
+  it("restores a valid historical snapshot even when the replaced draft now has invalid media", async () => {
+    const { database, workspace, actor, created, commands } = fixture();
+    const other = createTestUser(database, {
+      name: "Moved Media Workspace Owner",
+      email: "moved-current-draft-media@example.com",
+    });
+    const state = ensureCollaborationState(database, workspace.id, created.document.id);
+    const mediaId = insertTestMediaAsset(database, workspace.id, actor.userId);
+    const dirty = await commands.replaceWorking({
+      roomName: state.roomName,
+      actor,
+      requestId: "invalid-current-media-draft-001",
+      expectedDraftVersion: state.draftVersion,
+      replacement: {
+        content: parseNyxdocDocumentV2({
+          schemaVersion: 2,
+          blocks: [imageBlock(mediaId, "current-invalid-media")],
+        }),
+      },
+    });
+    database.prepare("UPDATE media_assets SET workspace_id = ? WHERE id = ?")
+      .run(other.workspace.id, mediaId);
+
+    const restored = await commands.resetWorking({
+      workspaceId: workspace.id,
+      documentId: created.document.id,
+      actor,
+      revisionId: created.document.revisionId!,
+      requestId: "restore-over-invalid-current-media-001",
+      expectedGeneration: dirty.workingDocument.generation,
+      expectedDraftVersion: dirty.workingDocument.draftVersion,
+      expectedBaseRevision: dirty.workingDocument.baseRevisionNumber,
+    });
+
+    expect(restored.workingDocument).toMatchObject({
+      generation: state.generation + 1,
+      title: created.document.title,
+      content: created.document.content,
+    });
+  });
+
+  it("rejects an unauthorized historical media snapshot without changing reset state", async () => {
+    const { database, workspace, actor, created, commands } = fixture();
+    const other = createTestUser(database, {
+      name: "Historical Media Foreign Workspace",
+      email: "historical-media-foreign@example.com",
+    });
+    const state = ensureCollaborationState(database, workspace.id, created.document.id);
+    const mediaId = insertTestMediaAsset(database, workspace.id, actor.userId);
+    const imageDraft = await commands.replaceWorking({
+      roomName: state.roomName,
+      actor,
+      requestId: "historical-media-draft-001",
+      expectedDraftVersion: state.draftVersion,
+      replacement: {
+        content: parseNyxdocDocumentV2({
+          schemaVersion: 2,
+          blocks: [imageBlock(mediaId, "historical-media")],
+        }),
+      },
+    });
+    const imageCommit = await commands.commitWorking({
+      roomName: state.roomName,
+      actor,
+      requestId: "historical-media-commit-001",
+      expectedDraftVersion: imageDraft.workingDocument.draftVersion,
+    });
+    const imageRevision = getDocumentRevisionSnapshotByNumber(
+      database,
+      workspace.id,
+      created.document.id,
+      2,
+    );
+    const cleanDraft = await commands.replaceWorking({
+      roomName: state.roomName,
+      actor,
+      requestId: "historical-media-clean-draft-001",
+      expectedDraftVersion: imageCommit.workingDocument.draftVersion,
+      replacement: {
+        content: parseNyxdocDocumentV2({
+          schemaVersion: 2,
+          blocks: [{ id: "current-clean", type: "p", children: [{ text: "현재 유효한 본문" }] }],
+        }),
+      },
+    });
+    const cleanCommit = await commands.commitWorking({
+      roomName: state.roomName,
+      actor,
+      requestId: "historical-media-clean-commit-001",
+      expectedDraftVersion: cleanDraft.workingDocument.draftVersion,
+    });
+    database.prepare("DELETE FROM document_media_bindings WHERE media_id = ?").run(mediaId);
+    database.prepare("UPDATE media_assets SET workspace_id = ? WHERE id = ?")
+      .run(other.workspace.id, mediaId);
+    const before = storedDraftAtomicSnapshot(database, created.document.id);
+    const contributorsBefore = storedContributors(database, created.document.id);
+    const requestId = "historical-media-restore-denied-001";
+
+    await expect(commands.resetWorking({
+      workspaceId: workspace.id,
+      documentId: created.document.id,
+      actor,
+      revisionId: imageRevision.id,
+      requestId,
+      expectedGeneration: cleanCommit.workingDocument.generation,
+      expectedDraftVersion: cleanCommit.workingDocument.draftVersion,
+      expectedBaseRevision: cleanCommit.workingDocument.baseRevisionNumber,
+    })).rejects.toMatchObject({
+      code: "INVALID_INPUT",
+      details: { mediaId },
+    });
+
+    expect(storedDraftAtomicSnapshot(database, created.document.id)).toEqual(before);
+    expect(storedContributors(database, created.document.id)).toEqual(contributorsBefore);
+    expect(database.prepare(
+      "SELECT COUNT(*) AS count FROM collaboration_idempotency_requests WHERE request_id = ?",
+    ).get(requestId)).toEqual({ count: 0 });
+  });
+
+  it("lets an agent with revision read and restore access load R1 historical media after R2 removes it", async () => {
+    const { database, workspace, actor, commands } = fixture();
+    const mediaId = insertTestMediaAsset(database, workspace.id, actor.userId);
+    const revisionOne = createDocument(database, workspace.id, actor, {
+      title: "Historical agent media restore",
+      content: parseNyxdocDocumentV2({
+        schemaVersion: 2,
+        blocks: [imageBlock(mediaId, "revision-one-image")],
+      }),
+    }).document;
+    const state = ensureCollaborationState(database, workspace.id, revisionOne.id);
+    const removed = await commands.replaceWorking({
+      roomName: state.roomName,
+      actor,
+      requestId: "historical-agent-media-remove-draft-001",
+      expectedDraftVersion: state.draftVersion,
+      replacement: {
+        content: parseNyxdocDocumentV2({
+          schemaVersion: 2,
+          blocks: [{ id: "revision-two-text", type: "p", children: [{ text: "Image removed" }] }],
+        }),
+      },
+    });
+    const revisionTwo = await commands.commitWorking({
+      roomName: state.roomName,
+      actor,
+      requestId: "historical-agent-media-remove-commit-001",
+      expectedDraftVersion: removed.workingDocument.draftVersion,
+    });
+    expect(revisionTwo.document.revisionNumber).toBe(2);
+    expect(database.prepare(
+      `SELECT current_binding, revision_binding
+       FROM document_media_bindings
+       WHERE workspace_id = ? AND document_id = ? AND media_id = ?`,
+    ).get(workspace.id, revisionOne.id, mediaId)).toEqual({
+      current_binding: 0,
+      revision_binding: 1,
+    });
+
+    const agent = createAccountAgent(database, {
+      userId: actor.userId,
+      displayName: "Historical media restore agent",
+    });
+    assignAgentToWorkspace(database, {
+      userId: actor.userId,
+      workspaceId: workspace.id,
+      agentId: agent.id,
+      accessProfile: "custom",
+      capabilities: ["documents.read", "documents.update", "revisions.restore"],
+    });
+    const credential = createAgentCredential(database, {
+      userId: actor.userId,
+      agentId: agent.id,
+      name: "historical-media-restore-key",
+      scopes: ["documents:read", "documents:write", "revisions:restore"],
+      defaultWorkspaceId: workspace.id,
+      workspaceAllowlist: [workspace.id],
+    });
+    const agentActor = {
+      type: "agent" as const,
+      userId: actor.userId,
+      tokenId: credential.credential.id,
+      principalId: agent.id,
+      label: agent.displayName,
+      source: "rollback" as const,
+    };
+    const restoreRequest = {
+      workspaceId: workspace.id,
+      documentId: revisionOne.id,
+      actor: agentActor,
+      revisionId: revisionOne.revisionId!,
+      requestId: "historical-agent-media-restore-r1-001",
+      expectedGeneration: revisionTwo.workingDocument.generation,
+      expectedDraftVersion: revisionTwo.workingDocument.draftVersion,
+      expectedBaseRevision: revisionTwo.workingDocument.baseRevisionNumber,
+    };
+    const before = storedDraftAtomicSnapshot(database, revisionOne.id);
+
+    await expect(commands.resetWorking(restoreRequest)).rejects.toMatchObject({
+      code: "INVALID_INPUT",
+      details: { mediaId },
+    });
+    expect(storedDraftAtomicSnapshot(database, revisionOne.id)).toEqual(before);
+
+    updateAgentWorkspaceMembership(database, {
+      userId: actor.userId,
+      workspaceId: workspace.id,
+      agentId: agent.id,
+      accessProfile: "custom",
+      capabilities: [
+        "documents.read",
+        "documents.update",
+        "revisions.read",
+        "revisions.restore",
+      ],
+      rootDocumentId: null,
+    });
+    const restored = await commands.resetWorking(restoreRequest);
+
+    expect(restored.workingDocument).toMatchObject({
+      generation: revisionTwo.workingDocument.generation + 1,
+      baseRevisionNumber: 2,
+      hasUncommittedChanges: true,
+      content: {
+        schemaVersion: 2,
+        blocks: [expect.objectContaining({
+          id: "revision-one-image",
+          type: "img",
+          mediaId,
+        })],
+      },
+    });
+  });
+
+  it("rejects a historical internal reference outside the current human scope atomically", async () => {
+    const { database, workspace, actor, created, commands } = fixture();
+    const target = createDocument(database, workspace.id, actor, {
+      title: "복원 범위 밖 대상",
+      content: parseNyxdocDocumentV2({
+        schemaVersion: 2,
+        blocks: [{ id: "target", type: "p", children: [{ text: "대상" }] }],
+      }),
+    });
+    const state = ensureCollaborationState(database, workspace.id, created.document.id);
+    const referenceDraft = await commands.replaceWorking({
+      roomName: state.roomName,
+      actor,
+      requestId: "historical-reference-draft-001",
+      expectedDraftVersion: state.draftVersion,
+      replacement: {
+        content: parseNyxdocDocumentV2({
+          schemaVersion: 2,
+          blocks: [{
+            id: "reference",
+            type: "p",
+            children: [{
+              id: "target-reference",
+              type: "doc_ref",
+              documentId: target.document.id,
+              children: [{ text: "범위 밖 문서" }],
+            }],
+          }],
+        }),
+      },
+    });
+    const referenceCommit = await commands.commitWorking({
+      roomName: state.roomName,
+      actor,
+      requestId: "historical-reference-commit-001",
+      expectedDraftVersion: referenceDraft.workingDocument.draftVersion,
+    });
+    const outsider = createTestUser(database, {
+      name: "Historical Restore Direct Editor",
+      email: "historical-restore-editor@example.com",
+    }).user;
+    setDocumentHumanGrant(database, {
+      workspaceId: workspace.id,
+      documentId: created.document.id,
+      recipientUserId: outsider.id,
+      role: "editor",
+      actorUserId: actor.userId,
+      actorLabel: actor.label,
+    });
+    const sharedActor = {
+      type: "human" as const,
+      userId: outsider.id,
+      principalId: outsider.id,
+      label: outsider.name,
+      source: "rollback" as const,
+    };
+    const before = storedDraftAtomicSnapshot(database, created.document.id);
+    const contributorsBefore = storedContributors(database, created.document.id);
+    const requestId = "historical-reference-restore-denied-001";
+
+    await expect(commands.resetWorking({
+      workspaceId: workspace.id,
+      documentId: created.document.id,
+      actor: sharedActor,
+      revisionId: referenceCommit.document.revisionId!,
+      requestId,
+      expectedGeneration: referenceCommit.workingDocument.generation,
+      expectedDraftVersion: referenceCommit.workingDocument.draftVersion,
+      expectedBaseRevision: referenceCommit.workingDocument.baseRevisionNumber,
+    })).rejects.toMatchObject({
+      code: "FORBIDDEN",
+      details: { targetDocumentId: target.document.id },
+    });
+
+    expect(storedDraftAtomicSnapshot(database, created.document.id)).toEqual(before);
+    expect(storedContributors(database, created.document.id)).toEqual(contributorsBefore);
+    expect(database.prepare(
+      "SELECT COUNT(*) AS count FROM collaboration_idempotency_requests WHERE request_id = ?",
+    ).get(requestId)).toEqual({ count: 0 });
+  });
+
+  it.each([
+    { mode: "discard" as const, revision: false },
+    { mode: "restore" as const, revision: true },
+  ])("replays a lost human $mode response without incrementing generation twice", async ({ mode, revision }) => {
+    const { database, workspace, actor, created, commands } = fixture();
+    const state = ensureCollaborationState(database, workspace.id, created.document.id);
+    const dirty = await commands.replaceWorking({
+      roomName: state.roomName,
+      actor,
+      requestId: `human-${mode}-lost-response-draft-001`,
+      expectedDraftVersion: state.draftVersion,
+      replacement: { title: `lost-response-${mode}` },
+    });
+    const requestId = `human-${mode}-lost-response-reset-001`;
+    const request = {
+      workspaceId: workspace.id,
+      documentId: created.document.id,
+      actor,
+      ...(revision ? { revisionId: created.document.revisionId! } : {}),
+      requestId,
+      expectedGeneration: dirty.workingDocument.generation,
+      expectedDraftVersion: dirty.workingDocument.draftVersion,
+      expectedBaseRevision: dirty.workingDocument.baseRevisionNumber,
+    };
+
+    const first = await commands.resetWorking(request);
+    const replayed = await commands.resetWorking(request);
+
+    expect(first.workingDocument.generation).toBe(state.generation + 1);
+    expect(replayed).toMatchObject({
+      roomName: first.roomName,
+      workingDocument: { generation: state.generation + 1 },
+      mutationState: {
+        replayed: true,
+        receipt: { generation: state.generation + 1 },
+        current: { generation: state.generation + 1 },
+      },
+    });
+    expect(ensureCollaborationState(database, workspace.id, created.document.id).generation)
+      .toBe(state.generation + 1);
+    expect(database.prepare(
+      "SELECT COUNT(*) AS count FROM collaboration_idempotency_requests WHERE request_id = ?",
+    ).get(requestId)).toEqual({ count: 1 });
+  });
+
+  it("rejects a human generation reset without requestId before changing state", async () => {
+    const { database, workspace, actor, created, commands } = fixture();
+    const state = ensureCollaborationState(database, workspace.id, created.document.id);
+    const before = storedDraftAtomicSnapshot(database, created.document.id);
+
+    await expect(commands.resetWorking({
+      workspaceId: workspace.id,
+      documentId: created.document.id,
+      actor,
+      expectedGeneration: state.generation,
+      expectedDraftVersion: state.draftVersion,
+      expectedBaseRevision: state.baseRevisionNumber,
+    })).rejects.toMatchObject({ code: "INVALID_INPUT" });
+
+    expect(storedDraftAtomicSnapshot(database, created.document.id)).toEqual(before);
   });
 
   it("refuses a browser save until the submitted Yjs state vector is present", async () => {
@@ -997,6 +2121,474 @@ describe("collaboration command engine", () => {
     expect(committed.document.parentDocumentId).toBe(destination.document.id);
   });
 
+  it("closes only rooms whose provider callbacks ran when opening the subtree fails", async () => {
+    const { database, workspace, actor, created } = fixture();
+    const child = createDocument(database, workspace.id, actor, {
+      title: "열기 실패 하위 문서",
+      parentDocumentId: created.document.id,
+      content: parseNyxdocDocumentV2({
+        schemaVersion: 2,
+        blocks: [{ id: "open-failure-child", type: "p", children: [{ text: "하위" }] }],
+      }),
+    });
+    createDocument(database, workspace.id, actor, {
+      title: "열기 실패 생존 문서",
+      content: parseNyxdocDocumentV2({
+        schemaVersion: 2,
+        blocks: [{ id: "open-failure-survivor", type: "p", children: [{ text: "생존" }] }],
+      }),
+    });
+    const states = [
+      {
+        id: created.document.id,
+        state: ensureCollaborationState(database, workspace.id, created.document.id),
+      },
+      {
+        id: child.document.id,
+        state: ensureCollaborationState(database, workspace.id, child.document.id),
+      },
+    ].sort((left, right) => left.id.localeCompare(right.id));
+    const liveByRoom = new Map(states.map(({ state }) => [
+      state.roomName,
+      collaborationYDocFromState(state.state),
+    ]));
+    const closedRooms: string[] = [];
+    let openCalls = 0;
+    const commands = createCollaborationCommands({
+      database,
+      provider: {
+        async withDocument(roomName, callback) {
+          openCalls += 1;
+          if (openCalls === 2) throw new Error("injected room opening failure");
+          const document = liveByRoom.get(roomName);
+          if (!document) throw new Error(`unexpected room ${roomName}`);
+          return await callback(document);
+        },
+        closeConnections(roomName) {
+          closedRooms.push(roomName);
+        },
+      },
+    });
+
+    await expect(commands.archiveWorkingTree({
+      workspaceId: workspace.id,
+      documentId: created.document.id,
+      actor,
+      baseRevision: created.document.revisionNumber,
+    })).rejects.toThrow("injected room opening failure");
+
+    expect(openCalls).toBe(2);
+    expect(closedRooms).toEqual([states[0]!.state.roomName]);
+    expect(getDocument(database, workspace.id, created.document.id).status).toBe("active");
+    expect(getDocument(database, workspace.id, child.document.id).status).toBe("active");
+  });
+
+  it("rechecks trash permission after every room opens and leaves drafts unflushed on revocation", async () => {
+    const { database, workspace, actor, created } = fixture();
+    const child = createDocument(database, workspace.id, actor, {
+      title: "권한 경합 하위 문서",
+      parentDocumentId: created.document.id,
+      content: parseNyxdocDocumentV2({
+        schemaVersion: 2,
+        blocks: [{ id: "race-child", type: "p", children: [{ text: "하위" }] }],
+      }),
+    });
+    createDocument(database, workspace.id, actor, {
+      title: "권한 경합 생존 문서",
+      content: parseNyxdocDocumentV2({
+        schemaVersion: 2,
+        blocks: [{ id: "race-survivor", type: "p", children: [{ text: "생존" }] }],
+      }),
+    });
+    const rootState = ensureCollaborationState(database, workspace.id, created.document.id);
+    const childState = ensureCollaborationState(database, workspace.id, child.document.id);
+    const rootLive = collaborationYDocFromState(rootState.state);
+    const childLive = collaborationYDocFromState(childState.state);
+    replaceWorkingDocument(rootLive, { title: "권한 취소 전에 열린 루트" }, {
+      context: { actor, recordedByEndpoint: false },
+    });
+    replaceWorkingDocument(childLive, { title: "권한 취소 전에 열린 하위" }, {
+      context: { actor, recordedByEndpoint: false },
+    });
+    const beforeRoot = storedDraftAtomicSnapshot(database, created.document.id);
+    const beforeChild = storedDraftAtomicSnapshot(database, child.document.id);
+    const liveByRoom = new Map([
+      [rootState.roomName, rootLive],
+      [childState.roomName, childLive],
+    ]);
+    let opened = 0;
+    const closedRooms: string[] = [];
+    const commands = createCollaborationCommands({
+      database,
+      provider: {
+        async withDocument(roomName, callback) {
+          const document = liveByRoom.get(roomName);
+          if (!document) throw new Error(`unexpected room ${roomName}`);
+          opened += 1;
+          if (opened === 1) {
+            database.prepare(
+              "DELETE FROM workspace_members WHERE workspace_id = ? AND user_id = ?",
+            ).run(workspace.id, actor.userId);
+          }
+          return await callback(document);
+        },
+        closeConnections(roomName) {
+          closedRooms.push(roomName);
+        },
+      },
+    });
+
+    await expect(commands.archiveWorkingTree({
+      workspaceId: workspace.id,
+      documentId: created.document.id,
+      actor,
+      baseRevision: created.document.revisionNumber,
+    })).rejects.toMatchObject({ code: "FORBIDDEN" });
+
+    expect(opened).toBe(2);
+    expect(closedRooms.sort()).toEqual([rootState.roomName, childState.roomName].sort());
+    expect(storedDraftAtomicSnapshot(database, created.document.id)).toEqual(beforeRoot);
+    expect(storedDraftAtomicSnapshot(database, child.document.id)).toEqual(beforeChild);
+    expect(getDocument(database, workspace.id, created.document.id).status).toBe("active");
+    expect(getDocument(database, workspace.id, child.document.id).status).toBe("active");
+    expect(database.prepare("SELECT COUNT(*) AS count FROM document_trash_batches").get())
+      .toEqual({ count: 0 });
+  });
+
+  it("rejects archiving when a concurrent move adds an unopened document to the subtree", async () => {
+    const { database, workspace, actor, created } = fixture();
+    const child = createDocument(database, workspace.id, actor, {
+      title: "기존 보관 하위 문서",
+      parentDocumentId: created.document.id,
+      content: parseNyxdocDocumentV2({
+        schemaVersion: 2,
+        blocks: [{ id: "archive-existing-child", type: "p", children: [{ text: "기존" }] }],
+      }),
+    });
+    const added = createDocument(database, workspace.id, actor, {
+      title: "동시에 들어오는 문서",
+      content: parseNyxdocDocumentV2({
+        schemaVersion: 2,
+        blocks: [{ id: "archive-added-child", type: "p", children: [{ text: "추가" }] }],
+      }),
+    });
+    const states = [created.document.id, child.document.id]
+      .map((documentId) => ({
+        documentId,
+        state: ensureCollaborationState(database, workspace.id, documentId),
+      }))
+      .sort((left, right) => left.documentId.localeCompare(right.documentId));
+    const beforeDrafts = new Map(states.map(({ documentId }) => [
+      documentId,
+      storedDraftAtomicSnapshot(database, documentId),
+    ]));
+    const liveByRoom = new Map(states.map(({ state }) => [
+      state.roomName,
+      collaborationYDocFromState(state.state),
+    ]));
+    const closedRooms: string[] = [];
+    let opened = 0;
+    let moved = false;
+    const commands = createCollaborationCommands({
+      database,
+      provider: {
+        async withDocument(roomName, callback) {
+          const document = liveByRoom.get(roomName);
+          if (!document) throw new Error(`unexpected room ${roomName}`);
+          opened += 1;
+          const result = await callback(document);
+          if (!moved && opened === states.length) {
+            database.prepare(
+              "UPDATE documents SET parent_document_id = ? WHERE workspace_id = ? AND id = ?",
+            ).run(created.document.id, workspace.id, added.document.id);
+            moved = true;
+          }
+          return result;
+        },
+        closeConnections(roomName) {
+          closedRooms.push(roomName);
+        },
+      },
+    });
+
+    await expect(commands.archiveWorkingTree({
+      workspaceId: workspace.id,
+      documentId: created.document.id,
+      actor,
+      baseRevision: created.document.revisionNumber,
+    })).rejects.toMatchObject({ code: "DRAFT_CONFLICT" });
+
+    expect(moved).toBe(true);
+    expect(closedRooms.sort()).toEqual(states.map(({ state }) => state.roomName).sort());
+    for (const { documentId } of states) {
+      expect(storedDraftAtomicSnapshot(database, documentId)).toEqual(beforeDrafts.get(documentId));
+      expect(getDocument(database, workspace.id, documentId).status).toBe("active");
+    }
+    expect(getDocument(database, workspace.id, added.document.id)).toMatchObject({
+      status: "active",
+      parentDocumentId: created.document.id,
+    });
+    expect(database.prepare("SELECT COUNT(*) AS count FROM document_trash_batches").get())
+      .toEqual({ count: 0 });
+  });
+
+  it("rejects archiving when a concurrent move removes an opened document from the subtree", async () => {
+    const { database, workspace, actor, created } = fixture();
+    const child = createDocument(database, workspace.id, actor, {
+      title: "동시에 빠져나가는 문서",
+      parentDocumentId: created.document.id,
+      content: parseNyxdocDocumentV2({
+        schemaVersion: 2,
+        blocks: [{ id: "archive-removed-child", type: "p", children: [{ text: "이동" }] }],
+      }),
+    });
+    const states = [created.document.id, child.document.id]
+      .map((documentId) => ({
+        documentId,
+        state: ensureCollaborationState(database, workspace.id, documentId),
+      }))
+      .sort((left, right) => left.documentId.localeCompare(right.documentId));
+    const beforeDrafts = new Map(states.map(({ documentId }) => [
+      documentId,
+      storedDraftAtomicSnapshot(database, documentId),
+    ]));
+    const liveByRoom = new Map(states.map(({ state }) => [
+      state.roomName,
+      collaborationYDocFromState(state.state),
+    ]));
+    const closedRooms: string[] = [];
+    let opened = 0;
+    let moved = false;
+    const commands = createCollaborationCommands({
+      database,
+      provider: {
+        async withDocument(roomName, callback) {
+          const document = liveByRoom.get(roomName);
+          if (!document) throw new Error(`unexpected room ${roomName}`);
+          opened += 1;
+          const result = await callback(document);
+          if (!moved && opened === states.length) {
+            database.prepare(
+              "UPDATE documents SET parent_document_id = NULL WHERE workspace_id = ? AND id = ?",
+            ).run(workspace.id, child.document.id);
+            moved = true;
+          }
+          return result;
+        },
+        closeConnections(roomName) {
+          closedRooms.push(roomName);
+        },
+      },
+    });
+
+    await expect(commands.archiveWorkingTree({
+      workspaceId: workspace.id,
+      documentId: created.document.id,
+      actor,
+      baseRevision: created.document.revisionNumber,
+    })).rejects.toMatchObject({ code: "DRAFT_CONFLICT" });
+
+    expect(moved).toBe(true);
+    expect(closedRooms.sort()).toEqual(states.map(({ state }) => state.roomName).sort());
+    for (const { documentId } of states) {
+      expect(storedDraftAtomicSnapshot(database, documentId)).toEqual(beforeDrafts.get(documentId));
+      expect(getDocument(database, workspace.id, documentId).status).toBe("active");
+    }
+    expect(getDocument(database, workspace.id, child.document.id).parentDocumentId).toBeNull();
+    expect(database.prepare("SELECT COUNT(*) AS count FROM document_trash_batches").get())
+      .toEqual({ count: 0 });
+  });
+
+  it("rolls back every subtree draft flush when the archive transaction fails", async () => {
+    const { database, workspace, actor, created } = fixture();
+    const child = createDocument(database, workspace.id, actor, {
+      title: "원자적 보관 하위 문서",
+      parentDocumentId: created.document.id,
+      content: parseNyxdocDocumentV2({
+        schemaVersion: 2,
+        blocks: [{ id: "atomic-child", type: "p", children: [{ text: "하위" }] }],
+      }),
+    });
+    createDocument(database, workspace.id, actor, {
+      title: "원자적 보관 생존 문서",
+      content: parseNyxdocDocumentV2({
+        schemaVersion: 2,
+        blocks: [{ id: "atomic-survivor", type: "p", children: [{ text: "생존" }] }],
+      }),
+    });
+    const rootState = ensureCollaborationState(database, workspace.id, created.document.id);
+    const childState = ensureCollaborationState(database, workspace.id, child.document.id);
+    const rootLive = collaborationYDocFromState(rootState.state);
+    const childLive = collaborationYDocFromState(childState.state);
+    replaceWorkingDocument(rootLive, { title: "아직 저장되지 않은 루트" }, {
+      context: { actor, recordedByEndpoint: false },
+    });
+    replaceWorkingDocument(childLive, { title: "아직 저장되지 않은 하위" }, {
+      context: { actor, recordedByEndpoint: false },
+    });
+    const rootLiveBefore = Buffer.from(Y.encodeStateAsUpdate(rootLive));
+    const childLiveBefore = Buffer.from(Y.encodeStateAsUpdate(childLive));
+    const beforeRoot = storedDraftAtomicSnapshot(database, created.document.id);
+    const beforeChild = storedDraftAtomicSnapshot(database, child.document.id);
+    const liveByRoom = new Map([
+      [rootState.roomName, rootLive],
+      [childState.roomName, childLive],
+    ]);
+    const closedRooms: string[] = [];
+    const commands = createCollaborationCommands({
+      database,
+      provider: {
+        async withDocument(roomName, callback) {
+          const document = liveByRoom.get(roomName);
+          if (!document) throw new Error(`unexpected room ${roomName}`);
+          return await callback(document);
+        },
+        closeConnections(roomName) {
+          closedRooms.push(roomName);
+        },
+      },
+    });
+    database.exec(
+      `CREATE TEMP TRIGGER inject_archive_atomicity_failure
+       BEFORE UPDATE OF status ON documents
+       WHEN NEW.status = 'archived'
+       BEGIN
+         SELECT RAISE(ABORT, 'injected archive atomicity failure');
+       END;`,
+    );
+    try {
+      await expect(commands.archiveWorkingTree({
+        workspaceId: workspace.id,
+        documentId: created.document.id,
+        actor,
+        baseRevision: created.document.revisionNumber,
+      })).rejects.toThrow("injected archive atomicity failure");
+    } finally {
+      database.exec("DROP TRIGGER inject_archive_atomicity_failure");
+    }
+
+    expect(closedRooms.sort()).toEqual([rootState.roomName, childState.roomName].sort());
+    expect(storedDraftAtomicSnapshot(database, created.document.id)).toEqual(beforeRoot);
+    expect(storedDraftAtomicSnapshot(database, child.document.id)).toEqual(beforeChild);
+    expect(Buffer.from(Y.encodeStateAsUpdate(rootLive))).toEqual(rootLiveBefore);
+    expect(Buffer.from(Y.encodeStateAsUpdate(childLive))).toEqual(childLiveBefore);
+    expect(getDocument(database, workspace.id, created.document.id).status).toBe("active");
+    expect(getDocument(database, workspace.id, child.document.id).status).toBe("active");
+    expect(database.prepare("SELECT COUNT(*) AS count FROM document_trash_batches").get())
+      .toEqual({ count: 0 });
+  });
+
+  it("closes every opened room after a flush rejection without masking the primary error", async () => {
+    const { database, workspace, actor, created } = fixture();
+    const child = createDocument(database, workspace.id, actor, {
+      title: "flush 실패 하위 문서",
+      parentDocumentId: created.document.id,
+      content: parseNyxdocDocumentV2({
+        schemaVersion: 2,
+        blocks: [{ id: "flush-child", type: "p", children: [{ text: "하위" }] }],
+      }),
+    });
+    createDocument(database, workspace.id, actor, {
+      title: "flush 실패 생존 문서",
+      content: parseNyxdocDocumentV2({
+        schemaVersion: 2,
+        blocks: [{ id: "flush-survivor", type: "p", children: [{ text: "생존" }] }],
+      }),
+    });
+    const rootState = ensureCollaborationState(database, workspace.id, created.document.id);
+    const childState = ensureCollaborationState(database, workspace.id, child.document.id);
+    const rootLive = collaborationYDocFromState(rootState.state);
+    const childLive = collaborationYDocFromState(childState.state);
+    replaceWorkingDocument(childLive, {
+      content: parseNyxdocDocumentV2({
+        schemaVersion: 2,
+        blocks: [imageBlock(randomUUID(), "invalid-flush-media")],
+      }),
+    }, { context: { actor, recordedByEndpoint: false } });
+    const beforeRoot = storedDraftAtomicSnapshot(database, created.document.id);
+    const beforeChild = storedDraftAtomicSnapshot(database, child.document.id);
+    const liveByRoom = new Map([
+      [rootState.roomName, rootLive],
+      [childState.roomName, childLive],
+    ]);
+    const closedRooms: string[] = [];
+    const commands = createCollaborationCommands({
+      database,
+      provider: {
+        async withDocument(roomName, callback) {
+          const document = liveByRoom.get(roomName);
+          if (!document) throw new Error(`unexpected room ${roomName}`);
+          return await callback(document);
+        },
+        closeConnections(roomName) {
+          closedRooms.push(roomName);
+          if (closedRooms.length === 1) throw new Error("secondary cleanup failure");
+        },
+      },
+    });
+
+    await expect(commands.archiveWorkingTree({
+      workspaceId: workspace.id,
+      documentId: created.document.id,
+      actor,
+      baseRevision: created.document.revisionNumber,
+    })).rejects.toMatchObject({ code: "INVALID_INPUT" });
+
+    expect(closedRooms.sort()).toEqual([rootState.roomName, childState.roomName].sort());
+    expect(storedDraftAtomicSnapshot(database, created.document.id)).toEqual(beforeRoot);
+    expect(storedDraftAtomicSnapshot(database, child.document.id)).toEqual(beforeChild);
+    expect(getDocument(database, workspace.id, created.document.id).status).toBe("active");
+    expect(getDocument(database, workspace.id, child.document.id).status).toBe("active");
+  });
+
+  it("unwinds direct provider callbacks before archiving and still closes the room on success", async () => {
+    const { database, workspace, actor, created } = fixture();
+    createDocument(database, workspace.id, actor, {
+      title: "direct callback 생존 문서",
+      content: parseNyxdocDocumentV2({
+        schemaVersion: 2,
+        blocks: [{ id: "direct-survivor", type: "p", children: [{ text: "생존" }] }],
+      }),
+    });
+    const state = ensureCollaborationState(database, workspace.id, created.document.id);
+    const liveDocument = collaborationYDocFromState(state.state);
+    const lifecycle: string[] = [];
+    const commands = createCollaborationCommands({
+      database,
+      provider: {
+        async withDocument(roomName, callback) {
+          lifecycle.push(`open:${roomName}`);
+          try {
+            return await callback(liveDocument);
+          } finally {
+            const row = database.prepare(
+              "SELECT status FROM documents WHERE workspace_id = ? AND id = ?",
+            ).get(workspace.id, created.document.id) as { status: string };
+            expect(row.status).toBe("active");
+            lifecycle.push(`unwind:${roomName}`);
+          }
+        },
+        closeConnections(roomName) {
+          lifecycle.push(`close:${roomName}`);
+        },
+      },
+    });
+
+    const archived = await commands.archiveWorkingTree({
+      workspaceId: workspace.id,
+      documentId: created.document.id,
+      actor,
+      baseRevision: created.document.revisionNumber,
+    });
+
+    expect(archived.archivedDocumentIds).toContain(created.document.id);
+    expect(lifecycle).toEqual([
+      `open:${state.roomName}`,
+      `unwind:${state.roomName}`,
+      `close:${state.roomName}`,
+    ]);
+  });
+
   it("seals open drafts and rejects updates from the pre-trash generation after restore", async () => {
     const { database, workspace, actor, created } = fixture();
     createDocument(database, workspace.id, actor, {
@@ -1033,7 +2625,7 @@ describe("collaboration command engine", () => {
       baseRevision: created.document.revisionNumber,
     });
     expect(archived.archivedDocumentIds).toContain(created.document.id);
-    expect(closedRooms).toContain(state.roomName);
+    expect(closedRooms).toEqual([state.roomName]);
     expect(() => loadCollaborationStateByRoom(database, state.roomName))
       .toThrowError(expect.objectContaining({ code: "NOT_FOUND" }));
 

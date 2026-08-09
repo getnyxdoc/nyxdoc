@@ -68,6 +68,7 @@ describe("human revision restore route", () => {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
+          requestId: "human-restore-request-001",
           baseRevision: 12,
           expectedGeneration: 3,
           expectedDraftVersion: 8,
@@ -85,6 +86,7 @@ describe("human revision restore route", () => {
       expectedGeneration: 3,
       expectedDraftVersion: 8,
       expectedBaseRevision: 12,
+      requestId: "human-restore-request-001",
       actor: expect.objectContaining({
         type: "human",
         userId: "user-1",

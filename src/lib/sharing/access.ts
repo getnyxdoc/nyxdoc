@@ -3,6 +3,7 @@ import {
   getHumanWorkspacePrincipal,
   humanWorkspaceRoleRank,
   recordWorkspaceAuditEvent,
+  requireHumanWorkspacePermission,
   type HumanDocumentGrantRole,
   type HumanWorkspaceRole,
 } from "@/lib/authz/permissions";
@@ -282,26 +283,32 @@ export function setDocumentHumanGrant(
   },
 ) {
   assertGrantRole(input.role);
-  const recipient = assertShareRecipient(
-    database,
-    input.workspaceId,
-    input.documentId,
-    input.recipientUserId,
-  );
   if (input.recipientUserId === input.actorUserId) {
     throw new DocumentServiceError("INVALID_INPUT", "자신에게 문서 권한을 추가할 필요가 없습니다.");
   }
-  const existing = database.prepare(
-    `SELECT id, role
-     FROM document_human_grants
-     WHERE document_id = ? AND user_id = ?`,
-  ).get(input.documentId, input.recipientUserId) as {
-    id: string;
-    role: HumanDocumentGrantRole;
-  } | undefined;
-  const now = new Date().toISOString();
-
-  database.transaction(() => {
+  return database.transaction(() => {
+    requireHumanWorkspacePermission(
+      database,
+      input.workspaceId,
+      input.actorUserId,
+      "documents.share",
+    );
+    const recipient = assertShareRecipient(
+      database,
+      input.workspaceId,
+      input.documentId,
+      input.recipientUserId,
+    );
+    const existing = database.prepare(
+      `SELECT id, role, created_at
+       FROM document_human_grants
+       WHERE workspace_id = ? AND document_id = ? AND user_id = ?`,
+    ).get(input.workspaceId, input.documentId, input.recipientUserId) as {
+      id: string;
+      role: HumanDocumentGrantRole;
+      created_at: string;
+    } | undefined;
+    const now = new Date().toISOString();
     syncDocumentMediaBindingsFromHistory(
       database,
       input.workspaceId,
@@ -347,9 +354,15 @@ export function setDocumentHumanGrant(
       },
       createdAt: now,
     });
-  })();
-  return listDocumentHumanAccess(database, input.workspaceId, input.documentId)
-    .find((entry) => entry.userId === input.recipientUserId)!;
+    return {
+      userId: recipient.id,
+      name: recipient.name,
+      email: recipient.email,
+      role: input.role,
+      source: "document_grant" as const,
+      grantedAt: existing?.created_at ?? now,
+    };
+  }).immediate();
 }
 
 export function revokeDocumentHumanGrant(
@@ -362,21 +375,27 @@ export function revokeDocumentHumanGrant(
     actorLabel: string;
   },
 ) {
-  getDocument(database, input.workspaceId, input.documentId);
-  const existing = database.prepare(
-    `SELECT id, role
-     FROM document_human_grants
-     WHERE workspace_id = ? AND document_id = ? AND user_id = ?`,
-  ).get(
-    input.workspaceId,
-    input.documentId,
-    input.recipientUserId,
-  ) as { id: string; role: HumanDocumentGrantRole } | undefined;
-  if (!existing) {
-    throw new DocumentServiceError("NOT_FOUND", "이 문서의 직접 공유 권한을 찾을 수 없습니다.");
-  }
-  const now = new Date().toISOString();
   database.transaction(() => {
+    requireHumanWorkspacePermission(
+      database,
+      input.workspaceId,
+      input.actorUserId,
+      "documents.share",
+    );
+    getDocument(database, input.workspaceId, input.documentId);
+    const existing = database.prepare(
+      `SELECT id, role
+       FROM document_human_grants
+       WHERE workspace_id = ? AND document_id = ? AND user_id = ?`,
+    ).get(
+      input.workspaceId,
+      input.documentId,
+      input.recipientUserId,
+    ) as { id: string; role: HumanDocumentGrantRole } | undefined;
+    if (!existing) {
+      throw new DocumentServiceError("NOT_FOUND", "이 문서의 직접 공유 권한을 찾을 수 없습니다.");
+    }
+    const now = new Date().toISOString();
     database.prepare("DELETE FROM document_human_grants WHERE id = ?").run(existing.id);
     recordWorkspaceAuditEvent(database, {
       workspaceId: input.workspaceId,
@@ -392,7 +411,7 @@ export function revokeDocumentHumanGrant(
       },
       createdAt: now,
     });
-  })();
+  }).immediate();
 }
 
 export function listHumanGrantedDocuments(
