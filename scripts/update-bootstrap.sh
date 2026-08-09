@@ -8,6 +8,16 @@
 set -Eeuo pipefail
 
 checkout_root="${NYXDOC_UPDATE_ROOT:-}"
+if [ -z "$checkout_root" ] \
+  && [ -f "$PWD/scripts/compose-common.sh" ] \
+  && [ -f "$PWD/scripts/update.sh" ] \
+  && [ -f "$PWD/package.json" ] \
+  && git -C "$PWD" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  # Preserve the operator's logical checkout path. Installations commonly use
+  # a stable symlink, and Docker Compose derives its project identity from that
+  # path rather than from Git's physical top-level path.
+  checkout_root="$PWD"
+fi
 if [ -z "$checkout_root" ]; then
   checkout_root="$(git rev-parse --show-toplevel 2>/dev/null || true)"
 fi
@@ -15,7 +25,7 @@ fi
   printf '[nyxdoc] error: run this command from an installed Nyxdoc Git checkout.\n' >&2
   exit 1
 }
-checkout_root="$(cd -- "$checkout_root" && pwd)"
+checkout_root="$(cd -- "$checkout_root" && pwd -L)"
 if [ ! -f "$checkout_root/scripts/compose-common.sh" ] \
   || [ ! -f "$checkout_root/scripts/update.sh" ] \
   || [ ! -f "$checkout_root/package.json" ]; then
@@ -75,7 +85,8 @@ nyxdoc_validate_environment
 [ -n "$(nyxdoc_compose ps --status running -q app)" ] \
   || nyxdoc_die "The app service must be running before the legacy update bridge starts."
 
-bridge_target_tag="v0.25.18"
+bridge_target_tag="v0.25.19"
+bridge_target_version="${bridge_target_tag#v}"
 bridge_target_ref="refs/nyxdoc-update/legacy-bridge-${bridge_target_tag}"
 current_revision="$(git -C "$checkout_root" rev-parse HEAD)"
 
@@ -156,13 +167,13 @@ if [ -f "$checkout_root/.nyxdoc-update-state" ]; then
   fi
 fi
 if $legacy_build_local || [[ "$current_image" == nyxdoc-app:* ]]; then
-  target_image="nyxdoc-app:0.25.18"
+  target_image="nyxdoc-app:${bridge_target_version}"
 else
   if [ -n "$receipt_handoff_image" ]; then
     target_image="$receipt_handoff_image"
   else
     target_image="$(nyxdoc_select_update_image \
-      "$current_image" "0.25.18" "$update_image_override")"
+      "$current_image" "$bridge_target_version" "$update_image_override")"
   fi
   if [[ "$target_image" == *@sha256:* ]]; then
     handoff_image="$target_image"
@@ -258,13 +269,18 @@ wait_for_zero_legacy_connections() {
 write_legacy_update_receipt() {
   local generation_id="$1"
   local generation_path="$2"
-  local backup_root manifest_path manifest_sha256 state_file temporary exclude_file receipt_image
+  local manifest_sha256 state_file temporary exclude_file receipt_image
   [[ "$generation_id" =~ ^[A-Za-z0-9._-]+$ ]] || return 1
   [ "$generation_path" = "/backups/$generation_id" ] || return 1
-  backup_root="$(nyxdoc_backup_host_path)"
-  manifest_path="$backup_root/$generation_id/manifest.json"
-  [ -f "$manifest_path" ] || return 1
-  manifest_sha256="$(sha256sum -- "$manifest_path" | awk '{ print $1 }')" || return 1
+  # The application container owns the backup payload. The host account that
+  # runs lifecycle commands may intentionally be unable to traverse that bind
+  # mount, so anchor the receipt through the already-running trusted app.
+  manifest_sha256="$(
+    nyxdoc_compose exec -T --user node app \
+      sha256sum -- "$generation_path/manifest.json" \
+      | tr -d '\r' \
+      | awk '$1 ~ /^[a-f0-9]+$/ && length($1) == 64 { print $1; exit }'
+  )" || return 1
   [[ "$manifest_sha256" =~ ^[a-f0-9]{64}$ ]] || return 1
   receipt_image="${handoff_image:-$target_image}"
   [ -n "$receipt_image" ] && [[ "$receipt_image" != *[[:space:]]* ]] || return 1

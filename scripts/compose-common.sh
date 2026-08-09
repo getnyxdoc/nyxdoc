@@ -3,7 +3,7 @@
 
 set -Eeuo pipefail
 
-NYXDOC_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+NYXDOC_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -L)"
 NYXDOC_ENV_FILE="$NYXDOC_ROOT/.env.production"
 NYXDOC_COMPOSE_FILE="$NYXDOC_ROOT/compose.yaml"
 
@@ -533,15 +533,50 @@ nyxdoc_update_state_get() {
 
 nyxdoc_backup_manifest_source_revision() {
   local generation_id="$1"
-  local backup_root manifest_path source_revision
+  local backup_root manifest_path generation_path source_revision
 
   [[ "$generation_id" =~ ^[A-Za-z0-9._-]+$ ]] || return 1
   backup_root="$(nyxdoc_backup_host_path)"
   manifest_path="$backup_root/$generation_id/manifest.json"
-  [ -f "$manifest_path" ] || return 1
-  source_revision="$(sed -n 's/^[[:space:]]*"sourceRevision"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$manifest_path" | head -n 1)"
+  if [ -r "$manifest_path" ]; then
+    source_revision="$(sed -n 's/^[[:space:]]*"sourceRevision"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$manifest_path" | head -n 1)"
+  else
+    generation_path="/backups/$generation_id"
+    source_revision="$(
+      nyxdoc_compose run --rm --no-deps --user node app node -e '
+        const fs = require("node:fs");
+        const manifest = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+        if (!/^[0-9a-f]{40}$/.test(manifest.sourceRevision ?? "")) process.exit(1);
+        console.log(manifest.sourceRevision);
+      ' "$generation_path/manifest.json" \
+        | tr -d '\r' \
+        | awk '$1 ~ /^[0-9a-f]+$/ && length($1) == 40 { value = $1 } END { print value }'
+    )" || return 1
+  fi
   [[ "$source_revision" =~ ^[0-9a-f]{40}$ ]] || return 1
   printf '%s\n' "$source_revision"
+}
+
+nyxdoc_backup_manifest_sha256() {
+  local generation_id="$1"
+  local backup_root manifest_path generation_path manifest_sha256
+
+  [[ "$generation_id" =~ ^[A-Za-z0-9._-]+$ ]] || return 1
+  backup_root="$(nyxdoc_backup_host_path)"
+  manifest_path="$backup_root/$generation_id/manifest.json"
+  if [ -r "$manifest_path" ]; then
+    manifest_sha256="$(sha256sum -- "$manifest_path" | awk '{ print $1 }')" || return 1
+  else
+    generation_path="/backups/$generation_id"
+    manifest_sha256="$(
+      nyxdoc_compose run --rm --no-deps --user node app \
+        sha256sum -- "$generation_path/manifest.json" \
+        | tr -d '\r' \
+        | awk '$1 ~ /^[a-f0-9]+$/ && length($1) == 64 { print $1; exit }'
+    )" || return 1
+  fi
+  [[ "$manifest_sha256" =~ ^[a-f0-9]{64}$ ]] || return 1
+  printf '%s\n' "$manifest_sha256"
 }
 
 nyxdoc_write_update_state() {
@@ -556,7 +591,7 @@ nyxdoc_write_update_state() {
   local previous_running_image_id="${9:-}"
   local previous_running_image_digest="${10:-}"
   local backup_source_revision="${11:-}"
-  local backup_root manifest_path manifest_sha256 state_file temporary format
+  local manifest_sha256 state_file temporary format
 
   [[ "$previous_revision" =~ ^[0-9a-f]{40}$ ]] || return 1
   [[ "$target_revision" =~ ^[0-9a-f]{40}$ ]] || return 1
@@ -582,12 +617,7 @@ nyxdoc_write_update_state() {
     format="nyxdoc-update-state/v3"
   fi
 
-  backup_root="$(nyxdoc_backup_host_path)"
-  manifest_path="$backup_root/$generation_id/manifest.json"
-  [ -f "$manifest_path" ] || return 1
-  manifest_sha256="$(sha256sum -- "$manifest_path" | awk '{ print $1 }')" || return 1
-  [[ "$manifest_sha256" =~ ^[a-f0-9]{64}$ ]] || return 1
-  mkdir -p "$backup_root"
+  manifest_sha256="$(nyxdoc_backup_manifest_sha256 "$generation_id")" || return 1
   state_file="$(nyxdoc_update_state_file)"
   temporary="$(mktemp "${state_file}.tmp.XXXXXX")"
   {
@@ -638,7 +668,7 @@ nyxdoc_resumable_update_backup() {
   local current_revision="$1"
   local target_revision="$2"
   local state_file format previous stored_target generation_id generation_path stored_manifest_sha256
-  local backup_root manifest_path observed_manifest_sha256 stored_backup_source observed_backup_source
+  local observed_manifest_sha256 stored_backup_source observed_backup_source
   state_file="$(nyxdoc_update_state_file)"
   [ -f "$state_file" ] || return 1
   format="$(nyxdoc_update_state_get "$state_file" format)"
@@ -653,10 +683,7 @@ nyxdoc_resumable_update_backup() {
   [[ "$generation_id" =~ ^[A-Za-z0-9._-]+$ ]] || return 1
   [ "$generation_path" = "/backups/$generation_id" ] || return 1
   [[ "$stored_manifest_sha256" =~ ^[a-f0-9]{64}$ ]] || return 1
-  backup_root="$(nyxdoc_backup_host_path)"
-  manifest_path="$backup_root/$generation_id/manifest.json"
-  [ -f "$manifest_path" ] || return 1
-  observed_manifest_sha256="$(sha256sum -- "$manifest_path" | awk '{ print $1 }')" || return 1
+  observed_manifest_sha256="$(nyxdoc_backup_manifest_sha256 "$generation_id")" || return 1
   [ "$observed_manifest_sha256" = "$stored_manifest_sha256" ] || return 1
   if [ "$format" = "nyxdoc-update-state/v3" ]; then
     stored_backup_source="$(nyxdoc_update_state_get "$state_file" backupSourceRevision)"

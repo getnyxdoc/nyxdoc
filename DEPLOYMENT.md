@@ -48,7 +48,7 @@ the service:
 Set:
 
 ```dotenv
-NYXDOC_IMAGE=ghcr.io/getnyxdoc/nyxdoc:0.25.18
+NYXDOC_IMAGE=ghcr.io/getnyxdoc/nyxdoc:0.25.19
 BETTER_AUTH_URL=https://docs.example.com
 BETTER_AUTH_SECRET=<first random value>
 AUTH_TRUSTED_ORIGINS=https://docs.example.com
@@ -195,15 +195,15 @@ Run the stable updater from the repository checkout:
 ```
 
 An installation currently on `0.25.17` must use the target release's one-time
-entry point for its first update to `0.25.18`. Run it from that checkout:
+entry point for its first update. Run it from that checkout:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/getnyxdoc/nyxdoc/v0.25.18/scripts/update-bootstrap.sh | bash
+curl -fsSL https://raw.githubusercontent.com/getnyxdoc/nyxdoc/v0.25.19/scripts/update-bootstrap.sh | bash
 ```
 
 The updater shipped in `0.25.17` creates its pre-update backup before target
 code can run. The standalone bridge therefore pins both source and image to
-exactly `0.25.18`, stops the public gateway, and positively waits until the
+exactly `0.25.19`, stops the public gateway, and positively waits until the
 legacy collaboration service reports zero connections. While collaboration is
 still alive, it creates and verifies a backup and persists a receipt containing
 the backup manifest digest and the already verified immutable target-image
@@ -216,7 +216,7 @@ shutdown path. If that handoff is interrupted after the source checkout moves,
 running the same bootstrap command again re-verifies the receipt and resumes
 with that recorded digest rather than resolving the mutable image tag again.
 The bridge rejects versions older than `0.25.17`, is a transparent handoff on
-`0.25.18` and newer installations, and normal future updates use
+`0.25.19` and newer installations, and normal future updates use
 `./scripts/update.sh`.
 
 The updater refuses a dirty Git checkout, skips Git tags that have no published

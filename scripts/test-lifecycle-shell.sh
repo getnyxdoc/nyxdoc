@@ -66,6 +66,44 @@ printf '{}\n' >"$temporary/data/backups/generation-1/manifest.json"
 nyxdoc_clear_update_state
 [ ! -e "$(nyxdoc_update_state_file)" ]
 
+# Backup bind mounts may be deliberately unreadable by the host lifecycle
+# account even though the app container owns and can verify their contents.
+# Exercise the container-visible fallback for both the manifest hash and the
+# source-revision evidence used by a v3 interrupted-update receipt.
+container_manifest_sha256="$(sha256sum "$temporary/data/backups/generation-1/manifest.json" | awk '{ print $1 }')"
+sed -i \
+  's#^NYXDOC_BACKUP_HOST_PATH=.*#NYXDOC_BACKUP_HOST_PATH=./host-unreadable-backups#' \
+  "$temporary/.env.production"
+nyxdoc_compose() {
+  arguments=" $* "
+  if [[ "$arguments" == *" sha256sum -- /backups/generation-1/manifest.json "* ]]; then
+    printf '%s  /backups/generation-1/manifest.json\n' "$container_manifest_sha256"
+    return 0
+  fi
+  if [[ "$arguments" == *" node -e "* ]]; then
+    printf '%s\n' "$previous_revision"
+    return 0
+  fi
+  if [[ "$arguments" == *" npm run backup:verify -- /backups/generation-1 "* ]]; then
+    return 0
+  fi
+  return 1
+}
+nyxdoc_write_update_state \
+  "$previous_revision" "$target_revision" v0.25.19 \
+  generation-1 /backups/generation-1 \
+  registry.example/nyxdoc@sha256:2222222222222222222222222222222222222222222222222222222222222222 \
+  origin registry.example/nyxdoc:0.25.17 sha256:baseline unavailable \
+  "$previous_revision"
+grep -Fxq "backupManifestSha256=$container_manifest_sha256" \
+  "$temporary/.nyxdoc-update-state"
+grep -Fxq 'format=nyxdoc-update-state/v3' "$temporary/.nyxdoc-update-state"
+[ "$(nyxdoc_resumable_update_backup "$previous_revision" "$target_revision")" = "$expected" ]
+nyxdoc_clear_update_state
+sed -i \
+  's#^NYXDOC_BACKUP_HOST_PATH=.*#NYXDOC_BACKUP_HOST_PATH=./data/backups#' \
+  "$temporary/.env.production"
+
 fake_bin="$temporary/fake-bin"
 registry_state="$temporary/registry-state"
 docker_log="$temporary/docker.log"
@@ -662,7 +700,7 @@ unset NYXDOC_OFFICIAL_RELEASE_SOURCE FAKE_OFFICIAL_TARGET_REVISION
 # load target-release code. The target release therefore provides a standalone
 # bridge that closes the public gateway, proves the WebSocket boundary drained,
 # snapshots while collaboration is still alive, then stops collaboration before
-# handing an exact v0.25.18 target to that old updater.
+# handing the exact current release target to that old updater.
 bridge_root="$temporary/legacy-update-bridge"
 bridge_origin="$temporary/legacy-update-bridge-origin.git"
 bridge_fake_bin="$temporary/legacy-update-bridge-bin"
@@ -677,7 +715,7 @@ set -Eeuo pipefail
 printf 'update legacy_quiesced=%s\n' "${NYXDOC_LEGACY_UPDATE_QUIESCED:-missing}" \
   >>"$BRIDGE_STATE/log"
 if [ "${NYXDOC_LEGACY_UPDATE_QUIESCED:-}" = 1 ]; then
-  git -C "${NYXDOC_UPDATE_ROOT:?}" fetch --no-tags origin refs/tags/v0.25.18 >/dev/null
+  git -C "${NYXDOC_UPDATE_ROOT:?}" fetch --no-tags origin refs/tags/v0.25.19 >/dev/null
   git -C "$NYXDOC_UPDATE_ROOT" checkout --detach FETCH_HEAD >/dev/null
   if [ -e "$BRIDGE_STATE/fail-after-checkout" ]; then
     rm -f "$BRIDGE_STATE/fail-after-checkout"
@@ -702,7 +740,6 @@ cat >"$bridge_fake_bin/docker" <<'EOF'
 #!/usr/bin/env bash
 set -Eeuo pipefail
 state="$BRIDGE_STATE"
-root="${NYXDOC_UPDATE_ROOT:?}"
 bridge_digest="sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 if [ "${1:-} ${2:-}" = "buildx version" ]; then exit 0; fi
 if [ "${1:-} ${2:-} ${3:-}" = "buildx imagetools inspect" ]; then
@@ -759,17 +796,18 @@ case "$command" in
     fi
     if [[ "$arguments" == *" backup:create "* ]]; then
       generation_id='legacy-bridge-generation'
-      mkdir -p "$root/data/backups/$generation_id"
-      printf '{"format":"nyxdoc-backup/v2"}\n' \
-        >"$root/data/backups/$generation_id/manifest.json"
       printf 'backup create\n' >>"$state/log"
       printf '{\n  "status": "verified",\n  "generationId": "%s",\n  "generationPath": "/backups/%s"\n}\n' \
         "$generation_id" "$generation_id"
       exit 0
     fi
     if [[ "$arguments" == *" backup:verify "* ]]; then
-      [ -f "$root/data/backups/legacy-bridge-generation/manifest.json" ]
       printf 'backup verify\n' >>"$state/log"
+      exit 0
+    fi
+    if [[ "$arguments" == *" sha256sum -- /backups/legacy-bridge-generation/manifest.json "* ]]; then
+      printf 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa  /backups/legacy-bridge-generation/manifest.json\n'
+      printf 'backup manifest hash\n' >>"$state/log"
       exit 0
     fi
     printf 'unexpected docker compose exec: %s\n' "$*" >&2
@@ -801,17 +839,42 @@ git -C "$bridge_root" add package.json compose.yaml scripts
 git -C "$bridge_root" commit -m v0.25.17 >/dev/null
 bridge_baseline_revision="$(git -C "$bridge_root" rev-parse HEAD)"
 git -C "$bridge_root" tag -a v0.25.17 -m v0.25.17
-printf '{\n  "version": "0.25.18"\n}\n' >"$bridge_root/package.json"
+printf '{\n  "version": "0.25.19"\n}\n' >"$bridge_root/package.json"
 git -C "$bridge_root" add package.json
-git -C "$bridge_root" commit -m v0.25.18 >/dev/null
+git -C "$bridge_root" commit -m v0.25.19 >/dev/null
 bridge_target_revision="$(git -C "$bridge_root" rev-parse HEAD)"
-git -C "$bridge_root" tag -a v0.25.18 -m v0.25.18
+git -C "$bridge_root" tag -a v0.25.19 -m v0.25.19
 git init --bare --initial-branch=main "$bridge_origin" >/dev/null
 git -C "$bridge_root" remote add origin "$bridge_origin"
-git -C "$bridge_root" push origin main v0.25.17 v0.25.18 >/dev/null
+git -C "$bridge_root" push origin main v0.25.17 v0.25.19 >/dev/null
 git -C "$bridge_root" checkout --detach "$bridge_baseline_revision" >/dev/null
 export NYXDOC_OFFICIAL_RELEASE_SOURCE="$bridge_origin"
 printf '{\n  "version": "0.25.16"\n}\n' >"$bridge_root/package.json"
+
+# When the installed checkout is reached through a stable symlink, automatic
+# root discovery must retain that logical path instead of changing the Compose
+# project identity to Git's physical top-level path.
+bridge_link="$temporary/legacy-update-bridge-link"
+if ln -s "$bridge_root" "$bridge_link" 2>/dev/null && [ -L "$bridge_link" ]; then
+  if (
+    cd "$bridge_link"
+    BRIDGE_STATE="$bridge_state" \
+      BRIDGE_TARGET_REVISION="$bridge_target_revision" \
+      PATH="$bridge_fake_bin:$PATH" \
+      bash scripts/update-bootstrap.sh \
+        >"$temporary/legacy-update-bridge-symlink.out" \
+        2>"$temporary/legacy-update-bridge-symlink.err"
+  ); then
+    printf 'legacy first-hop bridge unexpectedly accepted 0.25.16 through a symlink\n' >&2
+    exit 1
+  fi
+  grep -Fq 'supports exactly 0.25.17' "$temporary/legacy-update-bridge-symlink.err"
+  if grep -Fq 'checkout root is inconsistent' "$temporary/legacy-update-bridge-symlink.err"; then
+    printf 'legacy first-hop bridge lost its logical symlink checkout root\n' >&2
+    exit 1
+  fi
+fi
+
 if BRIDGE_STATE="$bridge_state" \
   BRIDGE_TARGET_REVISION="$bridge_target_revision" \
   NYXDOC_UPDATE_ROOT="$bridge_root" \
@@ -839,6 +902,7 @@ update_line="$(grep -n -m1 '^update legacy_quiesced=1$' "$bridge_state/log" | cu
 [ "$backup_line" -lt "$collaboration_line" ]
 [ "$collaboration_line" -lt "$update_line" ]
 grep -Fxq 'backup verify' "$bridge_state/log"
+grep -Fxq 'backup manifest hash' "$bridge_state/log"
 grep -Fq 'Legacy bridge verified backup: /backups/legacy-bridge-generation' \
   "$temporary/legacy-update-bridge.out"
 

@@ -100,15 +100,15 @@ Update, stop, or remove the trial with explicit lifecycle commands:
 ./scripts/uninstall.sh --purge --confirm-purge=nyxdoc
 ```
 
-For the one-time update from `0.25.17` to `0.25.18`, run this command from the
+For the one-time update from `0.25.17`, run the current release bridge from the
 Nyxdoc checkout instead:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/getnyxdoc/nyxdoc/v0.25.18/scripts/update-bootstrap.sh | bash
+curl -fsSL https://raw.githubusercontent.com/getnyxdoc/nyxdoc/v0.25.19/scripts/update-bootstrap.sh | bash
 ```
 
 The bridge closes the public collaboration boundary and drains already accepted
-editor writes before the legacy updater creates its backup. From `0.25.18`
+editor writes before the legacy updater creates its backup. From `0.25.19`
 onward, use `./scripts/update.sh` normally.
 
 `update.sh` requires a clean Git checkout and creates a verified pre-update
@@ -157,7 +157,7 @@ boundaries, see [docs/open-source-readiness.md](docs/open-source-readiness.md),
 
 ## Project status
 
-Version `0.25.18` is an early 0.x release used with real documents. Data
+Version `0.25.19` is an early 0.x release used with real documents. Data
 migrations are forward-only and rehearsed against verified backups, but APIs
 and UI details may still evolve before 1.0.
 

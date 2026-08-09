@@ -90,15 +90,15 @@ git clone https://github.com/getnyxdoc/nyxdoc.git && cd nyxdoc && ./scripts/inst
 ./scripts/uninstall.sh --purge --confirm-purge=nyxdoc
 ```
 
-`0.25.17`에서 `0.25.18`로 한 번만 업데이트할 때는 Nyxdoc checkout에서 대신 다음
-명령을 실행합니다.
+아직 `0.25.17`을 사용 중인 설치는 Nyxdoc checkout에서 현재 릴리스 브리지를
+실행합니다.
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/getnyxdoc/nyxdoc/v0.25.18/scripts/update-bootstrap.sh | bash
+curl -fsSL https://raw.githubusercontent.com/getnyxdoc/nyxdoc/v0.25.19/scripts/update-bootstrap.sh | bash
 ```
 
 이 브리지는 공개 협업 경계를 먼저 닫고 이미 받아들인 편집 내용을 모두 저장한 뒤,
-구버전 업데이트기가 백업을 만들게 합니다. `0.25.18`부터는 평소처럼
+구버전 업데이트기가 백업을 만들게 합니다. `0.25.19`부터는 평소처럼
 `./scripts/update.sh`를 사용합니다.
 
 `update.sh`는 깨끗한 Git checkout이 필요하며 실행 중인 설치를 바꾸기 전 검증된
@@ -140,7 +140,7 @@ npm run build
 
 ## 프로젝트 상태
 
-`0.25.18`은 실제 문서에 사용 중인 초기 0.x 버전입니다. 데이터 마이그레이션은 검증된
+`0.25.19`는 실제 문서에 사용 중인 초기 0.x 버전입니다. 데이터 마이그레이션은 검증된
 백업 복제본에서 먼저 연습하는 forward-only 방식이지만, 1.0 전까지 API와 UI의 세부
 사항은 변경될 수 있습니다.
 

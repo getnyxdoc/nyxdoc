@@ -91,15 +91,15 @@ git clone https://github.com/getnyxdoc/nyxdoc.git && cd nyxdoc && ./scripts/inst
 ./scripts/uninstall.sh --purge --confirm-purge=nyxdoc
 ```
 
-`0.25.17`から`0.25.18`へ一度だけ更新する場合は、Nyxdoc checkoutで代わりに次の
-コマンドを実行します。
+まだ`0.25.17`を利用している環境では、Nyxdoc checkoutから現在のrelease bridgeを
+実行します。
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/getnyxdoc/nyxdoc/v0.25.18/scripts/update-bootstrap.sh | bash
+curl -fsSL https://raw.githubusercontent.com/getnyxdoc/nyxdoc/v0.25.19/scripts/update-bootstrap.sh | bash
 ```
 
 このbridgeは公開共同編集境界を先に閉じ、受理済みの編集をすべて保存してから、旧版の
-updaterにバックアップを作成させます。`0.25.18`以降は通常どおり
+updaterにバックアップを作成させます。`0.25.19`以降は通常どおり
 `./scripts/update.sh`を使用します。
 
 `update.sh`にはクリーンなGit checkoutが必要で、実行中の環境を変更する前に検証済み
@@ -142,7 +142,7 @@ npm run build
 
 ## プロジェクトの状態
 
-`0.25.18`は実際の文書で利用している初期0.xリリースです。データ移行は検証済み
+`0.25.19`は実際の文書で利用している初期0.xリリースです。データ移行は検証済み
 バックアップの複製で事前にリハーサルするforward-only方式ですが、1.0まではAPIや
 UIの詳細が変更される可能性があります。
 

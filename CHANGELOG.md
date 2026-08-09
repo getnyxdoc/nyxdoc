@@ -2,6 +2,17 @@
 
 All notable user-facing changes are recorded here.
 
+## 0.25.19 - 2026-08-10
+
+- Made the one-time `0.25.17` update bridge preserve a logical installation
+  symlink so Docker Compose continues to address the already-running project.
+- Made update receipts and interrupted-update validation read backup manifest
+  evidence through the application container when the host lifecycle account
+  cannot traverse the container-owned backup bind mount.
+- Added lifecycle regressions for symlinked installations and host-unreadable
+  backup directories while retaining manifest hashing, source provenance, and
+  full backup verification.
+
 ## 0.25.18 - 2026-08-09
 
 - Made collaboration writes durable before broadcast, rechecked authorization

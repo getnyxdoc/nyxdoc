@@ -85,7 +85,7 @@ Release를 만들지 않는다. publication 순서는 반드시 다음과 같다
 
 historical baseline이 `0.25.17`이면 qualification은 후보 release의 standalone
 `update-bootstrap.sh`를 실행한다. qualification은 실제 baseline WebSocket으로 마지막 Yjs
-변경을 먼저 보낸다. bridge는 source와 image를 정확히 `0.25.18`로 고정하고 baseline
+변경을 먼저 보낸다. bridge는 source와 image를 정확히 해당 후보 release로 고정하고 baseline
 gateway를 닫은 뒤 collaboration health가 연결 0을 보고하는지 확인한다. collaboration이
 아직 살아 있는 상태에서 verified backup을 만들고 manifest digest가 담긴 handoff receipt를
 기록한 다음에만 collaboration을 멈추고 설치된 구버전 `update.sh`를 호출한다. 후보가 뜬 뒤에는

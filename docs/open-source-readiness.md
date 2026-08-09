@@ -1,6 +1,6 @@
 # Open-source newcomer readiness
 
-Checked against Nyxdoc `0.25.18` (`package.json`) and the current scripts and
+Checked against Nyxdoc `0.25.19` (`package.json`) and the current scripts and
 workflows. This is the detailed path for a first-time user or contributor;
 the README keeps the short path and links here.
 
@@ -92,12 +92,12 @@ copy from the repository checkout:
 ./scripts/uninstall.sh --purge --confirm-purge=nyxdoc
 ```
 
-For the single `0.25.17` to `0.25.18` boundary, run the release bridge from the
-checkout so accepted collaboration writes are drained before the old updater's
-backup:
+For an installation still on `0.25.17`, run the current release bridge from
+the checkout so accepted collaboration writes are drained before the old
+updater's backup:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/getnyxdoc/nyxdoc/v0.25.18/scripts/update-bootstrap.sh | bash
+curl -fsSL https://raw.githubusercontent.com/getnyxdoc/nyxdoc/v0.25.19/scripts/update-bootstrap.sh | bash
 ```
 
 Use `./scripts/update.sh` for every later release.
