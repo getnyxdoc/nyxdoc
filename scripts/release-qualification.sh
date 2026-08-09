@@ -215,6 +215,7 @@ artifact_dir="$temporary/artifacts"
 mkdir -p "$artifact_dir"
 browser_evidence_dir="$(dirname -- "$receipt_path")/playwright"
 historical_fixture_driver="$root/scripts/test-fixtures/release-qualification-historical.ts"
+historical_fixture_container_path="/tmp/nyxdoc-release-qualification-historical.ts"
 historical_fixture_state="$temporary/historical-fixture-state.json"
 
 fresh_port="${NYXDOC_RELEASE_QUALIFICATION_HTTP_PORT:-$((38000 + RANDOM % 1000))}"
@@ -419,9 +420,8 @@ install_historical_fixture_driver() {
   local directory="$1"
   [ -f "$historical_fixture_driver" ] \
     || fail "historical release fixture driver is missing"
-  compose_for "$directory" exec -T app mkdir -p /app/scripts/test-fixtures
   compose_for "$directory" cp \
-    "$historical_fixture_driver" app:/app/scripts/test-fixtures/release-qualification-historical.ts
+    "$historical_fixture_driver" "app:${historical_fixture_container_path}"
 }
 
 create_historical_fixture() {
@@ -432,7 +432,7 @@ create_historical_fixture() {
   compose_for "$directory" exec -T --user node \
     -e NYXDOC_TEST_BASE_URL=http://gateway:3002 \
     app ./node_modules/.bin/tsx \
-    /app/scripts/test-fixtures/release-qualification-historical.ts create "$email" >"$state_path"
+    "$historical_fixture_container_path" create "$email" >"$state_path"
   chmod 600 "$state_path"
   node -e 'JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8"))' "$state_path" \
     || fail "historical fixture state was not valid JSON"
@@ -447,7 +447,7 @@ verify_historical_fixture() {
   compose_for "$directory" exec -T --user node \
     -e NYXDOC_TEST_BASE_URL=http://gateway:3002 \
     app ./node_modules/.bin/tsx \
-    /app/scripts/test-fixtures/release-qualification-historical.ts verify "$stage" \
+    "$historical_fixture_container_path" verify "$stage" \
     <"$state_path" | tee "$evidence_path" >>"$qualification_log"
   node -e 'JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8"))' "$evidence_path" \
     || fail "historical fixture evidence for ${stage} was not valid JSON"
@@ -462,7 +462,7 @@ mutate_historical_fixture_websocket() {
   compose_for "$directory" exec -T --user node \
     -e NYXDOC_TEST_BASE_URL=http://gateway:3002 \
     app ./node_modules/.bin/tsx \
-    /app/scripts/test-fixtures/release-qualification-historical.ts websocket-mutate \
+    "$historical_fixture_container_path" websocket-mutate \
     <"$state_path" >"$replacement"
   node -e 'JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8"))' "$replacement" \
     || fail "WebSocket-mutated historical fixture state was not valid JSON"
@@ -536,7 +536,7 @@ start_historical_fixture_websocket_hold() {
     -e NYXDOC_TEST_BASE_URL=http://gateway:3002 \
     -e NYXDOC_TEST_WS_HOLD_TIMEOUT_MS=600000 \
     app ./node_modules/.bin/tsx \
-    /app/scripts/test-fixtures/release-qualification-historical.ts websocket-hold \
+    "$historical_fixture_container_path" websocket-hold \
     <"$state_path" >"$replacement" 2>"$lifecycle_path" &
   historical_websocket_holder_pid=$!
 
@@ -708,7 +708,7 @@ verify_historical_bridge_backup() {
   install_historical_fixture_driver "$directory"
   compose_for "$directory" exec -T --user node \
     app ./node_modules/.bin/tsx \
-    /app/scripts/test-fixtures/release-qualification-historical.ts \
+    "$historical_fixture_container_path" \
     verify-backup "$generation_path" <"$state_path" \
     | tee "$evidence_path" >>"$qualification_log"
   node -e 'JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8"))' "$evidence_path" \
@@ -724,7 +724,7 @@ commit_historical_fixture() {
   compose_for "$directory" exec -T --user node \
     -e NYXDOC_TEST_BASE_URL=http://gateway:3002 \
     app ./node_modules/.bin/tsx \
-    /app/scripts/test-fixtures/release-qualification-historical.ts commit \
+    "$historical_fixture_container_path" commit \
     <"$state_path" >"$replacement"
   node -e 'JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8"))' "$replacement" \
     || fail "committed historical fixture state was not valid JSON"

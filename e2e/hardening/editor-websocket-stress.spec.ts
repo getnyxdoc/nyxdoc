@@ -88,7 +88,8 @@ async function selectedTableCellId(page: Page) {
 async function focusTableCellEnd(page: Page, cell: Locator) {
   const cellId = await cell.getAttribute("data-table-cell-id");
   if (!cellId) throw new Error("The real table cell did not expose a stable identity.");
-  await focusElementEnd(cell);
+  await cell.click({ position: { x: 30, y: 24 } });
+  await page.keyboard.press("End");
   await expect.poll(() => selectedTableCellId(page)).toBe(cellId);
   return cellId;
 }

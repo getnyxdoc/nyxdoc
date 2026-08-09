@@ -28,6 +28,14 @@ All notable user-facing changes are recorded here.
 - Made first-install and disaster-recovery paths portable across Docker hosts
   by accepting image-seeded empty media directories and normalizing data,
   media, and backup ownership before offline migrations.
+- Made linked text consistently show a hand cursor, including links whose
+  visible label is rendered by nested editor elements.
+- Made historical release qualification portable to non-root baseline images
+  by staging its temporary fixture driver under the container-writable `/tmp`
+  directory instead of the read-only application tree.
+- Made CI fetch release tags needed by lifecycle tests and exercise table-cell
+  focus through real browser input so collaboration stress coverage reflects
+  user behavior instead of synthetic DOM selection.
 
 ## 0.25.17 - 2026-08-07
 

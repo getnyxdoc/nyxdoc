@@ -97,6 +97,7 @@ test("renders an agent-authored raw URL as the public page title and opens it fr
   await page.goto("/dev/workspace-e2e?fixture=agent-link-editor");
   const editorLink = page.getByRole("link", { name: "Build skills | ChatGPT Learn" });
   await expect(editorLink).toHaveCSS("cursor", "pointer");
+  await expect(editorLink.locator("span").first()).toHaveCSS("cursor", "pointer");
   await expect(editorLink).toHaveAttribute(
     "href",
     "https://learn.chatgpt.com/docs/build-skills",

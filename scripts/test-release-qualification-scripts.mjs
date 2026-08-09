@@ -416,9 +416,16 @@ async function main() {
       "playwright test e2e/vertical --project=chromium",
       "nyxdoc-release-qualification/v1",
       "exec -T collaboration node -e",
+      'historical_fixture_container_path="/tmp/nyxdoc-release-qualification-historical.ts"',
+      '"app:${historical_fixture_container_path}"',
     ]) {
       assert.match(shell, new RegExp(requiredFragment.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
     }
+    assert.doesNotMatch(
+      shell,
+      /app:\/scripts\/test-fixtures\/release-qualification-historical\.ts|mkdir -p \/app\/scripts\/test-fixtures/,
+      "historical qualification fixtures must be staged in the container-writable temporary directory",
+    );
     const temporaryOriginStart = shell.indexOf('git init --bare --initial-branch=main "$update_origin"');
     const bridgeInvocationStart = shell.indexOf('bridge_output="$(');
     const bridgeInvocationEnd = shell.indexOf(')"', bridgeInvocationStart);

@@ -361,7 +361,8 @@
 }
 .editorContent hr { margin: 34px 0; border: 0; border-top: 1px solid var(--line); }
 .editorContent code { padding: 2px 5px; border-radius: 5px; background: #f0f4f1; color: #9b4161; font-family: var(--font-mono); font-size: .88em; }
-.documentLink {
+.editorContent a.documentLink,
+.editorContent a.documentLink * {
   color: #25785d;
   cursor: pointer;
   text-decoration: underline;
@@ -369,7 +370,8 @@
   text-decoration-thickness: 1px;
   text-underline-offset: 3px;
 }
-.documentLink:hover { color: #195e47; text-decoration-color: currentColor; }
+.editorContent a.documentLink:hover,
+.editorContent a.documentLink:hover * { color: #195e47; text-decoration-color: currentColor; }
 .visuallyHidden {
   position: absolute;
   width: 1px;
