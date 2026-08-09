@@ -81,7 +81,7 @@ const baseUrl = process.env.NYXDOC_TEST_BASE_URL?.replace(/\/$/, "");
 if (!baseUrl) throw new Error("NYXDOC_TEST_BASE_URL is required");
 
 const mediaBytes = Buffer.from(
-  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9Z4GsAAAAASUVORK5CYII=",
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
   "base64",
 );
 const mediaSha256 = createHash("sha256").update(mediaBytes).digest("hex");

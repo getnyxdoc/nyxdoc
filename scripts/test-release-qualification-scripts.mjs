@@ -6,6 +6,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import sharp from "sharp";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const verifier = path.join(root, "scripts", "verify-release-qualification-receipt.mjs");
@@ -18,6 +19,12 @@ const updateScript = path.join(root, "scripts", "update.sh");
 const releaseMetadataVerifier = path.join(root, "scripts", "verify-release-metadata.mjs");
 const imagePromoter = path.join(root, "scripts", "promote-release-image.sh");
 const lifecycleShell = path.join(root, "scripts", "test-lifecycle-shell.sh");
+const historicalFixture = path.join(
+  root,
+  "scripts",
+  "test-fixtures",
+  "release-qualification-historical.ts",
+);
 const image = "ghcr.io/getnyxdoc/nyxdoc@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const revision = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 
@@ -373,6 +380,22 @@ async function main() {
     );
 
     const shell = await readFile(qualification, "utf8");
+    const historicalFixtureSource = await readFile(historicalFixture, "utf8");
+    const mediaBase64 = historicalFixtureSource.match(
+      /const mediaBytes = Buffer\.from\(\s*"([A-Za-z0-9+/=]+)",\s*"base64"/u,
+    )?.[1];
+    assert.ok(mediaBase64, "historical qualification fixture media bytes are missing");
+    const mediaBytes = Buffer.from(mediaBase64, "base64");
+    const decodedFixture = await sharp(mediaBytes, {
+      animated: true,
+      failOn: "warning",
+      sequentialRead: true,
+      unlimited: false,
+    }).toBuffer();
+    assert.ok(
+      decodedFixture.byteLength > 0,
+      "historical qualification fixture media must fully decode with production settings",
+    );
     const requiredChecksBlock = shell.match(
       /required_checks=\(\s*([\s\S]*?)\s*\)\s*for required_check in/,
     );
