@@ -430,6 +430,7 @@ create_historical_fixture() {
   local state_path="$3"
   install_historical_fixture_driver "$directory"
   compose_for "$directory" exec -T --user node \
+    -e NODE_PATH=/app/node_modules \
     -e NYXDOC_TEST_BASE_URL=http://gateway:3002 \
     app ./node_modules/.bin/tsx \
     "$historical_fixture_container_path" create "$email" >"$state_path"
@@ -445,6 +446,7 @@ verify_historical_fixture() {
   local evidence_path="$4"
   install_historical_fixture_driver "$directory"
   compose_for "$directory" exec -T --user node \
+    -e NODE_PATH=/app/node_modules \
     -e NYXDOC_TEST_BASE_URL=http://gateway:3002 \
     app ./node_modules/.bin/tsx \
     "$historical_fixture_container_path" verify "$stage" \
@@ -460,6 +462,7 @@ mutate_historical_fixture_websocket() {
   replacement="$(mktemp "${state_path}.tmp.XXXXXX")"
   install_historical_fixture_driver "$directory"
   compose_for "$directory" exec -T --user node \
+    -e NODE_PATH=/app/node_modules \
     -e NYXDOC_TEST_BASE_URL=http://gateway:3002 \
     app ./node_modules/.bin/tsx \
     "$historical_fixture_container_path" websocket-mutate \
@@ -533,6 +536,7 @@ start_historical_fixture_websocket_hold() {
   chmod 600 "$replacement" "$lifecycle_path"
   install_historical_fixture_driver "$directory"
   compose_for "$directory" exec -T --user node \
+    -e NODE_PATH=/app/node_modules \
     -e NYXDOC_TEST_BASE_URL=http://gateway:3002 \
     -e NYXDOC_TEST_WS_HOLD_TIMEOUT_MS=600000 \
     app ./node_modules/.bin/tsx \
@@ -707,6 +711,7 @@ verify_historical_bridge_backup() {
   local evidence_path="$4"
   install_historical_fixture_driver "$directory"
   compose_for "$directory" exec -T --user node \
+    -e NODE_PATH=/app/node_modules \
     app ./node_modules/.bin/tsx \
     "$historical_fixture_container_path" \
     verify-backup "$generation_path" <"$state_path" \
@@ -722,6 +727,7 @@ commit_historical_fixture() {
   replacement="$(mktemp "${state_path}.tmp.XXXXXX")"
   install_historical_fixture_driver "$directory"
   compose_for "$directory" exec -T --user node \
+    -e NODE_PATH=/app/node_modules \
     -e NYXDOC_TEST_BASE_URL=http://gateway:3002 \
     app ./node_modules/.bin/tsx \
     "$historical_fixture_container_path" commit \

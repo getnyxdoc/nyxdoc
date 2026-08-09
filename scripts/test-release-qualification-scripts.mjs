@@ -418,6 +418,7 @@ async function main() {
       "exec -T collaboration node -e",
       'historical_fixture_container_path="/tmp/nyxdoc-release-qualification-historical.ts"',
       '"app:${historical_fixture_container_path}"',
+      "-e NODE_PATH=/app/node_modules",
     ]) {
       assert.match(shell, new RegExp(requiredFragment.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
     }
