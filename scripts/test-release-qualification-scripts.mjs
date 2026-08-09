@@ -646,6 +646,7 @@ if [ "\${1:-} \${2:-} \${3:-}" = "buildx imagetools inspect" ]; then
       unauthorized) printf 'unauthorized: authentication required\n' >&2; exit 1 ;;
       timeout) printf 'request timed out while contacting registry\n' >&2; exit 1 ;;
       not-found) if [ -z "$digest" ]; then printf 'manifest unknown: manifest unknown\n' >&2; exit 1; fi ;;
+      buildx-ghcr-not-found) if [ -z "$digest" ]; then printf 'ERROR: %s: not found\n' "$reference" >&2; exit 1; fi ;;
       empty) exit 1 ;;
       malformed) printf 'Digest: not-a-digest\n'; exit 0 ;;
     esac
@@ -738,6 +739,28 @@ exit 2
         await readFile(dockerLog, "utf8"),
         `create ${versionTag}\n`,
         "an explicit manifest-not-found response must publish the immutable version tag",
+      );
+
+      await writeFile(registryState, `${candidateImage} ${candidateDigest}\n`);
+      await writeFile(dockerLog, "");
+      const buildxGhcrMissingVersionTag = spawnSync("bash", [promotionScript], {
+        cwd: promotionRoot,
+        env: {
+          ...promoterEnv,
+          FAKE_INSPECT_FAILURE_REFERENCE: versionTag,
+          FAKE_INSPECT_FAILURE_MODE: "buildx-ghcr-not-found",
+        },
+        encoding: "utf8",
+      });
+      assert.equal(
+        buildxGhcrMissingVersionTag.status,
+        0,
+        buildxGhcrMissingVersionTag.stderr || buildxGhcrMissingVersionTag.stdout,
+      );
+      assert.equal(
+        await readFile(dockerLog, "utf8"),
+        `create ${versionTag}\n`,
+        "the exact reference-bound Buildx/GHCR not-found response must publish the immutable version tag",
       );
 
       await writeFile(registryState, `${candidateImage} ${candidateDigest}\n${versionTag} ${candidateDigest}\n`);

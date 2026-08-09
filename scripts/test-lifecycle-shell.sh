@@ -80,8 +80,11 @@ set -Eeuo pipefail
 if [ "${1:-} ${2:-} ${3:-}" = "buildx imagetools inspect" ] \
   && [ "${4:-}" = "${FAKE_REGISTRY_FAILURE_REFERENCE:-}" ] \
   && [ -n "${FAKE_REGISTRY_INSPECT_DIAGNOSTIC:-}" ]; then
-  printf '%s\n' "$FAKE_REGISTRY_INSPECT_DIAGNOSTIC" >&2
-  exit 1
+  digest="$(awk -v ref="${4:-}" '$1 == ref { print $2; exit }' "$FAKE_REGISTRY_STATE" 2>/dev/null || true)"
+  if [ -z "$digest" ]; then
+    printf '%s\n' "$FAKE_REGISTRY_INSPECT_DIAGNOSTIC" >&2
+    exit 1
+  fi
 fi
 
 if [ "${1:-} ${2:-}" = "image inspect" ] && printf '%s\n' "$@" | grep -q 'Config.Env'; then
@@ -189,6 +192,18 @@ for diagnostic in \
   grep -Fq "$diagnostic" "$temporary/ambiguous-registry-error.err"
 done
 unset FAKE_REGISTRY_FAILURE_REFERENCE FAKE_REGISTRY_INSPECT_DIAGNOSTIC
+
+# Buildx/GHCR identifies a genuinely absent tag by echoing the exact inspected
+# reference. The candidate from the same repository was already authenticated
+# and verified, so this form must permit first publication of the semver tag.
+reset_registry
+: >"$docker_log"
+export FAKE_REGISTRY_FAILURE_REFERENCE="$version_tag"
+export FAKE_REGISTRY_INSPECT_DIAGNOSTIC="ERROR: ${version_tag}: not found"
+PATH="$fake_bin:$PATH" bash "$promotion_script" >"$temporary/buildx-ghcr-missing.out"
+[ "$(sed -n '1p' "$docker_log")" = "create $version_tag" ]
+unset FAKE_REGISTRY_FAILURE_REFERENCE FAKE_REGISTRY_INSPECT_DIAGNOSTIC
+: >"$docker_log"
 
 reset_registry
 PROMOTION_PHASE=aliases

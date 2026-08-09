@@ -63,10 +63,19 @@ is_unambiguous_manifest_absence() {
   # repository, or a broken transport.  Promotion must fail closed unless the
   # registry explicitly identifies the missing *manifest*.
   local inspection="$1"
+  local reference="$2"
 
-  grep -qiE \
+  if grep -qiE \
     '(^|[^[:alnum:]_])(manifest unknown|no such manifest)([^[:alnum:]_]|$)' \
-    <<<"$inspection"
+    <<<"$inspection"; then
+    return 0
+  fi
+
+  # Current Buildx/GHCR reports a missing tag as this exact reference-bound
+  # diagnostic. Candidate provenance is verified from the same repository
+  # before this function is reached, so accepting only this exact message does
+  # not turn an access-hidden repository or credential failure into absence.
+  [ "$inspection" = "ERROR: ${reference}: not found" ]
 }
 
 inspect_existing_registry_reference() {
@@ -80,7 +89,7 @@ inspect_existing_registry_reference() {
   registry_inspection_digest=""
   inspection="$(docker buildx imagetools inspect "$reference" 2>&1)" || inspect_status=$?
   if [ "$inspect_status" -ne 0 ]; then
-    if [ -n "$inspection" ] && is_unambiguous_manifest_absence "$inspection"; then
+    if [ -n "$inspection" ] && is_unambiguous_manifest_absence "$inspection" "$reference"; then
       return 3
     fi
     printf 'refusing registry publication: inspection of %s failed: %s\n' \
