@@ -1169,7 +1169,11 @@ describe("collaboration server pre-apply security", () => {
     );
 
     const barrier = await acquireAndReleaseBarrier(server);
-    expect(barrier.flushWatermark).toBeGreaterThanOrEqual(2);
+    // Delivery order is intentionally undefined across sockets. If the
+    // combined update arrives first, the trailing partial update is already a
+    // duplicate and consumes no second mutation token. In either order the
+    // barrier must observe and settle every state-changing mutation.
+    expect(barrier.flushWatermark).toBeGreaterThanOrEqual(1);
     expect(firstActor.closeReasons).toEqual([]);
     expect(secondActor.closeReasons).toEqual([]);
   }, 20_000);
