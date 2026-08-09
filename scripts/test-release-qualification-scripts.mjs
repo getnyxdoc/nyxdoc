@@ -396,6 +396,31 @@ async function main() {
       decodedFixture.byteLength > 0,
       "historical qualification fixture media must fully decode with production settings",
     );
+    assert.match(
+      historicalFixtureSource,
+      /authenticateApiToken\(sqlite, `Bearer \$\{state\.credential\.token\}`/u,
+      "historical WebSocket qualification must authenticate the fixture's real credential",
+    );
+    assert.match(
+      historicalFixtureSource,
+      /actor: tokenDocumentActor\(identity, "api"\)/u,
+      "historical WebSocket qualification must use the credential's revocable agent identity",
+    );
+    assert.doesNotMatch(
+      historicalFixtureSource,
+      /principalId:\s*"release-qualification-websocket"/u,
+      "historical WebSocket qualification must not mint a synthetic principal",
+    );
+    assert.match(
+      historicalFixtureSource,
+      /function requireBaseUrl\(\)/u,
+      "historical qualification must require HTTP configuration only for online fixture modes",
+    );
+    assert.doesNotMatch(
+      historicalFixtureSource,
+      /const baseUrl[^;]+;\s*if \(!baseUrl\) throw/u,
+      "offline backup verification must not fail at module load when no HTTP base URL is configured",
+    );
     const requiredChecksBlock = shell.match(
       /required_checks=\(\s*([\s\S]*?)\s*\)\s*for required_check in/,
     );
@@ -445,6 +470,9 @@ async function main() {
       "mkdir -p /tmp/nyxdoc-release-qualification/scripts/test-fixtures",
       "ln -sfn /app/src /tmp/nyxdoc-release-qualification/src",
       "ln -sfn /app/node_modules /tmp/nyxdoc-release-qualification/node_modules",
+      'NYXDOC_COLLABORATION_HOST_PORT "$((http_port + 1))"',
+      "diagnostic output (last 40 lines)",
+      'tail -n 40 "$evidence_path"',
     ]) {
       assert.match(shell, new RegExp(requiredFragment.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
     }

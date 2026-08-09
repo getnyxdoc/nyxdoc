@@ -276,6 +276,10 @@ prepare_environment() {
   set_env "$directory/.env.production" NYXDOC_IMAGE "$image"
   set_env "$directory/.env.production" NYXDOC_HTTP_HOST "127.0.0.1"
   set_env "$directory/.env.production" NYXDOC_HTTP_PORT "$http_port"
+  # Historical Compose files exposed collaboration on a fixed host port. Give
+  # every disposable qualification environment its own adjacent port so the
+  # rehearsal stays isolated even when a real Nyxdoc instance is running.
+  set_env "$directory/.env.production" NYXDOC_COLLABORATION_HOST_PORT "$((http_port + 1))"
   set_env "$directory/.env.production" NYXDOC_COLLABORATION_PUBLIC_URL "ws://127.0.0.1:${http_port}/collaboration"
   set_env "$directory/.env.production" NYXDOC_DATA_VOLUME "$volume"
   set_env "$directory/.env.production" NYXDOC_BACKUP_HOST_PATH "$backup_path"
@@ -509,8 +513,18 @@ wait_for_json_stage() {
   local attempt
   for attempt in $(seq 1 600); do
     if json_stage_exists "$evidence_path" "$stage"; then return 0; fi
-    kill -0 "$process_id" >/dev/null 2>&1 \
-      || fail "$description exited before reporting ${stage} evidence"
+    if ! kill -0 "$process_id" >/dev/null 2>&1; then
+      # These lifecycle files are deliberately credential-free. Surface the
+      # child process error in the retained qualification log so an early exit
+      # is diagnosable without rerunning an entire release blindly.
+      if [ -s "$evidence_path" ]; then
+        log_retry "[nyxdoc] ${description} diagnostic output (last 40 lines):"
+        while IFS= read -r diagnostic_line; do
+          log_retry "[nyxdoc] ${description}: ${diagnostic_line}"
+        done < <(tail -n 40 "$evidence_path")
+      fi
+      fail "$description exited before reporting ${stage} evidence"
+    fi
     sleep 0.1
   done
   fail "$description did not report ${stage} evidence before timeout"

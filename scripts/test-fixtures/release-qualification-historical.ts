@@ -78,7 +78,11 @@ type FixtureState = {
 };
 
 const baseUrl = process.env.NYXDOC_TEST_BASE_URL?.replace(/\/$/, "");
-if (!baseUrl) throw new Error("NYXDOC_TEST_BASE_URL is required");
+
+function requireBaseUrl() {
+  if (!baseUrl) throw new Error("NYXDOC_TEST_BASE_URL is required");
+  return baseUrl;
+}
 
 const mediaBytes = Buffer.from(
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
@@ -149,7 +153,7 @@ async function requestJson<T>(
   const headers = new Headers(init.headers);
   headers.set("authorization", `Bearer ${token}`);
   if (init.body && !(init.body instanceof FormData)) headers.set("content-type", "application/json");
-  const response = await fetch(`${baseUrl}${pathname}`, { ...init, headers });
+  const response = await fetch(`${requireBaseUrl()}${pathname}`, { ...init, headers });
   const text = await response.text();
   if (!response.ok) {
     throw new Error(`${init.method ?? "GET"} ${pathname} failed (${response.status}): ${text}`);
@@ -211,7 +215,7 @@ async function waitFor(
 }
 
 async function assertMedia(token: string, state: FixtureState) {
-  const response = await fetch(`${baseUrl}${state.media.url}`, {
+  const response = await fetch(`${requireBaseUrl()}${state.media.url}`, {
     headers: { authorization: `Bearer ${token}` },
   });
   if (!response.ok) {
@@ -314,10 +318,14 @@ async function mutateThroughWebSocket(
     { createCollaborationToken },
     { replaceWorkingDocument },
     { nyxdocDocumentV2Schema },
+    { sqlite },
+    { authenticateApiToken, tokenDocumentActor },
   ] = await Promise.all([
     import("../../src/lib/collaboration/token"),
     import("../../src/lib/collaboration/drafts"),
     import("../../src/lib/editor/schema"),
+    import("../../src/lib/db/client"),
+    import("../../src/lib/tokens/service"),
   ]);
   const expectedContent = nyxdocDocumentV2Schema.parse({
     ...state.nested.working.content,
@@ -330,17 +338,22 @@ async function mutateThroughWebSocket(
       },
     ],
   });
+  // The collaboration server revalidates an agent token against the live
+  // credential, binding, workspace grant, and document scope. Use the fixture's
+  // real credential identity here; a merely signed token with a synthetic actor
+  // would exercise no valid authorization path and is correctly rejected.
+  const identity = authenticateApiToken(sqlite, `Bearer ${state.credential.token}`, {
+    workspaceId: state.workspaceId,
+    clientIp: null,
+  });
+  assert(identity.scopes.includes("documents:read"), "historical credential cannot read documents");
+  assert(identity.scopes.includes("documents:write"), "historical credential cannot write documents");
   const token = createCollaborationToken({
     roomName: state.nested.working.roomName,
     workspaceId: state.workspaceId,
     documentId: state.nested.canonical.id,
     generation: state.nested.working.generation,
-    actor: {
-      type: "agent",
-      principalId: "release-qualification-websocket",
-      label: "Release qualification WebSocket",
-      source: "api",
-    },
+    actor: tokenDocumentActor(identity, "api"),
     permissions: { read: true, write: true, commit: false },
   });
   const document = new Y.Doc();
@@ -351,7 +364,7 @@ async function mutateThroughWebSocket(
   });
   let disconnectObserved: WebSocketDisconnect | null = null;
   const websocketProvider = new HocuspocusProviderWebsocket({
-    url: `${baseUrl!.replace(/^http/u, "ws")}/collaboration`,
+    url: `${requireBaseUrl().replace(/^http/u, "ws")}/collaboration`,
     WebSocketPolyfill: WebSocket,
     delay: 25,
     minDelay: 25,
