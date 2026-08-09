@@ -897,9 +897,14 @@ describe("Nyxdoc MCP server", () => {
         expectedDraftVersion: 1,
         requestId: "mcp-patch-scenario-001",
         operations: [{
-          op: "replace_block",
-          blockId: "mcp-rich-paragraph",
-          block: { type: "p", align: "right", children: [{ text: "부분 수정 완료", bold: true }] },
+          op: "insert_after",
+          anchorBlockId: "mcp-rich-paragraph",
+          blocks: [{
+            id: "mcp-rich-patch-marker",
+            type: "p",
+            align: "right",
+            children: [{ text: "부분 수정 완료", bold: true }],
+          }],
         }],
       };
       const patchResult = await client.callTool({ name: "patch_document", arguments: patchArguments });
@@ -931,7 +936,7 @@ describe("Nyxdoc MCP server", () => {
           requestId: "mcp-patch-stale-001",
           operations: [{
             op: "replace_block",
-            blockId: "mcp-rich-paragraph",
+            blockId: "mcp-rich-patch-marker",
             block: { type: "p", children: [{ text: "오래된 기준의 수정" }] },
           }],
         },
@@ -1017,7 +1022,7 @@ describe("Nyxdoc MCP server", () => {
           pathText: "Codex MCP 시나리오",
           matches: [{
             kind: "body",
-            blockId: "mcp-rich-paragraph",
+            blockId: "mcp-rich-patch-marker",
             nodeType: "p",
             sectionId: "mcp-title",
             headingPath: ["개요"],

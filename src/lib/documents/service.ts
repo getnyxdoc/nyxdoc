@@ -53,6 +53,7 @@ import {
   type StoredDocumentBlockInput,
 } from "@/lib/editor/storage-projection";
 import {
+  nyxdocBlockText,
   parseNyxdocDocumentV2,
   type NyxdocBlock,
   type NyxdocDocumentV2,
@@ -1944,6 +1945,37 @@ function requirePatchBlockIndex(blocks: NyxdocBlock[], blockId: string, role: "b
     );
   }
   return index;
+}
+
+function normalizeDocumentPageHeading(value: string) {
+  return value
+    .normalize("NFKC")
+    .replace(/\s+/gu, " ")
+    .trim()
+    .toLowerCase();
+}
+
+export function assertDocumentTitleIsNotLeadingH1(
+  title: string,
+  content: NyxdocDocumentV2,
+) {
+  const firstH1Index = content.blocks.findIndex((block) => block.type === "h1");
+  const firstH1 = content.blocks[firstH1Index];
+  if (!firstH1 || firstH1.type !== "h1") return;
+  const normalizedTitle = normalizeDocumentPageHeading(title);
+  if (
+    normalizedTitle.length > 0
+    && normalizedTitle === normalizeDocumentPageHeading(nyxdocBlockText(firstH1))
+  ) {
+    throw new DocumentServiceError(
+      "INVALID_INPUT",
+      "The page title must not be repeated as the first H1 in the document body.",
+      {
+        field: `content.blocks[${firstH1Index}]`,
+        rule: "title_not_repeated_as_leading_h1",
+      },
+    );
+  }
 }
 
 export function applyDocumentPatch(content: NyxdocDocumentV2, operations: DocumentPatchOperation[]) {

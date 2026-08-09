@@ -47,6 +47,7 @@ import { requireCurrentCollaborationAuthorization } from "@/lib/collaboration/au
 import {
   applyDocumentPatch,
   archiveDocument,
+  assertDocumentTitleIsNotLeadingH1,
   getDocument,
   getDocumentRevisionSnapshot,
   reorderDocumentTree,
@@ -1026,6 +1027,7 @@ export function createCollaborationCommands(input: {
           "draft.update",
         );
         const patchedContent = applyDocumentPatch(before.content, request.operations);
+        assertDocumentTitleIsNotLeadingH1(before.title, patchedContent);
         const normalized = normalizeTopLevelBlockIds(
           database,
           state.documentId,

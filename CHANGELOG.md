@@ -20,6 +20,9 @@ All notable user-facing changes are recorded here.
 - Reworked release publication around an immutable qualified image digest,
   source provenance, serialized aliases, idempotent recovery, and readable
   changelog-derived GitHub Release notes.
+- Kept block-insertion patches retry-safe across lost MCP responses by checking
+  idempotency before reapplying operations, while preserving the separate page
+  title and leading-heading validation rule on the first write.
 - Updated the supported runtime dependencies and removed known production npm
   audit findings.
 - Made first-install and disaster-recovery paths portable across Docker hosts
