@@ -244,7 +244,7 @@ jobs:
           RELEASE_REVISION: ${{ needs.quality.outputs.revision }}
         run: |
           set -Eeuo pipefail
-          existing="$(git rev-parse "${RELEASE_TAG}^{commit}" 2>/dev/null || true)"
+          existing="$(git rev-parse --verify "${RELEASE_TAG}^{commit}" 2>/dev/null || true)"
           if [ -n "$existing" ]; then
             [ "$existing" = "$RELEASE_REVISION" ]
           else
@@ -388,7 +388,7 @@ jobs:
           if git ls-remote --exit-code --refs origin "$remote_tag_ref" >/dev/null 2>&1; then
             verify_remote_tag
           else
-            existing="$(git rev-parse "${RELEASE_TAG}^{commit}" 2>/dev/null || true)"
+            existing="$(git rev-parse --verify "${RELEASE_TAG}^{commit}" 2>/dev/null || true)"
             if [ -n "$existing" ]; then
               [ "$existing" = "$RELEASE_REVISION" ]
             else
@@ -402,7 +402,7 @@ jobs:
             verify_remote_tag
           fi
 
-          local_revision="$(git rev-parse "${RELEASE_TAG}^{commit}" 2>/dev/null || true)"
+          local_revision="$(git rev-parse --verify "${RELEASE_TAG}^{commit}" 2>/dev/null || true)"
           if [ -n "$local_revision" ]; then
             [ "$local_revision" = "$RELEASE_REVISION" ]
           else

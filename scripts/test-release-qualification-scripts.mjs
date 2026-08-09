@@ -1039,6 +1039,15 @@ exec /usr/bin/git -c safe.directory='*' "$@"
     assert.match(updateText, /nyxdoc_require_buildx/);
     assert.match(releaseWorkflowText, /source_revision_count/);
     assert.match(releaseWorkflowText, /exactly one NYXDOC_SOURCE_REVISION/);
+    assert.equal(
+      [...releaseWorkflowText.matchAll(/git rev-parse --verify "\$\{RELEASE_TAG\}\^\{commit\}" 2>\/dev\/null \|\| true/g)].length,
+      3,
+      "optional release-tag lookups must use rev-parse --verify so a missing tag produces no stdout",
+    );
+    assert.ok(
+      !releaseWorkflowText.includes('git rev-parse "${RELEASE_TAG}^{commit}" 2>/dev/null || true'),
+      "release qualification must not mistake an unresolved revision expression for an existing tag",
+    );
     assert.match(composeCommonText, /No stable Git tag with a verifiably published semver image/);
     assert.ok(
       composeCommonText.includes("awk '$2 ~ /^refs\\/tags\\/v[0-9]+\\.[0-9]+\\.[0-9]+$/"),
