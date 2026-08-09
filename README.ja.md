@@ -91,8 +91,8 @@ git clone https://github.com/getnyxdoc/nyxdoc.git && cd nyxdoc && ./scripts/inst
 ./scripts/uninstall.sh --purge --confirm-purge=nyxdoc
 ```
 
-まだ`0.25.17`を利用している環境では、Nyxdoc checkoutから現在のrelease bridgeを
-実行します。
+まだ`0.25.17`または`0.25.18`を利用している環境では、Nyxdoc checkoutから現在の
+release bridgeを実行します。
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/getnyxdoc/nyxdoc/v0.25.19/scripts/update-bootstrap.sh | bash

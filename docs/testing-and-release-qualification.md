@@ -83,8 +83,8 @@ publication lock 아래 receipt의 digest·commit·필수 matrix를 다시 검�
 하나라도 빠지면 public semver image, final Git tag, mutable alias 또는 GitHub
 Release를 만들지 않는다. publication 순서는 반드시 다음과 같다.
 
-historical baseline이 `0.25.17`이면 qualification은 후보 release의 standalone
-`update-bootstrap.sh`를 실행한다. qualification은 실제 baseline WebSocket으로 마지막 Yjs
+historical baseline이 `0.25.17` 또는 `0.25.18`이면 qualification은 후보 release의
+standalone `update-bootstrap.sh`를 실행한다. qualification은 실제 baseline WebSocket으로 마지막 Yjs
 변경을 먼저 보낸다. bridge는 source와 image를 정확히 해당 후보 release로 고정하고 baseline
 gateway를 닫은 뒤 collaboration health가 연결 0을 보고하는지 확인한다. collaboration이
 아직 살아 있는 상태에서 verified backup을 만들고 manifest digest가 담긴 handoff receipt를

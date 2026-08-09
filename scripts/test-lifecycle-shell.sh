@@ -839,6 +839,11 @@ git -C "$bridge_root" add package.json compose.yaml scripts
 git -C "$bridge_root" commit -m v0.25.17 >/dev/null
 bridge_baseline_revision="$(git -C "$bridge_root" rev-parse HEAD)"
 git -C "$bridge_root" tag -a v0.25.17 -m v0.25.17
+printf '{\n  "version": "0.25.18"\n}\n' >"$bridge_root/package.json"
+git -C "$bridge_root" add package.json
+git -C "$bridge_root" commit -m v0.25.18 >/dev/null
+bridge_intermediate_revision="$(git -C "$bridge_root" rev-parse HEAD)"
+git -C "$bridge_root" tag -a v0.25.18 -m v0.25.18
 printf '{\n  "version": "0.25.19"\n}\n' >"$bridge_root/package.json"
 git -C "$bridge_root" add package.json
 git -C "$bridge_root" commit -m v0.25.19 >/dev/null
@@ -846,7 +851,7 @@ bridge_target_revision="$(git -C "$bridge_root" rev-parse HEAD)"
 git -C "$bridge_root" tag -a v0.25.19 -m v0.25.19
 git init --bare --initial-branch=main "$bridge_origin" >/dev/null
 git -C "$bridge_root" remote add origin "$bridge_origin"
-git -C "$bridge_root" push origin main v0.25.17 v0.25.19 >/dev/null
+git -C "$bridge_root" push origin main v0.25.17 v0.25.18 v0.25.19 >/dev/null
 git -C "$bridge_root" checkout --detach "$bridge_baseline_revision" >/dev/null
 export NYXDOC_OFFICIAL_RELEASE_SOURCE="$bridge_origin"
 printf '{\n  "version": "0.25.16"\n}\n' >"$bridge_root/package.json"
@@ -868,7 +873,7 @@ if ln -s "$bridge_root" "$bridge_link" 2>/dev/null && [ -L "$bridge_link" ]; the
     printf 'legacy first-hop bridge unexpectedly accepted 0.25.16 through a symlink\n' >&2
     exit 1
   fi
-  grep -Fq 'supports exactly 0.25.17' "$temporary/legacy-update-bridge-symlink.err"
+  grep -Fq 'supports versions from 0.25.17' "$temporary/legacy-update-bridge-symlink.err"
   if grep -Fq 'checkout root is inconsistent' "$temporary/legacy-update-bridge-symlink.err"; then
     printf 'legacy first-hop bridge lost its logical symlink checkout root\n' >&2
     exit 1
@@ -885,7 +890,7 @@ if BRIDGE_STATE="$bridge_state" \
   printf 'legacy first-hop bridge unexpectedly accepted 0.25.16\n' >&2
   exit 1
 fi
-grep -Fq 'supports exactly 0.25.17' "$temporary/legacy-update-bridge-too-old.err"
+grep -Fq 'supports versions from 0.25.17' "$temporary/legacy-update-bridge-too-old.err"
 git -C "$bridge_root" checkout -- package.json
 BRIDGE_STATE="$bridge_state" \
   BRIDGE_TARGET_REVISION="$bridge_target_revision" \
@@ -906,8 +911,31 @@ grep -Fxq 'backup manifest hash' "$bridge_state/log"
 grep -Fq 'Legacy bridge verified backup: /backups/legacy-bridge-generation' \
   "$temporary/legacy-update-bridge.out"
 
-# Once an installation is beyond the legacy boundary, the same entry point is
-# only a transparent hand-off and must not stop healthy services.
+# v0.25.18 still contains the host-only manifest reader that this bridge repairs.
+# It must take the same drained, receipt-backed hand-off instead of delegating to
+# the updater in that checkout.
+: >"$bridge_state/log"
+git -C "$bridge_root" checkout --detach "$bridge_intermediate_revision" >/dev/null
+sed -i \
+  's#^NYXDOC_IMAGE=.*#NYXDOC_IMAGE=ghcr.io/getnyxdoc/nyxdoc:0.25.18#' \
+  "$bridge_root/.env.production"
+rm -f \
+  "$bridge_state/current-image" \
+  "$bridge_state/gateway-stopped" \
+  "$bridge_state/collaboration-stopped"
+BRIDGE_STATE="$bridge_state" \
+  BRIDGE_TARGET_REVISION="$bridge_target_revision" \
+  NYXDOC_UPDATE_ROOT="$bridge_root" \
+  PATH="$bridge_fake_bin:$PATH" \
+  bash "$bridge_root/scripts/update-bootstrap.sh" >"$temporary/intermediate-update-bridge.out"
+[ "$(git -C "$bridge_root" rev-parse HEAD)" = "$bridge_target_revision" ]
+grep -Fxq 'update legacy_quiesced=1' "$bridge_state/log"
+grep -Fxq 'backup manifest hash' "$bridge_state/log"
+grep -Fq 'Legacy bridge verified backup: /backups/legacy-bridge-generation' \
+  "$temporary/intermediate-update-bridge.out"
+
+# Once an installation reaches the bridge target, the same entry point is only
+# a transparent hand-off and must not stop healthy services.
 : >"$bridge_state/log"
 rm -f "$bridge_state/gateway-stopped" "$bridge_state/collaboration-stopped"
 BRIDGE_STATE="$bridge_state" \

@@ -2,8 +2,8 @@
 
 # Safe entry point for installations whose checked-in updater predates the
 # collaboration backup barrier. It is intentionally standalone so an operator
-# on v0.25.17 can run the copy from the target release without modifying the
-# checkout before its normal fast-forward update.
+# on v0.25.17 or v0.25.18 can run the copy from the target release without
+# modifying the checkout before its normal fast-forward update.
 
 set -Eeuo pipefail
 
@@ -39,29 +39,42 @@ fi
 source "$checkout_root/scripts/compose-common.sh"
 [ "$NYXDOC_ROOT" = "$checkout_root" ] || nyxdoc_die "The update checkout root is inconsistent."
 
-version_relation_to_0_25_17() {
-  local version="$1"
-  local major minor patch
-  IFS=. read -r major minor patch <<<"$version"
-  [[ "$major" =~ ^[0-9]+$ && "$minor" =~ ^[0-9]+$ && "$patch" =~ ^[0-9]+$ ]] \
-    || nyxdoc_die "The installed version is not a stable X.Y.Z version: $version"
-  if ((10#$major < 0)); then printf '%s\n' -1; return; fi
-  if ((10#$major > 0)); then printf '%s\n' 1; return; fi
-  if ((10#$minor < 25)); then printf '%s\n' -1; return; fi
-  if ((10#$minor > 25)); then printf '%s\n' 1; return; fi
-  if ((10#$patch < 17)); then printf '%s\n' -1; return; fi
-  if ((10#$patch > 17)); then printf '%s\n' 1; return; fi
+bridge_target_tag="v0.25.19"
+bridge_target_version="${bridge_target_tag#v}"
+minimum_bridge_version="0.25.17"
+
+stable_semver_compare() {
+  local left="$1"
+  local right="$2"
+  local left_major left_minor left_patch right_major right_minor right_patch
+  IFS=. read -r left_major left_minor left_patch <<<"$left"
+  IFS=. read -r right_major right_minor right_patch <<<"$right"
+  [[ "$left_major" =~ ^[0-9]+$ \
+    && "$left_minor" =~ ^[0-9]+$ \
+    && "$left_patch" =~ ^[0-9]+$ \
+    && "$right_major" =~ ^[0-9]+$ \
+    && "$right_minor" =~ ^[0-9]+$ \
+    && "$right_patch" =~ ^[0-9]+$ ]] || return 1
+  if ((10#$left_major < 10#$right_major)); then printf '%s\n' -1; return; fi
+  if ((10#$left_major > 10#$right_major)); then printf '%s\n' 1; return; fi
+  if ((10#$left_minor < 10#$right_minor)); then printf '%s\n' -1; return; fi
+  if ((10#$left_minor > 10#$right_minor)); then printf '%s\n' 1; return; fi
+  if ((10#$left_patch < 10#$right_patch)); then printf '%s\n' -1; return; fi
+  if ((10#$left_patch > 10#$right_patch)); then printf '%s\n' 1; return; fi
   printf '%s\n' 0
 }
 
 installed_version="$(nyxdoc_package_version)"
-installed_relation="$(version_relation_to_0_25_17 "$installed_version")"
-case "$installed_relation" in
-  -1)
-    nyxdoc_die "The standalone first-hop bridge supports exactly 0.25.17. Upgrade older installations to 0.25.17 before using this bridge."
-    ;;
-  0) ;;
-  1)
+installed_to_minimum="$(stable_semver_compare "$installed_version" "$minimum_bridge_version")" \
+  || nyxdoc_die "The installed version is not a stable X.Y.Z version: $installed_version"
+installed_to_target="$(stable_semver_compare "$installed_version" "$bridge_target_version")" \
+  || nyxdoc_die "The bridge target is not a stable X.Y.Z version: $bridge_target_version"
+if [ "$installed_to_minimum" = -1 ]; then
+  nyxdoc_die "The standalone first-hop bridge supports versions from 0.25.17. Upgrade older installations to 0.25.17 before using this bridge."
+fi
+case "$installed_to_target" in
+  -1) ;;
+  0|1)
     resume_image=""
     if [ -f "$checkout_root/.nyxdoc-update-state" ]; then
       resume_image="$(awk -F= '$1 == "targetImage" { print substr($0, index($0, "=") + 1); exit }' \
@@ -85,8 +98,6 @@ nyxdoc_validate_environment
 [ -n "$(nyxdoc_compose ps --status running -q app)" ] \
   || nyxdoc_die "The app service must be running before the legacy update bridge starts."
 
-bridge_target_tag="v0.25.19"
-bridge_target_version="${bridge_target_tag#v}"
 bridge_target_ref="refs/nyxdoc-update/legacy-bridge-${bridge_target_tag}"
 current_revision="$(git -C "$checkout_root" rev-parse HEAD)"
 

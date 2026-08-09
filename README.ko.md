@@ -90,8 +90,8 @@ git clone https://github.com/getnyxdoc/nyxdoc.git && cd nyxdoc && ./scripts/inst
 ./scripts/uninstall.sh --purge --confirm-purge=nyxdoc
 ```
 
-아직 `0.25.17`을 사용 중인 설치는 Nyxdoc checkout에서 현재 릴리스 브리지를
-실행합니다.
+아직 `0.25.17` 또는 `0.25.18`을 사용 중인 설치는 Nyxdoc checkout에서 현재 릴리스
+브리지를 실행합니다.
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/getnyxdoc/nyxdoc/v0.25.19/scripts/update-bootstrap.sh | bash

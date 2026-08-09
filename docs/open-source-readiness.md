@@ -92,9 +92,9 @@ copy from the repository checkout:
 ./scripts/uninstall.sh --purge --confirm-purge=nyxdoc
 ```
 
-For an installation still on `0.25.17`, run the current release bridge from
-the checkout so accepted collaboration writes are drained before the old
-updater's backup:
+For an installation still on `0.25.17` or `0.25.18`, run the current release
+bridge from the checkout so accepted collaboration writes are drained before
+the old updater's backup:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/getnyxdoc/nyxdoc/v0.25.19/scripts/update-bootstrap.sh | bash

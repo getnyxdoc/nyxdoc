@@ -100,8 +100,8 @@ Update, stop, or remove the trial with explicit lifecycle commands:
 ./scripts/uninstall.sh --purge --confirm-purge=nyxdoc
 ```
 
-For the one-time update from `0.25.17`, run the current release bridge from the
-Nyxdoc checkout instead:
+For the one-time update from `0.25.17` or `0.25.18`, run the current release
+bridge from the Nyxdoc checkout instead:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/getnyxdoc/nyxdoc/v0.25.19/scripts/update-bootstrap.sh | bash

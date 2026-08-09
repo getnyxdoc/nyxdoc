@@ -870,13 +870,20 @@ historical_connections_before="$(historical_collaboration_connections "$upgrade_
 start_historical_connection_drain_observer \
   "$upgrade_dir" "$historical_connection_drain"
 
-bridge_output="$(
+bridge_status=0
+if bridge_output="$(
   NYXDOC_UPDATE_ROOT="$upgrade_dir" \
     NYXDOC_UPDATE_IMAGE="$candidate_image" \
     NYXDOC_OFFICIAL_RELEASE_SOURCE="$update_origin" \
     bash "$root/scripts/update-bootstrap.sh" 2>&1
-)"
+)"; then
+  bridge_status=0
+else
+  bridge_status=$?
+fi
 printf '%s\n' "$bridge_output" >>"$qualification_log"
+[ "$bridge_status" -eq 0 ] \
+  || fail "historical update bridge failed with status ${bridge_status}; see qualification.log"
 bridge_backup_generation_path="$(printf '%s\n' "$bridge_output" \
   | sed -n 's/^\[nyxdoc\] Legacy bridge verified backup: \(\/backups\/[A-Za-z0-9._-]*\)$/\1/p' \
   | tail -n 1)"

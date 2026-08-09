@@ -194,20 +194,21 @@ Run the stable updater from the repository checkout:
 ./scripts/update.sh
 ```
 
-An installation currently on `0.25.17` must use the target release's one-time
-entry point for its first update. Run it from that checkout:
+An installation currently on `0.25.17` or `0.25.18` must use the target
+release's one-time entry point for its first update. Run it from that checkout:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/getnyxdoc/nyxdoc/v0.25.19/scripts/update-bootstrap.sh | bash
 ```
 
-The updater shipped in `0.25.17` creates its pre-update backup before target
-code can run. The standalone bridge therefore pins both source and image to
-exactly `0.25.19`, stops the public gateway, and positively waits until the
-legacy collaboration service reports zero connections. While collaboration is
-still alive, it creates and verifies a backup and persists a receipt containing
-the backup manifest digest and the already verified immutable target-image
-digest. Only after that durable boundary exists does it
+The updaters shipped in `0.25.17` and `0.25.18` reach their pre-update backup
+path before repaired target code can run. The standalone bridge therefore pins
+both source and image to exactly `0.25.19`, stops the public gateway, and
+positively waits until the legacy collaboration service reports zero
+connections. While collaboration is still alive, it creates and verifies a
+backup and persists a receipt containing the backup manifest digest and the
+already verified immutable target-image digest. Only after that durable
+boundary exists does it
 stop collaboration and hand the pinned target to the installed updater. The
 release qualification test writes through a real WebSocket immediately before
 this handoff and reads the resulting Yjs draft directly from the bridge backup.
