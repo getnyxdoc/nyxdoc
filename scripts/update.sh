@@ -93,8 +93,9 @@ fi
 [ "$channel" != main ] || [ "$update_authority" = origin ] \
   || nyxdoc_die "The main channel always follows origin; set NYXDOC_UPDATE_AUTHORITY=origin and use --channel main --build."
 if [ "$update_authority" = official ]; then
-  [ "$channel" = stable ] && ! $build_local \
-    || nyxdoc_die "Official update authority supports only stable verified GitHub releases; use NYXDOC_UPDATE_AUTHORITY=origin for --build or main."
+  if [ "$channel" != stable ] || $build_local; then
+    nyxdoc_die "Official update authority supports only stable verified GitHub releases; use NYXDOC_UPDATE_AUTHORITY=origin for --build or main."
+  fi
 fi
 
 resuming_interrupted=false

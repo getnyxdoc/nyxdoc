@@ -933,7 +933,10 @@ PATH="$install_fake_bin:$PATH" bash "$install_root/scripts/install.sh" >"$tempor
 [ "$(cat "$install_state/running")" = 1 ]
 [ "$(grep -c '^migrate$' "$install_state/log")" = 2 ]
 [ "$(grep -c '^prepare-runtime-paths$' "$install_state/log")" = 2 ]
-! grep -q '^NYXDOC_SOURCE_REVISION=' "$install_root/.env.production"
+if grep -q '^NYXDOC_SOURCE_REVISION=' "$install_root/.env.production"; then
+  printf 'install preserved a stale NYXDOC_SOURCE_REVISION override\n' >&2
+  exit 1
+fi
 [ "$(awk -F= '$1 == "BETTER_AUTH_SECRET" { print substr($0, index($0, "=") + 1); exit }' "$install_root/.env.production")" = "$auth_secret_before" ]
 [ "$(awk -F= '$1 == "NYXDOC_COLLABORATION_SECRET" { print substr($0, index($0, "=") + 1); exit }' "$install_root/.env.production")" = "$collaboration_secret_before" ]
 [ "$(awk -F= '$1 == "NYXDOC_IMAGE" { print substr($0, index($0, "=") + 1); exit }' "$install_root/.env.production")" = "$expected_install_image" ]
