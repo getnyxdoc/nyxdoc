@@ -416,9 +416,12 @@ async function main() {
       "playwright test e2e/vertical --project=chromium",
       "nyxdoc-release-qualification/v1",
       "exec -T collaboration node -e",
-      'historical_fixture_container_path="/tmp/nyxdoc-release-qualification-historical.ts"',
+      'historical_fixture_container_root="/tmp/nyxdoc-release-qualification"',
+      'historical_fixture_container_path="${historical_fixture_container_root}/scripts/test-fixtures/release-qualification-historical.ts"',
       '"app:${historical_fixture_container_path}"',
-      "-e NODE_PATH=/app/node_modules",
+      "mkdir -p /tmp/nyxdoc-release-qualification/scripts/test-fixtures",
+      "ln -sfn /app/src /tmp/nyxdoc-release-qualification/src",
+      "ln -sfn /app/node_modules /tmp/nyxdoc-release-qualification/node_modules",
     ]) {
       assert.match(shell, new RegExp(requiredFragment.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
     }
