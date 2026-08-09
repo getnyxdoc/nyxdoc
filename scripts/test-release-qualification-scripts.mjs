@@ -471,6 +471,10 @@ async function main() {
       "ln -sfn /app/src /tmp/nyxdoc-release-qualification/src",
       "ln -sfn /app/node_modules /tmp/nyxdoc-release-qualification/node_modules",
       'NYXDOC_COLLABORATION_HOST_PORT "$((http_port + 1))"',
+      "qualification_ports_are_available",
+      "select_qualification_fresh_port",
+      "Stay below Linux's default ephemeral range",
+      '"$((configured + 4000))" "$((configured + 4001))"',
       "diagnostic output (last 40 lines)",
       'tail -n 40 "$evidence_path"',
     ]) {
@@ -480,6 +484,11 @@ async function main() {
       shell,
       /app:\/scripts\/test-fixtures\/release-qualification-historical\.ts|mkdir -p \/app\/scripts\/test-fixtures/,
       "historical qualification fixtures must be staged in the container-writable temporary directory",
+    );
+    assert.doesNotMatch(
+      shell,
+      /38000 \+ RANDOM/,
+      "release qualification must not allocate reusable service ports inside Linux's default ephemeral range",
     );
     const temporaryOriginStart = shell.indexOf('git init --bare --initial-branch=main "$update_origin"');
     const bridgeInvocationStart = shell.indexOf('bridge_output="$(');

@@ -219,7 +219,74 @@ historical_fixture_container_root="/tmp/nyxdoc-release-qualification"
 historical_fixture_container_path="${historical_fixture_container_root}/scripts/test-fixtures/release-qualification-historical.ts"
 historical_fixture_state="$temporary/historical-fixture-state.json"
 
-fresh_port="${NYXDOC_RELEASE_QUALIFICATION_HTTP_PORT:-$((38000 + RANDOM % 1000))}"
+qualification_ports_are_available() {
+  node - "$@" <<'NODE'
+const net = require("node:net");
+
+const ports = process.argv.slice(2).map(Number);
+const servers = [];
+
+async function closeServers() {
+  await Promise.all(servers.map((server) => new Promise((resolve) => {
+    server.close(resolve);
+  })));
+}
+
+(async () => {
+  try {
+    for (const port of ports) {
+      const server = net.createServer();
+      await new Promise((resolve, reject) => {
+        server.once("error", reject);
+        server.listen({ host: "127.0.0.1", port, exclusive: true }, resolve);
+      });
+      servers.push(server);
+    }
+    await closeServers();
+  } catch {
+    await closeServers();
+    process.exitCode = 1;
+  }
+})();
+NODE
+}
+
+select_qualification_fresh_port() {
+  local configured="${NYXDOC_RELEASE_QUALIFICATION_HTTP_PORT:-}"
+  local candidate attempt
+  if [ -n "$configured" ]; then
+    if ! [[ "$configured" =~ ^[0-9]+$ ]] \
+      || [ "$configured" -lt 1024 ] \
+      || [ "$configured" -gt 61534 ]; then
+      fail "NYXDOC_RELEASE_QUALIFICATION_HTTP_PORT must leave room for every isolated qualification service"
+    fi
+    qualification_ports_are_available \
+      "$configured" "$((configured + 1))" \
+      "$((configured + 2000))" "$((configured + 2001))" \
+      "$((configured + 4000))" "$((configured + 4001))" \
+      || fail "the configured release qualification port set is not available"
+    printf '%s\n' "$configured"
+    return
+  fi
+
+  # Stay below Linux's default ephemeral range (32768+) so a registry or Git
+  # client cannot claim the gateway port in the short stop/recreate window of
+  # the historical upgrade rehearsal. Probe the complete six-port set before
+  # starting any disposable environment as an additional collision guard.
+  for attempt in $(seq 1 200); do
+    candidate=$((16000 + (RANDOM + attempt * 37) % 2000))
+    if qualification_ports_are_available \
+      "$candidate" "$((candidate + 1))" \
+      "$((candidate + 2000))" "$((candidate + 2001))" \
+      "$((candidate + 4000))" "$((candidate + 4001))"; then
+      printf '%s\n' "$candidate"
+      return
+    fi
+  done
+  fail "could not reserve an isolated release qualification port set"
+}
+
+fresh_port="$(select_qualification_fresh_port)"
 upgrade_port="$((fresh_port + 2000))"
 restore_port="$((fresh_port + 4000))"
 
