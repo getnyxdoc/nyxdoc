@@ -18,7 +18,10 @@ import {
   tokenCanAccessDocument,
   type ApiTokenScope,
 } from "@/lib/tokens/service";
-import { resolveAuthorizedMediaDocumentBinding } from "@/lib/media/bindings";
+import {
+  mediaAssetWasUploadedByUser,
+  resolveAuthorizedMediaDocumentBinding,
+} from "@/lib/media/bindings";
 
 export async function requireMediaRequestIdentity(
   request: Request,
@@ -83,30 +86,38 @@ export async function requireMediaRequestIdentity(
   if (options.mutating) assertSameOrigin(request);
   const { session, workspace } = await requireWorkspaceSession(request, options.workspaceId);
   if (scope === "documents:read" && options.mediaId) {
-    const binding = resolveAuthorizedMediaDocumentBinding(sqlite, {
-      workspaceId: workspace.id,
-      mediaId: options.mediaId,
-      canReadDocument: (documentId) => {
-        const principal = getHumanDocumentPrincipal(
-          sqlite,
-          workspace.id,
-          documentId,
-          session.user.id,
-        );
-        return Boolean(principal && humanDocumentPrincipalAllows(principal, "documents.read"));
-      },
-      canReadRevision: (documentId) => {
-        const principal = getHumanDocumentPrincipal(
-          sqlite,
-          workspace.id,
-          documentId,
-          session.user.id,
-        );
-        return Boolean(principal && humanDocumentPrincipalAllows(principal, "revisions.read"));
-      },
-    });
-    if (!binding) {
-      throw new ApiTokenError("NOT_FOUND", "이미지를 찾을 수 없습니다.");
+    const uploaderCanRead = mediaAssetWasUploadedByUser(
+      sqlite,
+      workspace.id,
+      options.mediaId,
+      session.user.id,
+    );
+    if (!uploaderCanRead) {
+      const binding = resolveAuthorizedMediaDocumentBinding(sqlite, {
+        workspaceId: workspace.id,
+        mediaId: options.mediaId,
+        canReadDocument: (documentId) => {
+          const principal = getHumanDocumentPrincipal(
+            sqlite,
+            workspace.id,
+            documentId,
+            session.user.id,
+          );
+          return Boolean(principal && humanDocumentPrincipalAllows(principal, "documents.read"));
+        },
+        canReadRevision: (documentId) => {
+          const principal = getHumanDocumentPrincipal(
+            sqlite,
+            workspace.id,
+            documentId,
+            session.user.id,
+          );
+          return Boolean(principal && humanDocumentPrincipalAllows(principal, "revisions.read"));
+        },
+      });
+      if (!binding) {
+        throw new ApiTokenError("NOT_FOUND", "이미지를 찾을 수 없습니다.");
+      }
     }
   } else if (options.documentId) {
     requireHumanDocumentPermission(

@@ -79,6 +79,22 @@ function mediaAssetAuthorizationRow(
   ).get(workspaceId, mediaId) as MediaAssetAuthorizationRow | undefined;
 }
 
+/**
+ * Upload provenance is a narrow read grant for the human who supplied the
+ * bytes. This keeps newly uploaded, not-yet-embedded media usable for profile
+ * avatars and previews without turning an opaque media UUID into a workspace-
+ * wide access grant.
+ */
+export function mediaAssetWasUploadedByUser(
+  database: NyxDatabase,
+  workspaceId: string,
+  mediaId: string,
+  userId: string,
+) {
+  return mediaAssetAuthorizationRow(database, workspaceId, mediaId)
+    ?.uploaded_by_user_id === userId;
+}
+
 function agentHasAuthorizedUploadContext(
   database: NyxDatabase,
   input: {

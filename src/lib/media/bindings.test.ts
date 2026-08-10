@@ -10,6 +10,7 @@ import {
   assertDocumentMediaAssetsBelongToWorkspace,
   bindMediaAssetToDocument,
   documentHasMediaBinding,
+  mediaAssetWasUploadedByUser,
   resolveAuthorizedMediaDocumentBinding,
   syncDocumentMediaBindingsFromHistory,
 } from "@/lib/media/bindings";
@@ -183,6 +184,35 @@ describe("media document bindings", () => {
       mediaId,
       canReadDocument: () => true,
     })).toBeNull();
+  });
+
+  it("keeps an unbound upload readable only by the human who uploaded it", () => {
+    const database = createTestDatabase();
+    const owner = createTestUser(database);
+    const other = createTestUser(database, {
+      name: "Other media reader",
+      email: "other-media-reader@example.com",
+    });
+    const mediaId = insertMediaAsset(database, owner.workspace.id, owner.user.id);
+
+    expect(mediaAssetWasUploadedByUser(
+      database,
+      owner.workspace.id,
+      mediaId,
+      owner.user.id,
+    )).toBe(true);
+    expect(mediaAssetWasUploadedByUser(
+      database,
+      owner.workspace.id,
+      mediaId,
+      other.user.id,
+    )).toBe(false);
+    expect(mediaAssetWasUploadedByUser(
+      database,
+      other.workspace.id,
+      mediaId,
+      owner.user.id,
+    )).toBe(false);
   });
 
   it("requires revisions.read for an image retained only by a past revision", () => {

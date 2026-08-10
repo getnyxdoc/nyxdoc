@@ -2,6 +2,13 @@
 
 All notable user-facing changes are recorded here.
 
+## 0.25.20 - 2026-08-10
+
+- Fixed newly uploaded profile photos appearing broken after a successful save
+  by preserving a narrow read grant for the human who uploaded the image.
+- Kept unbound uploads hidden from every other user, so the profile-photo fix
+  does not broaden workspace media access or weaken document authorization.
+
 ## 0.25.19 - 2026-08-10
 
 - Made the one-time `0.25.17` update bridge preserve a logical installation
