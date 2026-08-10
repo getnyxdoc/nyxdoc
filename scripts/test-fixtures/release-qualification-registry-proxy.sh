@@ -10,12 +10,18 @@ real_docker="${NYXDOC_RELEASE_QUALIFICATION_REAL_DOCKER:-}"
 semver_image="${NYXDOC_RELEASE_QUALIFICATION_SEMVER_IMAGE:-}"
 candidate_digest="${NYXDOC_RELEASE_QUALIFICATION_CANDIDATE_DIGEST:-}"
 
-[ -n "$real_docker" ] && [ -x "$real_docker" ] \
-  || { printf '[nyxdoc] qualification registry proxy requires an executable real Docker path.\n' >&2; exit 1; }
-[[ "$semver_image" =~ ^ghcr\.io/getnyxdoc/nyxdoc:[0-9]+\.[0-9]+\.[0-9]+$ ]] \
-  || { printf '[nyxdoc] qualification registry proxy received an invalid semver image.\n' >&2; exit 1; }
-[[ "$candidate_digest" =~ ^sha256:[a-f0-9]{64}$ ]] \
-  || { printf '[nyxdoc] qualification registry proxy received an invalid candidate digest.\n' >&2; exit 1; }
+if [ -z "$real_docker" ] || [ ! -x "$real_docker" ]; then
+  printf '[nyxdoc] qualification registry proxy requires an executable real Docker path.\n' >&2
+  exit 1
+fi
+if ! [[ "$semver_image" =~ ^ghcr\.io/getnyxdoc/nyxdoc:[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+  printf '[nyxdoc] qualification registry proxy received an invalid semver image.\n' >&2
+  exit 1
+fi
+if ! [[ "$candidate_digest" =~ ^sha256:[a-f0-9]{64}$ ]]; then
+  printf '[nyxdoc] qualification registry proxy received an invalid candidate digest.\n' >&2
+  exit 1
+fi
 
 if [ "$#" -eq 4 ] \
   && [ "$1" = buildx ] \
