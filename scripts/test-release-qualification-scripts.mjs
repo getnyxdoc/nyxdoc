@@ -2,7 +2,7 @@
 
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -24,6 +24,12 @@ const historicalFixture = path.join(
   "scripts",
   "test-fixtures",
   "release-qualification-historical.ts",
+);
+const qualificationRegistryProxy = path.join(
+  root,
+  "scripts",
+  "test-fixtures",
+  "release-qualification-registry-proxy.sh",
 );
 const image = "ghcr.io/getnyxdoc/nyxdoc@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const revision = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
@@ -459,6 +465,10 @@ async function main() {
       'git -C "$root" push "$update_origin"',
       'NYXDOC_OFFICIAL_RELEASE_SOURCE="$update_origin"',
       "candidate revision must have an exact stable semver tag",
+      "qualification-only semver projection",
+      "release-qualification-registry-proxy.sh",
+      "Legacy bridge verified backup",
+      "Pre-update verified backup",
       "integrity_check",
       "http://127.0.0.1:${httpPort}",
       "playwright test e2e/vertical --project=chromium",
@@ -501,10 +511,83 @@ async function main() {
       "the unpublished candidate tag must be resolved from qualification's disposable origin, never the public release remote",
     );
     assert.match(
+      bridgeInvocation,
+      /PATH="\$qualification_docker_bin:\$PATH"/,
+      "the historical updater must see the qualification-only registry projection",
+    );
+    assert.match(
+      bridgeInvocation,
+      /NYXDOC_RELEASE_QUALIFICATION_SEMVER_IMAGE="\$candidate_semver_image"/,
+      "the registry projection must be restricted to the exact candidate semver image",
+    );
+    assert.match(
+      bridgeInvocation,
+      /NYXDOC_RELEASE_QUALIFICATION_CANDIDATE_DIGEST="\$candidate_digest"/,
+      "the registry projection must expose only the verified immutable candidate digest",
+    );
+    assert.match(
       shell.slice(temporaryOriginStart, bridgeInvocationStart),
       /refs\/tags\/\$candidate_tag:refs\/tags\/\$candidate_tag/,
       "the disposable qualification origin must contain the unpublished candidate tag before the bridge runs",
     );
+    assert.match(
+      shell,
+      /Legacy bridge verified backup:[\s\S]*?Pre-update verified backup:/,
+      "qualification must accept the verified-backup receipt from both legacy and modern historical updaters",
+    );
+
+    const proxyDir = await mkdtemp(path.join(tmpdir(), "nyxdoc-release-proxy-"));
+    try {
+      const fakeDocker = path.join(proxyDir, "docker-real");
+      await writeFile(fakeDocker, "#!/usr/bin/env bash\nprintf 'delegated:%s\\n' \"$*\"\n", "utf8");
+      await chmod(fakeDocker, 0o755);
+      const shellPath = (value) => value.replaceAll("\\", "/");
+      const toWslPath = (value) => {
+        const normalized = shellPath(value);
+        const match = /^([A-Za-z]):\/(.*)$/.exec(normalized);
+        assert(match, `expected an absolute Windows path: ${value}`);
+        return `/mnt/${match[1].toLowerCase()}/${match[2]}`;
+      };
+      const quoteForBash = (value) => `'${value.replaceAll("'", "'\\''")}'`;
+      const proxyEnvironment = {
+        ...process.env,
+        NYXDOC_RELEASE_QUALIFICATION_REAL_DOCKER: shellPath(fakeDocker),
+        NYXDOC_RELEASE_QUALIFICATION_SEMVER_IMAGE: "ghcr.io/getnyxdoc/nyxdoc:0.25.20",
+        NYXDOC_RELEASE_QUALIFICATION_CANDIDATE_DIGEST: `sha256:${"a".repeat(64)}`,
+      };
+      const invokeProxy = (arguments_) => {
+        if (process.platform === "win32") {
+          const proxyPath = toWslPath(qualificationRegistryProxy);
+          const fakeDockerPath = toWslPath(fakeDocker);
+          const command = [
+            `chmod +x ${quoteForBash(fakeDockerPath)}`,
+            `export NYXDOC_RELEASE_QUALIFICATION_REAL_DOCKER=${quoteForBash(fakeDockerPath)}`,
+            `export NYXDOC_RELEASE_QUALIFICATION_SEMVER_IMAGE=${quoteForBash(proxyEnvironment.NYXDOC_RELEASE_QUALIFICATION_SEMVER_IMAGE)}`,
+            `export NYXDOC_RELEASE_QUALIFICATION_CANDIDATE_DIGEST=${quoteForBash(proxyEnvironment.NYXDOC_RELEASE_QUALIFICATION_CANDIDATE_DIGEST)}`,
+            `bash ${quoteForBash(proxyPath)} ${arguments_.map(quoteForBash).join(" ")}`,
+          ].join(" && ");
+          return spawnSync("wsl.exe", ["bash", "-lc", command], { encoding: "utf8" });
+        }
+        return spawnSync(
+          "bash",
+          [qualificationRegistryProxy, ...arguments_],
+          { encoding: "utf8", env: proxyEnvironment },
+        );
+      };
+      const projected = invokeProxy([
+        "buildx", "imagetools", "inspect", "ghcr.io/getnyxdoc/nyxdoc:0.25.20",
+      ]);
+      assert.equal(projected.status, 0, projected.stderr);
+      assert.match(projected.stdout, /Name: ghcr\.io\/getnyxdoc\/nyxdoc:0\.25\.20/);
+      assert.match(projected.stdout, new RegExp(`Digest: sha256:${"a".repeat(64)}`));
+      assert.doesNotMatch(projected.stdout, /delegated:/);
+
+      const delegated = invokeProxy(["compose", "version"]);
+      assert.equal(delegated.status, 0, delegated.stderr);
+      assert.equal(delegated.stdout.trim(), "delegated:compose version");
+    } finally {
+      await rm(proxyDir, { recursive: true, force: true });
+    }
 
     const composeText = await readFile(compose, "utf8");
     const collaborationSection = composeText.slice(

@@ -211,6 +211,7 @@ fresh_dir="$temporary/fresh"
 upgrade_dir="$temporary/upgrade"
 restore_dir="$temporary/restore"
 update_origin="$temporary/update-origin.git"
+qualification_docker_bin="$temporary/qualification-bin"
 artifact_dir="$temporary/artifacts"
 mkdir -p "$artifact_dir"
 browser_evidence_dir="$(dirname -- "$receipt_path")/playwright"
@@ -876,6 +877,20 @@ git -C "$root" worktree add --detach "$fresh_dir" "$candidate_revision" >/dev/nu
 candidate_tag="$(git -C "$root" describe --tags --exact-match --match 'v[0-9]*' "$candidate_revision" 2>/dev/null || true)"
 [[ "$candidate_tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] \
   || fail "candidate revision must have an exact stable semver tag for update rehearsal"
+candidate_semver_image="ghcr.io/getnyxdoc/nyxdoc:${candidate_tag#v}"
+real_docker="$(command -v docker)"
+mkdir -p "$qualification_docker_bin"
+install -m 0755 \
+  "$root/scripts/test-fixtures/release-qualification-registry-proxy.sh" \
+  "$qualification_docker_bin/docker"
+# The stable updater intentionally ignores a Git tag until the matching semver
+# image is public. Qualification happens before promotion, so expose exactly
+# one synthetic registry lookup for that future alias and map it to the already
+# verified immutable candidate digest. The installed baseline updater still
+# performs its normal tag selection, source fetch, image pull, and OCI revision
+# checks; every non-matching Docker command reaches the real CLI unchanged.
+printf '[nyxdoc] qualification-only semver projection: %s -> %s\n' \
+  "$candidate_semver_image" "$candidate_digest" >>"$qualification_log"
 git init --bare --initial-branch=main "$update_origin" >/dev/null
 git -C "$root" push "$update_origin" \
   "$candidate_revision:refs/heads/main" \
@@ -939,7 +954,11 @@ start_historical_connection_drain_observer \
 
 bridge_status=0
 if bridge_output="$(
-  NYXDOC_UPDATE_ROOT="$upgrade_dir" \
+  PATH="$qualification_docker_bin:$PATH" \
+    NYXDOC_RELEASE_QUALIFICATION_REAL_DOCKER="$real_docker" \
+    NYXDOC_RELEASE_QUALIFICATION_SEMVER_IMAGE="$candidate_semver_image" \
+    NYXDOC_RELEASE_QUALIFICATION_CANDIDATE_DIGEST="$candidate_digest" \
+    NYXDOC_UPDATE_ROOT="$upgrade_dir" \
     NYXDOC_UPDATE_IMAGE="$candidate_image" \
     NYXDOC_OFFICIAL_RELEASE_SOURCE="$update_origin" \
     bash "$root/scripts/update-bootstrap.sh" 2>&1
@@ -952,10 +971,12 @@ printf '%s\n' "$bridge_output" >>"$qualification_log"
 [ "$bridge_status" -eq 0 ] \
   || fail "historical update bridge failed with status ${bridge_status}; see qualification.log"
 bridge_backup_generation_path="$(printf '%s\n' "$bridge_output" \
-  | sed -n 's/^\[nyxdoc\] Legacy bridge verified backup: \(\/backups\/[A-Za-z0-9._-]*\)$/\1/p' \
+  | sed -n \
+    -e 's/^\[nyxdoc\] Legacy bridge verified backup: \(\/backups\/[A-Za-z0-9._-]*\)$/\1/p' \
+    -e 's/^\[nyxdoc\] Pre-update verified backup: \(\/backups\/[A-Za-z0-9._-]*\)$/\1/p' \
   | tail -n 1)"
 [[ "$bridge_backup_generation_path" =~ ^/backups/[A-Za-z0-9._-]+$ ]] \
-  || fail "historical update bridge did not report its verified backup generation"
+  || fail "historical updater did not report its verified backup generation"
 checks["historical-update-bootstrap"]="passed"
 wait_for_historical_websocket_drain \
   "$historical_websocket_lifecycle" "$historical_connection_drain"
