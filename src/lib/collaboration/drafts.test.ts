@@ -536,6 +536,70 @@ describe("shared draft node ID repair", () => {
 });
 
 describe("collaboration update persistence", () => {
+  it("ignores CRDT-only history when the projected document did not change", () => {
+    const {
+      database,
+      created,
+      state,
+      firstProcessActor,
+    } = storedDraftFixture();
+    const ydoc = collaborationYDocFromState(state.state);
+    const metadata = ydoc.getMap<unknown>("metadata");
+    const originalTitle = metadata.get("title");
+
+    // Editor initialization and normalization can produce Yjs structs even
+    // though the document a person and an agent read is unchanged. Model that
+    // CRDT-only history explicitly instead of relying on byte equality.
+    ydoc.transact(() => {
+      metadata.set("title", "temporary internal value");
+      metadata.set("title", originalTitle);
+    }, "test-editor-internal-roundtrip");
+
+    expect(Buffer.from(Y.encodeStateAsUpdate(ydoc))).not.toEqual(Buffer.from(state.state));
+    expect(collaborationDocumentFromYDoc(ydoc)).toEqual(
+      collaborationDocumentFromYDoc(collaborationYDocFromState(state.state)),
+    );
+
+    const persisted = persistCollaborationUpdate(
+      database,
+      state.roomName,
+      ydoc,
+      firstProcessActor,
+    );
+    const stored = database.prepare(
+      `SELECT yjs_state, draft_version, committed_draft_version, updated_at,
+              last_actor_type, last_actor_principal_id
+       FROM document_collaboration_states
+       WHERE document_id = ?`,
+    ).get(created.document.id) as {
+      yjs_state: Buffer;
+      draft_version: number;
+      committed_draft_version: number;
+      updated_at: string;
+      last_actor_type: string | null;
+      last_actor_principal_id: string | null;
+    };
+
+    expect(persisted).toMatchObject({
+      draftVersion: state.draftVersion,
+      committedDraftVersion: state.committedDraftVersion,
+      hasUncommittedChanges: false,
+      updatedAt: state.updatedAt,
+    });
+    expect(stored).toMatchObject({
+      draft_version: state.draftVersion,
+      committed_draft_version: state.committedDraftVersion,
+      updated_at: state.updatedAt,
+      last_actor_type: null,
+      last_actor_principal_id: null,
+    });
+    expect(stored.yjs_state).toEqual(Buffer.from(state.state));
+    expect(database.prepare(
+      `SELECT COUNT(*) AS count FROM document_draft_contributors
+       WHERE document_id = ? AND generation = ?`,
+    ).get(created.document.id, state.generation)).toEqual({ count: 0 });
+  });
+
   it("merges a stale full Y.Doc with changes already persisted by another process", () => {
     const { database, created, state, firstProcessActor } = storedDraftFixture();
     const first = collaborationYDocFromState(state.state);

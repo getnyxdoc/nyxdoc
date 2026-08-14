@@ -389,7 +389,7 @@ describe("collaboration command engine", () => {
     expect(storedDraftSnapshot(input.database, input.created.document.id)).toEqual(storedBefore);
   });
 
-  it("treats CRDT history-only differences as clean when the rendered document is unchanged", async () => {
+  it("does not advance the draft for a no-op whole-document replacement", async () => {
     const { database, workspace, actor, created, commands } = fixture();
     const state = ensureCollaborationState(database, workspace.id, created.document.id);
     const initial = await commands.readWorking({
@@ -412,7 +412,9 @@ describe("collaboration command engine", () => {
       },
     });
 
-    expect(replaced.workingDocument.draftVersion).toBeGreaterThan(0);
+    expect(replaced.workingDocument.draftVersion).toBe(
+      initial.workingDocument.draftVersion,
+    );
     expect(replaced.workingDocument.hasUncommittedChanges).toBe(false);
 
     const committed = await commands.commitWorking({

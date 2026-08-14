@@ -255,6 +255,13 @@ function readCollaborationSnapshotFromYDoc(ydoc: Y.Doc) {
   };
 }
 
+function collaborationSnapshotsEqual(
+  first: ReturnType<typeof readCollaborationSnapshotFromYDoc>["snapshot"],
+  second: ReturnType<typeof readCollaborationSnapshotFromYDoc>["snapshot"],
+) {
+  return JSON.stringify(first) === JSON.stringify(second);
+}
+
 function readCollaborationDocumentFromYDoc(ydoc: Y.Doc) {
   const read = readCollaborationSnapshotFromYDoc(ydoc);
   const parsedContent = nyxdocDocumentV2Schema.safeParse({
@@ -352,8 +359,10 @@ function mapCollaborationState(row: CollaborationStateRow): CollaborationState {
     // document. Dirty state is a document-level concept and must compare the
     // visible draft snapshot instead of CRDT history bytes. The snapshot may
     // contain a short-lived editor node until the user finishes a command.
-    hasUncommittedChanges:
-      JSON.stringify(working.snapshot) !== JSON.stringify(committed.snapshot),
+    hasUncommittedChanges: !collaborationSnapshotsEqual(
+      working.snapshot,
+      committed.snapshot,
+    ),
     updatedAt: row.updated_at,
     committedAt: row.committed_at,
   };
@@ -539,7 +548,7 @@ export function persistCollaborationYDoc(
   const currentSnapshot = readCollaborationSnapshotFromYDoc(currentYDoc).snapshot;
   const nextSnapshot = readCollaborationSnapshotFromYDoc(candidate).snapshot;
   const encoded = Buffer.from(Y.encodeStateAsUpdate(candidate));
-  if (JSON.stringify(currentSnapshot) === JSON.stringify(nextSnapshot)) {
+  if (collaborationSnapshotsEqual(currentSnapshot, nextSnapshot)) {
     Y.applyUpdate(ydoc, encoded, "nyxdoc-persist-sync");
     return;
   }
@@ -648,6 +657,15 @@ export function persistCollaborationUpdate(
       return {
         state: loadCollaborationStateByRoom(database, roomName),
         update: encoded,
+      };
+    }
+    const currentYDoc = collaborationYDocFromState(new Uint8Array(current.yjs_state));
+    const currentSnapshot = readCollaborationSnapshotFromYDoc(currentYDoc).snapshot;
+    const nextSnapshot = readCollaborationSnapshotFromYDoc(candidate).snapshot;
+    if (collaborationSnapshotsEqual(currentSnapshot, nextSnapshot)) {
+      return {
+        state: loadCollaborationStateByRoom(database, roomName),
+        update: Buffer.from(current.yjs_state),
       };
     }
     // The WebSocket preflight is not an authorization lease. Re-resolve the

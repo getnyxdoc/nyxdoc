@@ -238,6 +238,8 @@ describe("Nyxdoc MCP server", () => {
               latestDraftVersionPath: "draftVersion",
               appliesToDraftAwareReadsAndMutations: true,
               nestedStateRetainedForCompatibility: true,
+              authoritativeDirtyStatePath: "hasUncommittedChanges",
+              versionDifferenceIndicatesDirty: false,
             },
             sectionMarkdownPatch: {
               staleDraftVersionRebasesWhenSectionHashMatches: true,

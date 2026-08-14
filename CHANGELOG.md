@@ -2,6 +2,16 @@
 
 All notable user-facing changes are recorded here.
 
+## 0.25.21 - 2026-08-14
+
+- Prevented read-only viewing, caret movement, editor initialization, and
+  normalization-only CRDT history from advancing or persisting a shared draft.
+- Kept draft timestamps, contributors, and actor attribution unchanged for
+  no-op updates, while preserving normal versioning for visible edits.
+- Clarified for MCP clients that `hasUncommittedChanges` is the sole
+  authoritative pending-draft signal; draft version differences alone do not
+  mean that content needs to be saved.
+
 ## 0.25.20 - 2026-08-10
 
 - Fixed newly uploaded profile photos appearing broken after a successful save

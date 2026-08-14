@@ -1,6 +1,6 @@
 # Open-source newcomer readiness
 
-Checked against Nyxdoc `0.25.20` (`package.json`) and the current scripts and
+Checked against Nyxdoc `0.25.21` (`package.json`) and the current scripts and
 workflows. This is the detailed path for a first-time user or contributor;
 the README keeps the short path and links here.
 

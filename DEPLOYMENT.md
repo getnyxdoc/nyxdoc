@@ -48,7 +48,7 @@ the service:
 Set:
 
 ```dotenv
-NYXDOC_IMAGE=ghcr.io/getnyxdoc/nyxdoc:0.25.20
+NYXDOC_IMAGE=ghcr.io/getnyxdoc/nyxdoc:0.25.21
 BETTER_AUTH_URL=https://docs.example.com
 BETTER_AUTH_SECRET=<first random value>
 AUTH_TRUSTED_ORIGINS=https://docs.example.com
