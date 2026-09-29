@@ -2,6 +2,17 @@
 
 All notable user-facing changes are recorded here.
 
+## 0.25.22 - 2026-09-29
+
+- Added compact MCP with four discovery/read/write/destructive tools instead
+  of loading all 51 operation schemas and workflow instructions up front.
+  New connection handoffs use compact mode; existing full MCP URLs still work.
+- Added a standalone Node.js CLI and a small Nyxdoc agent skill so local agents
+  can use documents without registering an always-loaded MCP server.
+- Kept the same operation schemas, permissions, idempotency, draft conflict
+  checks and explicit commits across compact and full MCP. Added footprint,
+  authorization, retry, draft/commit and real OAuth/CLI integration coverage.
+
 ## 0.25.21 - 2026-08-14
 
 - Prevented read-only viewing, caret movement, editor initialization, and

@@ -2,6 +2,15 @@ import { describe, expect, it } from "vitest";
 import { buildAgentConnectionHandoff } from "@/lib/agents/handoff";
 
 describe("agent connection handoff", () => {
+  it("teaches compact discovery instead of calling unregistered native tools", () => {
+    for (const locale of ["ko", "en", "ja"] as const) {
+      const handoff = buildAgentConnectionHandoff({ agentName: "test", credentialName: "test", mcpUrl: "https://example.com/mcp?profile=compact&workspace=test", token: null, locale });
+      expect(handoff).toContain("nyxdoc_discover");
+      expect(handoff).toContain("operation=list_agent_workspaces");
+      expect(handoff).toContain("inputSchema");
+      expect(handoff).toContain("profile=compact&workspace=test");
+    }
+  });
   it("builds a self-contained handoff for a newly created key", () => {
     const handoff = buildAgentConnectionHandoff({
       agentName: "gameroom",

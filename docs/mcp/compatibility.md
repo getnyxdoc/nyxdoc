@@ -1,5 +1,11 @@
 # MCP 클라이언트 호환성
 
+서버 업데이트(2026-09-29): 새 연결은 `/mcp?profile=compact`로 도구 4개만
+노출한다. `nyxdoc_discover`로 operation을 조회한 뒤 반환된 실행 도구를 사용한다.
+기존 `/mcp`와 `profile=full`은 아래의 native 도구 호출 방식을 유지한다.
+Bearer/OAuth와 CLI의 실제 HTTP 흐름은 회귀 테스트에 포함된다.
+[경량 MCP와 CLI 안내](compact-and-cli.md)를 참고한다.
+
 확인일: **2026-07-28**
 
 Nyxdoc의 정식 원격 도구 표면은 `/mcp`의 stateless Streamable HTTP다. 클라이언트가
