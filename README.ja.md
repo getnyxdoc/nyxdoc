@@ -135,7 +135,9 @@ npm run build
 新しいキーの原文は一度だけ表示され、UIがMCP URL・Streamable HTTP・Bearer認証・確認手順を
 含む非公開の引き継ぎ文を生成します。
 
-接続直後に`get_capabilities`、続けて`list_agent_workspaces`を呼び出してください。5分間の
+新しい接続は4ツールだけを公開する軽量MCPです。`nyxdoc_discover`で
+`get_capabilities`と`list_agent_workspaces`を照会し、返された実行ツールで呼び出します。
+従来のfull MCPでは直接呼び出せます。5分間の
 導入経路、Codex設定、OAuth、画像アップロード、Agent To-doの境界は
 [docs/open-source-readiness.md](docs/open-source-readiness.md)と
 [docs/agent-contract.md](docs/agent-contract.md)を参照してください。

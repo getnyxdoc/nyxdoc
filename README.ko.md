@@ -133,7 +133,9 @@ npm run build
 표시되며, UI가 MCP 주소·Streamable HTTP·Bearer 인증·확인 절차를 담은 비공개 안내문을
 생성합니다.
 
-연결 직후 `get_capabilities`, 이어서 `list_agent_workspaces`를 호출합니다. 전체 5분
+새 연결은 도구 4개만 노출하는 경량 MCP입니다. `nyxdoc_discover`로
+`get_capabilities`와 `list_agent_workspaces`를 각각 조회한 뒤 반환된 실행 도구로
+호출합니다. 기존 full MCP에서는 두 도구를 직접 호출할 수 있습니다. 전체 5분
 경로와 Codex 설정, OAuth, 이미지 업로드, Agent To-do 경계는
 [docs/open-source-readiness.md](docs/open-source-readiness.md)와
 [docs/agent-contract.md](docs/agent-contract.md)를 참고하세요.
