@@ -68,8 +68,12 @@ key in a repository, document, shell history, log, or chat transcript.
 
 ### 4:00 — verify the connection
 
-Ask the connected client to call `get_capabilities` first, then
-`list_agent_workspaces`. The first response is the runtime contract; the
+New handoffs use compact MCP. Ask the client to inspect `get_capabilities`
+with `nyxdoc_discover({operation:"get_capabilities"})`, then execute it through
+the returned `nyxdoc_read` route with `{operation:"get_capabilities",args:{}}`.
+Inspect and execute `list_agent_workspaces` the same way. Existing full MCP
+connections can still call those tools directly. See [compact MCP and CLI](mcp/compact-and-cli.md).
+The capabilities response is the runtime contract; the
 second confirms the effective workspace grants and document scopes. Use
 `workspaceId` for ambiguous list/search/create operations when more than one
 allowed workspace exists. A human's currently open browser workspace does not

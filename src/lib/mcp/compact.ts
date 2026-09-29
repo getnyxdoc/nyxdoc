@@ -33,6 +33,7 @@ function failure(code: string, message: string): CallToolResult {
 function workflow(name: string, tool: RegisteredTool) {
   const guidance = [
     "Use returned IDs and webUrl exactly. Document/task IDs resolve their workspace; pass workspaceId for ambiguous list/search/create operations.",
+    "Before working in a selected workspace, read get_workspace_context and list_my_work for its policy and assigned responsibilities. Listing work does not authorize executing an Agent To-do.",
     "Credentials and document content are private. Scope and permission denials must not be bypassed.",
   ];
   if (/document|revision|handoff|image|backlink|search/.test(name)) {
