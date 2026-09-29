@@ -167,6 +167,11 @@ async function main() {
               ip_allowlist_json, expires_at
        FROM agent_credentials WHERE id = ?`,
     ).get(createdCredential.credential.id);
+    const cliCredential = createAgentCredential(database, {
+      userId: account.user_id, agentId: LEGACY_AGENT_ID, name: "Compact CLI fixture",
+      scopes: ["documents:read", "documents:write", "documents:commit"],
+      defaultWorkspaceId: account.workspace_id, workspaceAllowlist: [account.workspace_id],
+    });
     database.close();
 
     const malformedResponse = await fetch(`${baseUrl}/api/workspace-agents/connect`, {
@@ -287,6 +292,25 @@ async function main() {
       await client.close();
     }
 
+    const cliArgs = { requestId: "compact-http-create-document", title: "Compact HTTP regression", markdown: "Created through the standalone CLI." };
+    const cliEnvironment = { ...environment, NYXDOC_MCP_URL: `${baseUrl}/mcp`, NYXDOC_MCP_BEARER_TOKEN: cliCredential.token };
+    let cliDocumentId: string | undefined;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const cli: import("node:child_process").SpawnSyncReturns<string> = spawnSync(process.execPath,
+        ["cli/nyxdoc.mjs", "call", "create_document_from_markdown", "--args", JSON.stringify(cliArgs)],
+        { cwd: process.cwd(), env: cliEnvironment, encoding: "utf8", timeout: 60_000, windowsHide: true });
+      assert.equal(cli.status, 0, `Bearer CLI write failed: ${cli.stderr}`);
+      const created = JSON.parse(cli.stdout);
+      assert(created.document.id);
+      if (cliDocumentId) assert.equal(created.document.id, cliDocumentId, "Retry must not create another document");
+      cliDocumentId = created.document.id;
+    }
+    const cliRead = spawnSync(process.execPath,
+      ["cli/nyxdoc.mjs", "call", "get_document", "--args", JSON.stringify({ documentId: cliDocumentId })],
+      { cwd: process.cwd(), env: cliEnvironment, encoding: "utf8", timeout: 60_000, windowsHide: true });
+    assert.equal(cliRead.status, 0, cliRead.stderr);
+    assert(cliRead.stdout.includes(cliArgs.markdown));
+
     console.log(JSON.stringify({
       status: "passed",
       legacyAgentId: LEGACY_AGENT_ID,
@@ -297,6 +321,7 @@ async function main() {
       existingCredentialBinding: true,
       credentialPolicyPreserved: true,
       authenticatedMcp: true,
+      compactCliCreateReadAndRetry: true,
     }, null, 2));
   } catch (error) {
     throw new Error(

@@ -90,6 +90,21 @@ export function buildAgentConnectionHandoff(input: AgentConnectionHandoffInput) 
     },
   }[locale];
   const agentName = singleLine(input.agentName);
+  const compact = new URL(input.mcpUrl).searchParams.get("profile") === "compact";
+  const compactSteps = {
+    en: [
+      "This URL uses compact MCP (four tools). Call nyxdoc_discover with operation=list_agent_workspaces, then call its returned tool with {operation,args} to verify access.",
+      "Find each needed operation with nyxdoc_discover, then inspect its inputSchema and workflow. Full schemas are loaded only on demand; use the returned route for get_capabilities and other operations too.",
+    ],
+    ko: [
+      "이 주소는 도구 4개만 노출하는 경량 MCP야. nyxdoc_discover에 operation=list_agent_workspaces를 보내고, 반환된 도구를 {operation,args}로 호출해 접근 범위를 확인해.",
+      "필요한 기능만 nyxdoc_discover로 찾은 뒤 inputSchema와 workflow를 확인해. get_capabilities 등 기존 기능도 반환된 실행 도구로 호출하고, 전체 스키마를 미리 읽지 마.",
+    ],
+    ja: [
+      "このURLは4ツールのみの軽量MCPです。nyxdoc_discoverでoperation=list_agent_workspacesを照会し、返されたツールを{operation,args}で呼び出してアクセスを確認してください。",
+      "必要な操作だけをnyxdoc_discoverで探し、inputSchemaとworkflowを確認してください。get_capabilitiesも返された実行ツール経由で呼び出します。",
+    ],
+  }[locale];
   const workspaceName = input.workspaceName
     ? singleLine(input.workspaceName)
     : copy.noDefaultWorkspace;
@@ -118,9 +133,9 @@ export function buildAgentConnectionHandoff(input: AgentConnectionHandoffInput) 
     copy.steps,
     `1. ${copy.step1}`,
     `2. ${copy.step2}`,
-    `3. ${copy.step3}`,
+    `3. ${compact ? compactSteps[0] : copy.step3}`,
     `4. ${copy.step4}`,
-    `5. ${copy.step5}`,
+    `5. ${compact ? compactSteps[1] : copy.step5}`,
     `6. ${copy.step6}`,
     `7. ${copy.step7}`,
     ...(!input.token

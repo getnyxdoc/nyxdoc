@@ -283,6 +283,27 @@ async function main() {
       await oauthClient.close();
     }
 
+    // Real HTTP coverage for compact MCP and the dependency-free CLI, using the same OAuth grant.
+    for (const args of [["status"], ["inspect", "list_agent_workspaces"], ["call", "get_capabilities"]]) {
+      const cli: import("node:child_process").SpawnSyncReturns<string> = spawnSync(process.execPath, ["cli/nyxdoc.mjs", ...args], {
+        cwd: process.cwd(), encoding: "utf8", timeout: 60_000, windowsHide: true,
+        env: { ...environment, NYXDOC_MCP_URL: oauthEndpoint.toString(), NYXDOC_MCP_BEARER_TOKEN: token.access_token },
+      });
+      assert.equal(cli.status, 0, `Compact CLI ${args[0]} failed: ${cli.stderr}`);
+      const value = JSON.parse(cli.stdout);
+      if (args[0] === "status") {
+        assert.equal(value.tools.length, 4);
+        assert(value.initialBytes < 5000);
+      } else if (args[0] === "inspect") {
+        assert.equal(value.tool, "nyxdoc_read");
+        assert(value.inputSchema);
+      } else expectCapabilityVersion(value);
+    }
+    const invalidProfile = await fetch(`${baseUrl}/mcp?profile=unknown`, {
+      method: "POST", headers: { Authorization: `Bearer ${token.access_token}` },
+    });
+    assert.equal(invalidProfile.status, 400);
+
     const refreshResponse = await fetch(provider.token_endpoint, {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded" },

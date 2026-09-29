@@ -1,5 +1,11 @@
 # External agent contract
 
+0.25.22부터 새 연결은 [경량 MCP](mcp/compact-and-cli.md)를 사용한다.
+`nyxdoc_discover`로 아래 operation의 스키마·작업 순서를 조회하고 반환된
+읽기/쓰기/삭제성 실행 도구에 `{operation,args}`로 전달한다. 아래 이름은
+operation 이름이며, 기존 full MCP에서는 같은 이름의 도구를 직접 호출한다.
+로컬 에이전트는 전체 MCP 등록 없이 같은 operation을 CLI로 호출할 수 있다.
+
 Nyxdoc에는 내장 에이전트가 없다. Codex, OpenClaw, Claude Code 같은 외부 에이전트가
 Bearer 연결 키 또는 OAuth 2.1로 설치한 Nyxdoc의 `/mcp`를 사용한다. REST `/api/v1`은
 Bearer 연결 키를 사용한다. 연결 직후

@@ -1,4 +1,5 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { compactInstructions, installCompactTools, type McpProfile } from "@/lib/mcp/compact";
 import { z } from "zod";
 import packageJson from "../../../package.json";
 import { workspaceAgentGrantIdSchema } from "@/lib/agents/identifiers";
@@ -1105,12 +1106,14 @@ export function createNyxdocMcpServer(
   database: NyxDatabase,
   identity: ApiTokenIdentity,
   collaboration: McpCollaborationCommands = gatewayCollaborationCommands,
+  profile: McpProfile = "full",
 ) {
   const server = new McpServer(
     { name: "nyxdoc", version: capabilities.serverVersion },
-    { instructions },
+    { instructions: profile === "compact" ? compactInstructions : instructions },
   );
   type RegisteredTool = ReturnType<McpServer["registerTool"]>;
+  const operations = new Map<string, RegisteredTool>();
   type ToolRegistrationConfig = {
     annotations?: { readOnlyHint?: boolean };
     [key: string]: unknown;
@@ -1134,7 +1137,9 @@ export function createNyxdocMcpServer(
         return renderReadToolError(error);
       }
     };
-    return Reflect.apply(registerTool, undefined, [name, config, guardedCallback]);
+    const registered = Reflect.apply(registerTool, undefined, [name, config, guardedCallback]) as RegisteredTool;
+    operations.set(name, registered);
+    return registered;
   }) as unknown as McpServer["registerTool"];
   const actor = tokenDocumentActor(identity, "mcp");
   const publicBaseUrl = getSiteSettings(database).publicBaseUrl;
@@ -4093,5 +4098,10 @@ export function createNyxdocMcpServer(
     }, { responseMode, requestId, documentId }),
   );
 
+  if (profile === "compact") {
+    // Restore registration before installing dispatchers; the operation catalog stays native-only.
+    server.registerTool = registerTool as McpServer["registerTool"];
+    installCompactTools(server, operations);
+  }
   return server;
 }

@@ -65,6 +65,10 @@ async function authenticateMcpRequest(
 }
 
 async function handle(request: Request) {
+  const requestedProfile = new URL(request.url).searchParams.get("profile") ?? "full";
+  if (requestedProfile !== "full" && requestedProfile !== "compact") {
+    return Response.json({ error: "Unknown MCP profile. Use compact or full." }, { status: 400 });
+  }
   let identity: ApiTokenIdentity;
   try {
     const url = new URL(request.url);
@@ -80,7 +84,7 @@ async function handle(request: Request) {
     sessionIdGenerator: undefined,
     enableJsonResponse: true,
   });
-  const server = createNyxdocMcpServer(sqlite, identity);
+  const server = createNyxdocMcpServer(sqlite, identity, undefined, requestedProfile);
   await server.connect(transport);
   const response = await transport.handleRequest(request);
   response.headers.set("Cache-Control", "no-store");

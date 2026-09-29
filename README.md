@@ -143,13 +143,19 @@ npm run build
 
 ## Connect an external agent
 
+For low context overhead, use [compact MCP or the standalone CLI](docs/mcp/compact-and-cli.md).
+New connection handoffs expose only four tools and discover operation schemas
+on demand. The full MCP profile remains available for existing integrations.
+
 After signing in, open **Settings → Workspace → Agent access → Connect the first
 agent**. Choose or create an agent identity, access profile, document scope, and
 connection key. A new key is shown only once; the UI-generated private handoff
 contains the workspace-default MCP URL, Streamable HTTP transport, Bearer
 authentication, and verification steps.
 
-Call `get_capabilities` first, then `list_agent_workspaces`. For the complete
+In compact mode, inspect `list_agent_workspaces` with `nyxdoc_discover` and call
+the returned route. In full mode, call `get_capabilities` first, then
+`list_agent_workspaces`. For the complete
 five-minute path, Codex/Codex CLI setup, OAuth, image uploads, and Agent To-do
 boundaries, see [docs/open-source-readiness.md](docs/open-source-readiness.md),
 [docs/agent-contract.md](docs/agent-contract.md), and
@@ -157,7 +163,7 @@ boundaries, see [docs/open-source-readiness.md](docs/open-source-readiness.md),
 
 ## Project status
 
-Version `0.25.21` is an early 0.x release used with real documents. Data
+Version `0.25.22` is an early 0.x release used with real documents. Data
 migrations are forward-only and rehearsed against verified backups, but APIs
 and UI details may still evolve before 1.0.
 

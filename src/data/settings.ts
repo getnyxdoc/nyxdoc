@@ -83,7 +83,7 @@ export function loadSettingsView(
     organizationAgents: organization
       ? listOrganizationAgents(sqlite, organization.organization.id, user.id)
       : [],
-    mcpUrl: `${getAuthBaseUrl().replace(/\/$/, "")}/mcp`,
+    mcpUrl: `${getAuthBaseUrl().replace(/\/$/, "")}/mcp?profile=compact`,
     accountAgents: personalAgents,
     workspaceAssignableAgents,
     workspaceAgentMemberships: canManageAgents
