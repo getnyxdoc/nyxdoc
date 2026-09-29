@@ -511,6 +511,10 @@ export default async function SettingsE2EPage({
   searchParams: Promise<{
     area?: string;
     connectAgent?: string;
+    agent?: string;
+    returnTo?: string;
+    extraAgent?: string;
+    adminRequest?: string;
     document?: string;
     workspaceOnboarding?: string;
   }>;
@@ -524,11 +528,44 @@ export default async function SettingsE2EPage({
     || requestedArea === "organization"
     ? requestedArea
     : "workspace";
+  const extraAgent = {
+    ...view.accountAgents.find((agent) => agent.id === "agent-test-unassigned-e2e")!,
+    id: "agent-another-unassigned-e2e",
+    displayName: "another",
+  };
+  const fixtureView: SettingsView = {
+    ...view,
+    ...(params.extraAgent === "1" ? {
+      accountAgents: [extraAgent, ...view.accountAgents],
+      workspaceAssignableAgents: [extraAgent, ...view.workspaceAssignableAgents],
+    } : {}),
+    ...(params.adminRequest === "1" ? { adminRequests: [{
+      id: "admin-request-e2e",
+      requestId: "admin-request-client-e2e",
+      workspaceId: view.workspace.id,
+      actionType: "workspace.update" as const,
+      status: "pending" as const,
+      reason: "네트워크 복구 동작 확인",
+      payload: { name: "새 워크스페이스 이름" },
+      preview: "워크스페이스 이름 변경 요청",
+      requestedByAgentId: "agent-gameroom-main-e2e",
+      requestedByLabel: "gameroom-main",
+      requestedAt: "2026-07-22T01:00:00.000Z",
+      expiresAt: "2099-07-22T01:00:00.000Z",
+      reviewedByUserId: null,
+      reviewedByLabel: null,
+      reviewedAt: null,
+      decisionNote: null,
+      executionResult: null,
+    }] } : {}),
+  };
   return <SettingsShell
     area={area}
     currentDocumentId={params.document}
     initialConnectAgent={params.connectAgent === "1"}
     initialWorkspaceOnboarding={params.workspaceOnboarding === "1"}
-    view={view}
+    initialAgentId={params.agent}
+    connectionReturnHref={params.returnTo}
+    view={fixtureView}
   />;
 }

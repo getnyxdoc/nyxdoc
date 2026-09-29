@@ -93,7 +93,7 @@ test("qualifies new-key and existing-key workspace agent connection paths agains
   expect(created.status(), await created.text()).toBe(201);
   await expect(agentCard(page, agentName)).toBeVisible();
 
-  await page.goto(`/settings/workspace?workspace=${encodeURIComponent(workspaceId)}&connectAgent=1`);
+  await page.goto(`/settings/agents?workspace=${encodeURIComponent(workspaceId)}&connectAgent=1`);
   let dialog = page.getByRole("dialog", { name: /에 에이전트 연결$/ });
   await expect(dialog).toBeVisible();
   await advanceIdentityAndAccess(dialog, agentName, documentTitle);
@@ -142,7 +142,7 @@ test("qualifies new-key and existing-key workspace agent connection paths agains
 
   // Remove only the workspace grant. The global identity and credential stay
   // registered, making a reconnect the real existing-compatible-key path.
-  const connectedCard = agentCard(page, agentName);
+  const connectedCard = page.locator("#workspace-agents article").filter({ has: page.getByText(agentName, { exact: true }) });
   await connectedCard.getByRole("button", { name: "권한 설정", exact: true }).click();
   const permissionDialog = page.getByRole("dialog", {
     name: `${agentName} · ${workspaceName}`,

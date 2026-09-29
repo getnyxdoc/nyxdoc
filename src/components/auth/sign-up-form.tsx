@@ -5,6 +5,8 @@ import { useRouter } from "next/navigation";
 import { FormEvent, useState, useSyncExternalStore } from "react";
 import { ArrowRight } from "lucide-react";
 import { useI18n } from "@/lib/i18n/client";
+import { AUTH_REQUEST_ERROR } from "./auth-request-error";
+import { buildAuthPageHref, normalizeAuthCallbackURL } from "./auth-navigation";
 import styles from "./auth.module.css";
 
 const subscribeToHydration = () => () => undefined;
@@ -25,7 +27,8 @@ export function SignUpForm({
   inviteToken,
   registrationBlocked,
   setup,
-  signInHref = "/sign-in",
+  callbackURL,
+  signInHref,
 }: {
   allowedEmailDomains: string[];
   domainRestricted: boolean;
@@ -34,53 +37,61 @@ export function SignUpForm({
   inviteToken: string;
   registrationBlocked: boolean;
   setup: boolean;
+  callbackURL?: string;
   signInHref?: string;
 }) {
-  const { t } = useI18n();
+  const { locale, t } = useI18n();
   const router = useRouter();
+  const destination = normalizeAuthCallbackURL(callbackURL);
   const [error, setError] = useState("");
   const hydrated = useHydrated();
   const [pending, setPending] = useState(false);
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    if (pending || registrationBlocked) return;
     setError("");
     setPending(true);
     const data = new FormData(event.currentTarget);
     const email = String(data.get("email") || "").trim().toLowerCase();
-    const response = await fetch("/api/auth/sign-up/email", {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        ...(inviteToken ? { "x-nyxdoc-invite-token": inviteToken } : {}),
-      },
-      body: JSON.stringify({
-        name: String(data.get("name") || "").trim(),
-        email,
-        password: String(data.get("password") || ""),
-        callbackURL: "/app",
-      }),
-    });
-    const result = await response.json().catch(() => ({})) as {
-      code?: string;
-      error?: { message?: string };
-      message?: string;
-    };
-    setPending(false);
-    if (!response.ok) {
-      const errorMessage = result.code === "REGISTRATION_CLOSED"
-        ? t("auth.registrationClosed")
-        : result.code === "SETUP_IN_PROGRESS"
-          ? t("auth.setupInProgress")
-          : result.code === "EMAIL_DOMAIN_NOT_ALLOWED"
-            ? t("auth.emailDomainNotAllowed")
-            : t("auth.signUpError");
-      setError(errorMessage);
-      return;
+    try {
+      const response = await fetch("/api/auth/sign-up/email", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          ...(inviteToken ? { "x-nyxdoc-invite-token": inviteToken } : {}),
+        },
+        body: JSON.stringify({
+          name: String(data.get("name") || "").trim(),
+          email,
+          password: String(data.get("password") || ""),
+          callbackURL: destination,
+        }),
+      });
+      const result = await response.json().catch(() => ({})) as {
+        code?: string;
+        error?: { message?: string };
+        message?: string;
+      };
+      if (!response.ok) {
+        const errorMessage = result.code === "REGISTRATION_CLOSED"
+          ? t("auth.registrationClosed")
+          : result.code === "SETUP_IN_PROGRESS"
+            ? t("auth.setupInProgress")
+            : result.code === "EMAIL_DOMAIN_NOT_ALLOWED"
+              ? t("auth.emailDomainNotAllowed")
+              : t("auth.signUpError");
+        setError(errorMessage);
+        return;
+      }
+      router.push(emailVerificationEnabled
+        ? buildAuthPageHref("/verify-email", { email, callbackURL: destination })
+        : destination);
+    } catch {
+      setError(AUTH_REQUEST_ERROR[locale]);
+    } finally {
+      setPending(false);
     }
-    router.push(emailVerificationEnabled
-      ? `/verify-email?email=${encodeURIComponent(email)}`
-      : "/app");
   }
 
   return (
@@ -138,7 +149,7 @@ export function SignUpForm({
               : t("auth.signUp")} <ArrowRight size={17} />
         </button>
       </form>
-      <p className={styles.footer}>{t("auth.alreadyAccount")} <Link href={signInHref}>{t("auth.signIn")}</Link></p>
+      <p className={styles.footer}>{t("auth.alreadyAccount")} <Link href={signInHref ?? buildAuthPageHref("/sign-in", { callbackURL: destination })}>{t("auth.signIn")}</Link></p>
     </>
   );
 }

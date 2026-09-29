@@ -2,6 +2,20 @@
 
 All notable user-facing changes are recorded here.
 
+## 0.25.23 - 2026-09-29
+
+- Consolidated workspace agent connections, access and connection keys in Agent
+  management. Connection completion and cancellation preserve the invoking
+  document or settings screen, including after sign-in and email verification.
+- Added reusable MCP and CLI/skill setup guides, recoverable clipboard failures,
+  and clearer separation between prepared access and a verified agent connection.
+- Simplified document actions with a keyboard-accessible More popover and showed
+  table editing controls only when a table is selected. Refined shared surfaces,
+  focus states, mobile layouts and short transitions respecting reduced motion.
+- Shipped the previously unreleased product-flow fixes: resilient authentication,
+  task and saved-view forms, retryable dialogs, preserved document context, and
+  consistent modal focus containment and restoration.
+
 ## 0.25.22 - 2026-09-29
 
 - Added compact MCP with four discovery/read/write/destructive tools instead

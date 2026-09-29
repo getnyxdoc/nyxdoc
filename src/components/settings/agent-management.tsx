@@ -2,7 +2,8 @@
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useMemo, useState } from "react";
+import { ModalDialog } from "@/components/ui/modal-dialog";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowRight,
   Bot,
@@ -21,9 +22,10 @@ import {
   UserRound,
   X,
 } from "lucide-react";
+import { AgentSetupGuide } from "./agent-setup-guide";
 import { UserAvatar } from "@/components/profile/user-avatar";
 import { DocumentScopePicker } from "@/components/settings/document-scope-picker";
-import { buildAgentConnectionHandoff } from "@/lib/agents/handoff";
+import { buildAgentConnectionHref, buildSettingsHref, normalizeSettingsReturnTo } from "@/lib/settings/navigation";
 import { uploadMediaFile } from "@/lib/media/client";
 import { useI18n } from "@/lib/i18n/client";
 import { formatCopy } from "@/lib/i18n/copy";
@@ -232,12 +234,16 @@ function requestError(body: ApiBody, fallback: string) {
 
 export function AccountAgentsPanel({
   collectionEndpoint = "/api/account/agents",
+  connectionReturnHref,
+  currentDocumentId,
   initialAgents,
   mcpUrl,
   uploadWorkspaceId,
   workspaces,
 }: {
   collectionEndpoint?: string;
+  connectionReturnHref?: string;
+  currentDocumentId?: string;
   initialAgents: AccountAgentSummary[];
   mcpUrl: string;
   uploadWorkspaceId: string;
@@ -1022,7 +1028,7 @@ export function AccountAgentsPanel({
             </header>
             <div className={styles.membershipChips}>
               {activeMemberships.length
-                ? activeMemberships.map((membership) => <Link href={`/settings/workspace?workspace=${encodeURIComponent(membership.workspaceId)}#workspace-agents`} key={membership.membershipId}>{formatCopy(copy.membership, {
+                ? activeMemberships.map((membership) => <Link href={buildSettingsHref({ area: "agents", workspaceId: membership.workspaceId, documentId: currentDocumentId, returnTo: connectionReturnHref, anchor: "workspace-agents" })} key={membership.membershipId}>{formatCopy(copy.membership, {
                   workspace: membership.workspaceName,
                   role: accessProfileLabel(membership.accessProfile, locale),
                 })}</Link>)
@@ -1148,7 +1154,7 @@ export function AccountAgentsPanel({
     {error && !deletingAgent && !purgingAgent && !credentialEditor && <div className={styles.inlineError} role="alert">{error}</div>}
 
     {deletingAgent && <div className={styles.modalBackdrop} role="presentation">
-      <section className={`${styles.connectionEditModal} ${styles.deleteAgentModal}`} role="dialog" aria-modal="true" aria-labelledby="delete-agent-title">
+      <ModalDialog open hideOnInteractOutside={false} hideOnEscape={!pending} onClose={(event) => { if (pending) event.preventDefault(); else { setDeletingAgent(null); setError(""); } }} className={`${styles.connectionEditModal} ${styles.deleteAgentModal}`} aria-labelledby="delete-agent-title">
         <div className={styles.connectionEditIcon}><Trash2 size={20} /></div>
         <p>DELETE AGENT</p>
         <h2 id="delete-agent-title">{formatCopy(copy.deleteTitle, { name: deletingAgent.displayName })}</h2>
@@ -1167,11 +1173,11 @@ export function AccountAgentsPanel({
             disabled={Boolean(pending)}
           ><Trash2 size={14} /> {pending === `delete:${deletingAgent.id}` ? copy.deleting : copy.deleteAgent}</button>
         </footer>
-      </section>
+      </ModalDialog>
     </div>}
 
     {purgingAgent && <div className={styles.modalBackdrop} role="presentation">
-      <section className={`${styles.connectionEditModal} ${styles.deleteAgentModal}`} role="dialog" aria-modal="true" aria-labelledby="purge-agent-title">
+      <ModalDialog open hideOnInteractOutside={false} hideOnEscape={!pending} onClose={(event) => { if (pending) event.preventDefault(); else { setPurgingAgent(null); setPurgeConfirmation(""); setError(""); } }} className={`${styles.connectionEditModal} ${styles.deleteAgentModal}`} aria-labelledby="purge-agent-title">
         <div className={styles.connectionEditIcon}><Trash2 size={20} /></div>
         <p>PERMANENTLY DELETE AGENT</p>
         <h2 id="purge-agent-title">{formatCopy(copy.purgeTitle, { name: purgingAgent.displayName })}</h2>
@@ -1214,11 +1220,11 @@ export function AccountAgentsPanel({
             disabled={Boolean(pending) || purgeConfirmation.trim() !== purgingAgent.displayName}
           ><Trash2 size={14} /> {pending === `purge:${purgingAgent.id}` ? copy.purging : copy.permanentDelete}</button>
         </footer>
-      </section>
+      </ModalDialog>
     </div>}
 
     {credentialEditor && <div className={styles.modalBackdrop} role="presentation">
-      <section className={styles.connectionEditModal} role="dialog" aria-modal="true" aria-labelledby="credential-editor-title">
+      <ModalDialog open hideOnInteractOutside={false} hideOnEscape={!pending} onClose={(event) => { if (pending) event.preventDefault(); else { setCredentialEditor(null); setError(""); } }} className={styles.connectionEditModal} aria-labelledby="credential-editor-title">
         <div className={styles.connectionEditIcon}><KeyRound size={20} /></div>
         <p>AGENT CREDENTIAL</p>
         <h2 id="credential-editor-title">{credentialEditor.credential ? copy.keyEditor : copy.newKey}</h2>
@@ -1253,11 +1259,11 @@ export function AccountAgentsPanel({
         </div>
         {error && <div className={styles.inlineError} role="alert">{error}</div>}
         <footer><button type="button" onClick={() => { setCredentialEditor(null); setError(""); }} disabled={Boolean(pending)}>{copy.cancel}</button><button type="button" onClick={() => void saveCredential()} disabled={Boolean(pending) || !keyName.trim()}><Save size={14} /> {pending ? copy.saving : copy.save}</button></footer>
-      </section>
+      </ModalDialog>
     </div>}
 
     {workspaceManagerAgent && <div className={styles.modalBackdrop} role="presentation">
-      <section className={styles.workspaceAssignmentModal} role="dialog" aria-modal="true" aria-labelledby="workspace-assignment-title">
+      <ModalDialog open onClose={() => setWorkspaceManagerAgentId(null)} hideOnInteractOutside={false} className={styles.workspaceAssignmentModal} aria-labelledby="workspace-assignment-title">
         <div className={styles.connectionEditIcon}><Building2 size={20} /></div>
         <p>WORKSPACE ASSIGNMENTS</p>
         <h2 id="workspace-assignment-title">{formatCopy(copy.assignmentTitle, { name: workspaceManagerAgent.displayName })}</h2>
@@ -1274,8 +1280,8 @@ export function AccountAgentsPanel({
               </div>
               {canManage
                 ? <Link href={membership
-                  ? `/settings/workspace?workspace=${encodeURIComponent(workspace.id)}#workspace-agents`
-                  : `/settings/workspace?workspace=${encodeURIComponent(workspace.id)}&connectAgent=1#workspace-agents`
+                  ? buildSettingsHref({ area: "agents", workspaceId: workspace.id, documentId: currentDocumentId, returnTo: connectionReturnHref, anchor: "workspace-agents" })
+                  : buildAgentConnectionHref({ workspaceId: workspace.id, agentId: workspaceManagerAgent.id, documentId: currentDocumentId, returnTo: connectionReturnHref })
                 }>{membership ? copy.permissions : copy.startConnection} <ArrowRight size={13} /></Link>
                 : <em>{copy.noManagePermission}</em>}
             </article>;
@@ -1286,7 +1292,7 @@ export function AccountAgentsPanel({
           <span><strong>{copy.adminRolePreserved}</strong><small>{copy.adminBoundary}</small></span>
         </div>
         <footer><button type="button" onClick={() => setWorkspaceManagerAgentId(null)}>{copy.close}</button></footer>
-      </section>
+      </ModalDialog>
     </div>}
 
     {revealedConnection && (() => {
@@ -1300,38 +1306,19 @@ export function AccountAgentsPanel({
       const revealedMcpUrl = defaultWorkspace
         ? workspaceMcpUrl(mcpUrl, defaultWorkspace.id)
         : mcpUrl;
-      const handoff = buildAgentConnectionHandoff({
-        agentName: revealedAgent?.displayName ?? copy.knownAgent,
-        credentialName: revealedConnection.credential.name,
-        documentScope: defaultMembership
-          ? defaultMembership.rootDocumentTitle
-            ? formatCopy(copy.subtree, { title: defaultMembership.rootDocumentTitle })
-            : copy.allDocuments
-          : null,
-        keyAccess: revealedConnection.credential.scopes.includes("documents:write")
-          ? copy.readWriteCommit
-          : copy.readOnly,
-        locale,
-        mcpUrl: revealedMcpUrl,
-        role: defaultMembership ? accessProfileLabel(defaultMembership.accessProfile, locale) : null,
-        token: revealedConnection.token,
-        workspaceName: defaultWorkspace?.name ?? null,
-      });
       return <div className={styles.modalBackdrop} role="presentation">
-      <section className={styles.tokenModal} role="dialog" aria-modal="true" aria-labelledby="revealed-token-title">
+      <ModalDialog open hideOnInteractOutside={false} hideOnEscape={false} onClose={(event) => event.preventDefault()} className={styles.tokenModal} aria-labelledby="revealed-token-title">
         <div className={styles.tokenSuccess}><Check size={20} /></div><p>AGENT KEY CREATED</p><h2 id="revealed-token-title">{copy.keyReady}</h2><span>{copy.keyShownOnce}</span>
-        <div className={styles.agentHandoffCard}>
-          <div className={styles.agentHandoffHeading}><span><Bot size={18} /></span><div><strong>{copy.handoffTitle}</strong><small>{copy.handoffHint}</small></div></div>
-          <button type="button" onClick={async () => { await navigator.clipboard.writeText(handoff); setCopied("handoff"); }}><Copy size={15} /> {copied === "handoff" ? copy.handoffCopied : copy.copyHandoff}</button>
-          <em>{copy.handoffSecret}</em>
-        </div>
+        <AgentSetupGuide agentName={revealedAgent?.displayName ?? copy.knownAgent} credentialName={revealedConnection.credential.name}
+          locale={locale} mcpUrl={revealedMcpUrl} token={revealedConnection.token} workspaceName={defaultWorkspace?.name}
+          role={defaultMembership ? accessProfileLabel(defaultMembership.accessProfile, locale) : undefined} />
         <div className={styles.connectionDirectDetails}>
           <strong>{copy.directSetup}</strong>
           <div className={styles.configBox}><pre>{revealedMcpUrl}</pre><button type="button" onClick={async () => { await navigator.clipboard.writeText(revealedMcpUrl); setCopied("url"); }}><Copy size={14} /> {copied === "url" ? copy.copied : copy.copyAddress}</button></div>
           <div className={styles.secretBox}><code>{revealedConnection.token}</code><button type="button" onClick={async () => { await navigator.clipboard.writeText(revealedConnection.token); setCopied("token"); }}><Copy size={14} /> {copied === "token" ? copy.copied : copy.copyKey}</button></div>
         </div>
         <button className={styles.doneButton} type="button" onClick={() => { setRevealedConnection(null); setCopied(null); }}>{copy.stored}</button>
-      </section>
+      </ModalDialog>
     </div>;
     })()}
   </>;
@@ -1364,7 +1351,7 @@ function workspaceAgentCopy(locale: AppLocale) {
       connectFailed: "Could not connect the agent.",
       permissionSaveFailed: "Could not save workspace permissions.",
       title: "Agent access",
-      description: "Grant an agent access to this workspace, then optionally attach a connection key.",
+      description: "Connect, set permissions, and resume setup for this workspace in one place.",
       connectAgent: "Connect agent",
       identityBoundaryTitle: "Identities and keys are registered once per account.",
       identityBoundary: "Reuse the same agent across workspaces, while granting separate access and document scope in each workspace. Keys are attached explicitly and are never expanded automatically.",
@@ -1372,7 +1359,10 @@ function workspaceAgentCopy(locale: AppLocale) {
       emptyHint: "Choose an existing agent or register a new one and connect it now.",
       firstConnection: "Connect the first agent",
       membershipSummary: "{role} · {scope}",
-      keyPermissionSummary: "{keys} connection keys · {permissions} effective permissions",
+      keyPermissionSummary: "{keys} keys for this workspace · {permissions} granted permissions",
+      copyFailed: "Could not copy. Try again or select and copy the connection information below.",
+      returnHint: "Done returns you to the screen where you started the connection.",
+      agentUnavailable: "This agent is already assigned or is no longer available. Choose an agent to continue.",
       permissionSettings: "Permission settings",
       ready: "The connection is ready.",
       connectTitle: "Connect an agent to {workspace}",
@@ -1478,7 +1468,7 @@ function workspaceAgentCopy(locale: AppLocale) {
       connectFailed: "에이전트를 연결하지 못했습니다.",
       permissionSaveFailed: "워크스페이스 권한을 저장하지 못했습니다.",
       title: "에이전트 접근",
-      description: "에이전트에게 이 워크스페이스 접근 권한을 부여하고, 필요한 경우 연결 키를 붙입니다.",
+      description: "이 워크스페이스의 에이전트 연결, 권한 설정, 연결 안내를 한곳에서 관리합니다.",
       connectAgent: "에이전트 연결",
       identityBoundaryTitle: "신원과 키는 계정에 한 번만 등록됩니다.",
       identityBoundary: "같은 에이전트를 여러 워크스페이스에서 재사용하되 접근 권한과 문서 범위는 각각 부여합니다. 키는 명시적으로 연결하며 자동으로 권한을 넓히지 않습니다.",
@@ -1486,7 +1476,10 @@ function workspaceAgentCopy(locale: AppLocale) {
       emptyHint: "기존 에이전트를 고르거나 새로 등록해 바로 연결할 수 있습니다.",
       firstConnection: "첫 에이전트 연결",
       membershipSummary: "{role} · {scope}",
-      keyPermissionSummary: "연결 키 {keys}개 · 유효 권한 {permissions}개",
+      keyPermissionSummary: "이 워크스페이스 연결 키 {keys}개 · 부여된 권한 {permissions}개",
+      copyFailed: "복사하지 못했습니다. 다시 시도하거나 아래 연결 정보를 직접 선택해 복사해주세요.",
+      returnHint: "완료하면 연결을 시작한 화면으로 돌아갑니다.",
+      agentUnavailable: "선택한 에이전트가 이미 배정되어 있거나 연결할 수 없는 상태입니다. 에이전트를 확인해 선택해주세요.",
       permissionSettings: "권한 설정",
       ready: "연결이 준비됐습니다.",
       connectTitle: "{workspace}에 에이전트 연결",
@@ -1592,7 +1585,7 @@ function workspaceAgentCopy(locale: AppLocale) {
       connectFailed: "エージェントを接続できませんでした。",
       permissionSaveFailed: "ワークスペース権限を保存できませんでした。",
       title: "エージェントアクセス",
-      description: "エージェントにこのワークスペースへのアクセスを付与し、必要に応じて接続キーを関連付けます。",
+      description: "このワークスペースの接続、権限、設定ガイドをまとめて管理します。",
       connectAgent: "エージェントを接続",
       identityBoundaryTitle: "IDとキーはアカウントへ一度だけ登録します。",
       identityBoundary: "同じエージェントを複数ワークスペースで再利用し、アクセス権と文書範囲は個別に付与します。キーは明示的に関連付け、自動拡張しません。",
@@ -1600,7 +1593,10 @@ function workspaceAgentCopy(locale: AppLocale) {
       emptyHint: "既存のエージェントを選ぶか、新しく登録して接続できます。",
       firstConnection: "最初のエージェントを接続",
       membershipSummary: "{role} · {scope}",
-      keyPermissionSummary: "接続キー{keys}件 · 実効権限{permissions}件",
+      keyPermissionSummary: "このワークスペースのキー{keys}件 · 付与された権限{permissions}件",
+      copyFailed: "コピーできませんでした。再試行するか、下の接続情報を選択してコピーしてください。",
+      returnHint: "完了すると、接続を開始した画面に戻ります。",
+      agentUnavailable: "選択したエージェントは割り当て済みか、利用できません。エージェントを確認して選択してください。",
       permissionSettings: "権限設定",
       ready: "接続の準備ができました。",
       connectTitle: "{workspace}にエージェントを接続",
@@ -1703,7 +1699,10 @@ function workspaceAgentCopy(locale: AppLocale) {
 
 export function WorkspaceAgentsPanel({
   accountAgents,
+  connectionReturnHref,
   documents,
+  currentDocumentId,
+  initialAgentId,
   initiallyOpen = false,
   onboardingCompletionHref,
   initialMemberships,
@@ -1711,7 +1710,10 @@ export function WorkspaceAgentsPanel({
   workspace,
 }: {
   accountAgents: AccountAgentSummary[];
+  connectionReturnHref?: string;
   documents: DocumentSummary[];
+  currentDocumentId?: string;
+  initialAgentId?: string;
   initiallyOpen?: boolean;
   onboardingCompletionHref?: string;
   initialMemberships: AgentWorkspaceMembershipSummary[];
@@ -1724,12 +1726,15 @@ export function WorkspaceAgentsPanel({
   const initiallyAssignedIds = new Set(
     initialMemberships.filter((item) => item.status === "active").map((item) => item.agentId),
   );
-  const initiallyAvailableAgent = accountAgents.find(
+  const initiallyAvailableAgents = accountAgents.filter(
     (agent) => agent.status === "active"
       && !agent.deletedAt
       && !agent.purgedAt
       && !initiallyAssignedIds.has(agent.id),
   );
+  const initiallyAvailableAgent = initialAgentId
+    ? initiallyAvailableAgents.find((agent) => agent.id === initialAgentId)
+    : initiallyAvailableAgents[0];
   const [agents, setAgents] = useState(accountAgents);
   const [memberships, setMemberships] = useState(initialMemberships);
   const [editing, setEditing] = useState<AgentWorkspaceMembershipSummary | null>(null);
@@ -1740,10 +1745,12 @@ export function WorkspaceAgentsPanel({
   const [editRoot, setEditRoot] = useState("");
   const [pending, setPending] = useState(false);
   const [error, setError] = useState("");
+  const [setupAgent, setSetupAgent] = useState<AccountAgentSummary | null>(null);
+  const [setupCredentialId, setSetupCredentialId] = useState("");
   const [wizardOpen, setWizardOpen] = useState(initiallyOpen);
   const [wizardStep, setWizardStep] = useState<ConnectionWizardStep>("identity");
   const [wizardIdentityMode, setWizardIdentityMode] = useState<"existing" | "new">(
-    initiallyAvailableAgent ? "existing" : "new",
+    initiallyAvailableAgent || initialAgentId ? "existing" : "new",
   );
   const [wizardAgentId, setWizardAgentId] = useState(initiallyAvailableAgent?.id ?? "");
   const [wizardNewAgentName, setWizardNewAgentName] = useState("");
@@ -1754,9 +1761,23 @@ export function WorkspaceAgentsPanel({
   const [wizardKeyName, setWizardKeyName] = useState(
     initiallyAvailableAgent ? `${initiallyAvailableAgent.displayName} ${copy.keySuffix}` : "",
   );
-  const [wizardError, setWizardError] = useState("");
+  const [wizardError, setWizardError] = useState(initialAgentId && !initiallyAvailableAgent ? copy.agentUnavailable : "");
   const [wizardResult, setWizardResult] = useState<ConnectAgentToWorkspaceResult | null>(null);
   const [wizardCopied, setWizardCopied] = useState<string | null>(null);
+  const wizardDetailsIdentity = useRef<string | null>(null);
+  const wizardCredentialInitialized = useRef(false);
+  const editScopeRef = useRef<HTMLDivElement>(null);
+  const wizardScopeRef = useRef<HTMLDivElement>(null);
+  const wizardStepFocusRef = useRef<HTMLElement>(null);
+  const previousWizardStep = useRef<ConnectionWizardStep | null>(null);
+  useEffect(() => {
+    const previousStep = previousWizardStep.current;
+    previousWizardStep.current = wizardOpen ? wizardStep : null;
+    if (wizardOpen && previousStep !== null && previousStep !== wizardStep) {
+      wizardStepFocusRef.current?.focus();
+    }
+  }, [wizardOpen, wizardStep]);
+  const returnTo = initiallyOpen ? normalizeSettingsReturnTo(connectionReturnHref) : undefined;
   const activeMemberships = memberships.filter((item) => item.status === "active");
   const activeIds = new Set(activeMemberships.map((item) => item.agentId));
   const availableAgents = agents.filter(
@@ -1776,18 +1797,7 @@ export function WorkspaceAgentsPanel({
     transport: "streamable-http",
     headers: { Authorization: `Bearer ${wizardTokenValue}` },
   }, null, 2);
-  const wizardHandoff = wizardResult?.credential ? buildAgentConnectionHandoff({
-    agentName: wizardResult.agent.displayName,
-    credentialName: wizardResult.credential.name,
-    documentScope: wizardResult.membership.rootDocumentTitle
-      ? formatCopy(copy.subtree, { title: wizardResult.membership.rootDocumentTitle })
-      : copy.allDocuments,
-    locale,
-    mcpUrl: scopedMcpUrl,
-    role: accessProfileLabel(wizardResult.membership.accessProfile, locale),
-    token: wizardResult.token,
-    workspaceName: workspace.name,
-  }) : "";
+
 
   function workspaceRequest(path: string, init: RequestInit) {
     const headers = new Headers(init.headers);
@@ -1799,12 +1809,17 @@ export function WorkspaceAgentsPanel({
     const url = new URL(window.location.href);
     if (!url.searchParams.has("connectAgent")) return false;
     url.searchParams.delete("connectAgent");
+    url.searchParams.delete("agent");
+    url.searchParams.delete("returnTo");
+    if (url.pathname === "/settings/workspace") url.pathname = "/settings/agents";
     router.replace(`${url.pathname}${url.search}${url.hash}`, { scroll: false });
     return true;
   }
 
   function resetWizard() {
-    const nextAgent = availableAgents[0] ?? null;
+    const nextAgent = availableAgents.find((agent) => agent.id === initialAgentId) ?? availableAgents[0] ?? null;
+    wizardDetailsIdentity.current = null;
+    wizardCredentialInitialized.current = false;
     setWizardStep("identity");
     setWizardIdentityMode(nextAgent ? "existing" : "new");
     setWizardAgentId(nextAgent?.id ?? "");
@@ -1830,6 +1845,10 @@ export function WorkspaceAgentsPanel({
       window.location.assign(onboardingCompletionHref);
       return;
     }
+    if (returnTo) {
+      window.location.replace(returnTo);
+      return;
+    }
     clearAutomaticOpenFlag();
     setWizardOpen(false);
     resetWizard();
@@ -1841,18 +1860,26 @@ export function WorkspaceAgentsPanel({
     const name = wizardIdentityMode === "existing"
       ? wizardSelectedAgent?.displayName ?? ""
       : wizardNewAgentName.trim();
-    setWizardKeyName(`${name} ${copy.keySuffix}`);
+    const identity = `${wizardIdentityMode}:${wizardIdentityMode === "existing" ? wizardAgentId : name}`;
+    if (wizardDetailsIdentity.current !== identity) {
+      setWizardKeyName(`${name} ${copy.keySuffix}`);
+      wizardDetailsIdentity.current = identity;
+      wizardCredentialInitialized.current = false;
+    }
     setWizardError("");
     setWizardStep("access");
   }
 
   function advanceToCredential() {
-    if (wizardIdentityMode === "existing" && wizardCredentials.length) {
-      setWizardCredentialMode("existing");
-      setWizardCredentialId(wizardCredentials[0].id);
-    } else {
-      setWizardCredentialMode("new");
-      setWizardCredentialId("");
+    if (!wizardCredentialInitialized.current) {
+      if (wizardIdentityMode === "existing" && wizardCredentials.length) {
+        setWizardCredentialMode("existing");
+        setWizardCredentialId(wizardCredentials[0].id);
+      } else {
+        setWizardCredentialMode("new");
+        setWizardCredentialId("");
+      }
+      wizardCredentialInitialized.current = true;
     }
     setWizardError("");
     setWizardStep("credential");
@@ -1903,14 +1930,26 @@ export function WorkspaceAgentsPanel({
   }
 
   async function copyWizardValue(value: string, key: string) {
-    await navigator.clipboard.writeText(value);
-    setWizardCopied(key);
-    window.setTimeout(() => setWizardCopied((current) => current === key ? null : current), 1600);
+    setWizardError("");
+    try {
+      await navigator.clipboard.writeText(value);
+      setWizardCopied(key);
+      window.setTimeout(() => setWizardCopied((current) => current === key ? null : current), 1600);
+    } catch {
+      setWizardCopied(null);
+      setWizardError(copy.copyFailed);
+    }
   }
 
   function finishWizard() {
     if (onboardingCompletionHref) {
       window.location.assign(onboardingCompletionHref);
+      return;
+    }
+    if (returnTo) {
+      // Reload the source so it receives the new identity, grant, and key,
+      // including when its earlier settings response was cached by the router.
+      window.location.replace(returnTo);
       return;
     }
     const replacingAutomaticOpenUrl = clearAutomaticOpenFlag();
@@ -1974,7 +2013,7 @@ export function WorkspaceAgentsPanel({
         <div className={styles.sectionHeading}><span className={styles.connectionIcon}><ShieldCheck size={18} /></span><div><h2>{copy.title}</h2><p>{copy.description}</p></div></div>
         <button type="button" onClick={openWizard}><Plus size={15} /> {copy.connectAgent}</button>
       </div>
-      <div className={styles.workspaceAdminRoleNote}><ShieldCheck size={15} /><span><strong>{copy.identityBoundaryTitle}</strong> {copy.identityBoundary}</span></div>
+      <details className={styles.connectionAdvancedDetails}><summary>{copy.identityBoundaryTitle}</summary><p>{copy.identityBoundary}</p></details>
       <div className={styles.workspaceAgentList}>
         {activeMemberships.length === 0 ? <div className={styles.workspaceAgentEmpty}><UserRound size={20} /><div><strong>{copy.emptyTitle}</strong><small>{copy.emptyHint}</small></div><button type="button" onClick={openWizard}>{copy.firstConnection}</button></div> : activeMemberships.map((membership) => {
           const agent = agentsById.get(membership.agentId);
@@ -1988,21 +2027,49 @@ export function WorkspaceAgentsPanel({
               role: accessProfileLabel(membership.accessProfile, locale),
               scope,
             })}</small><small>{formatCopy(copy.keyPermissionSummary, {
-              keys: agent.credentials.filter(activeCredential).length,
+              keys: agent.credentials.filter((credential) => activeCredential(credential)
+                && credential.bindings.some((binding) => binding.status === "active"
+                  && binding.grantId === membership.membershipId
+                  && binding.workspaceId === workspace.id)).length,
               permissions: membership.effectivePermissions.length,
             })}</small></div>
-            <button type="button" className={styles.connectionPermissionsButton} onClick={() => openEditor(membership)}><Settings2 size={14} /> {copy.permissionSettings}</button>
+            <div className={styles.agentCardActions}>
+            <button type="button" className={styles.connectionPermissionsButton} onClick={() => { setSetupAgent(agent); setSetupCredentialId(""); }}><Bot size={14} /> {locale === "ko" ? "연결 안내" : locale === "ja" ? "接続ガイド" : "Setup guide"}</button>
+            <button type="button" className={styles.connectionPermissionsButton} onClick={() => openEditor(membership)}><Settings2 size={14} /> {copy.permissionSettings}</button></div>
           </article>;
         })}
       </div>
       {error && <div className={styles.inlineError} role="alert">{error}</div>}
     </section>
 
+    {setupAgent && <div className={styles.modalBackdrop} role="presentation">
+      <ModalDialog open onClose={() => setSetupAgent(null)} className={styles.connectionWizardModal} aria-label={setupAgent.displayName}>
+        <header className={styles.connectionWizardHeader}><div className={styles.connectionEditIcon}><Bot size={20} /></div><div><p>{workspace.name}</p><h2>{setupAgent.displayName}</h2></div><button type="button" aria-label={copy.closeWizard} onClick={() => setSetupAgent(null)}><X size={18} /></button></header>
+        <div className={styles.connectionWizardBody}>{(() => {
+          const keys = setupAgent.credentials.filter(key => activeCredential(key) && key.bindings.some(binding => binding.status === "active" && binding.workspaceId === workspace.id));
+          const key = keys.find(item => item.id === setupCredentialId) ?? keys[0];
+          return key ? <>
+            {keys.length > 1 && <label className={styles.connectionWizardField}><span>{copy.stepCredential}</span><select value={key.id} onChange={event => setSetupCredentialId(event.target.value)}>{keys.map(item => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label>}
+            <p className={styles.connectionWizardNotice}>{key.lastUsedAt ? `${locale === "ko" ? "키 최근 사용" : locale === "ja" ? "キーの最終利用" : "Key last used"}: ${credentialDate(key.lastUsedAt, locale)}` : (locale === "ko" ? "아직 이 키의 사용 기록이 없습니다." : locale === "ja" ? "このキーの利用記録はまだありません。" : "This key has not been used yet.")}</p>
+            <AgentSetupGuide key={key.id} agentName={setupAgent.displayName} credentialName={key.name} token={null} locale={locale} mcpUrl={scopedMcpUrl} workspaceName={workspace.name} />
+          </> : <p className={styles.connectionWizardNotice}>{copy.accessSavedNoKey} <Link href={buildSettingsHref({ area: "agents", workspaceId: workspace.id, documentId: currentDocumentId, returnTo: connectionReturnHref, anchor: "agent-credentials" })} onClick={() => setSetupAgent(null)}>{copy.stepCredential} →</Link></p>;
+        })()}</div>
+      </ModalDialog>
+    </div>}
+
     {wizardOpen && <div className={styles.modalBackdrop} role="presentation">
-      <section className={styles.connectionWizardModal} role="dialog" aria-modal="true" aria-labelledby="connection-wizard-title">
+      <ModalDialog open hideOnInteractOutside={false}
+        // The nested picker handles the first Escape before this dialog closes.
+        hideOnEscape={() => !pending && wizardStep !== "complete"
+          && !wizardScopeRef.current?.querySelector('[aria-haspopup="tree"][aria-expanded="true"]')}
+        onClose={(event) => {
+          if (pending || wizardStep === "complete") event.preventDefault();
+          else closeWizard();
+        }}
+        className={styles.connectionWizardModal} aria-labelledby="connection-wizard-title">
         <header className={styles.connectionWizardHeader}>
           <div className={styles.connectionEditIcon}>{wizardStep === "complete" ? <Check size={20} /> : <KeyRound size={20} />}</div>
-          <div><p>WORKSPACE AGENT CONNECTION</p><h2 id="connection-wizard-title">{wizardStep === "complete" ? copy.ready : formatCopy(copy.connectTitle, { workspace: workspace.name })}</h2></div>
+          <div><p>WORKSPACE AGENT CONNECTION</p><h2 id="connection-wizard-title" ref={wizardStep === "complete" ? (element) => { wizardStepFocusRef.current = element; } : undefined} tabIndex={wizardStep === "complete" ? -1 : undefined}>{wizardStep === "complete" ? copy.ready : formatCopy(copy.connectTitle, { workspace: workspace.name })}</h2></div>
           {wizardStep !== "complete" && <button type="button" aria-label={copy.closeWizard} onClick={closeWizard} disabled={pending}><X size={18} /></button>}
         </header>
 
@@ -2016,12 +2083,12 @@ export function WorkspaceAgentsPanel({
             const state = wizardStep === "complete" || order.indexOf(wizardStep) > order.indexOf(step)
               ? "done"
               : wizardStep === step ? "active" : "upcoming";
-            return <li data-state={state} key={step}><span>{state === "done" ? <Check size={13} /> : number}</span><strong>{label}</strong></li>;
+            return <li data-state={state} aria-current={state === "active" ? "step" : undefined} key={step}><span>{state === "done" ? <Check size={13} /> : number}</span><strong>{label}</strong></li>;
           })}
         </ol>
 
         {wizardStep === "identity" && <div className={styles.connectionWizardBody}>
-          <div className={styles.connectionWizardIntro}><strong>{copy.chooseAgent}</strong><small>{copy.chooseAgentHint}</small></div>
+          <div className={styles.connectionWizardIntro}><strong role="heading" aria-level={3} tabIndex={-1} ref={wizardStepFocusRef}>{copy.chooseAgent}</strong><small>{copy.chooseAgentHint}</small></div>
           <div className={styles.connectionWizardTabs} role="tablist" aria-label={copy.identityMode}>
             <button type="button" role="tab" aria-selected={wizardIdentityMode === "existing"} onClick={() => setWizardIdentityMode("existing")}>{copy.existingAgent}</button>
             <button type="button" role="tab" aria-selected={wizardIdentityMode === "new"} onClick={() => setWizardIdentityMode("new")}>{copy.registerNewAgent}</button>
@@ -2040,7 +2107,7 @@ export function WorkspaceAgentsPanel({
         </div>}
 
         {wizardStep === "access" && <div className={styles.connectionWizardBody}>
-          <div className={styles.connectionWizardIntro}><strong>{copy.chooseWork}</strong><small>{copy.chooseWorkHint}</small></div>
+          <div className={styles.connectionWizardIntro}><strong role="heading" aria-level={3} tabIndex={-1} ref={wizardStepFocusRef}>{copy.chooseWork}</strong><small>{copy.chooseWorkHint}</small></div>
           <div className={styles.connectionRoleGrid}>
             {([
               ["reader", copy.reader, copy.readerDescription],
@@ -2052,11 +2119,11 @@ export function WorkspaceAgentsPanel({
               {wizardProfile === profile && <Check size={16} />}
             </label>)}
           </div>
-          <div className={styles.connectionWizardScope}><span>{copy.documentScope}</span><DocumentScopePicker ariaLabel={copy.newAgentScope} documents={documents} value={wizardRoot} onChange={setWizardRoot} workspaceName={workspace.name} /><small>{copy.scopeHint}</small></div>
+          <div ref={wizardScopeRef} className={styles.connectionWizardScope}><span>{copy.documentScope}</span><DocumentScopePicker ariaLabel={copy.newAgentScope} documents={documents} value={wizardRoot} onChange={setWizardRoot} workspaceName={workspace.name} /><small>{copy.scopeHint}</small></div>
         </div>}
 
         {wizardStep === "credential" && <div className={styles.connectionWizardBody}>
-          <div className={styles.connectionWizardIntro}><strong>{copy.chooseKey}</strong><small>{copy.chooseKeyHint}</small></div>
+          <div className={styles.connectionWizardIntro}><strong role="heading" aria-level={3} tabIndex={-1} ref={wizardStepFocusRef}>{copy.chooseKey}</strong><small>{copy.chooseKeyHint}</small></div>
           {wizardIdentityMode === "existing" && wizardCredentials.length > 0 && <div className={styles.connectionCredentialList}>
             {wizardCredentials.map((credential) => {
               return <label data-selected={wizardCredentialMode === "existing" && wizardCredentialId === credential.id} key={credential.id}>
@@ -2093,13 +2160,12 @@ export function WorkspaceAgentsPanel({
             <div><span>{copy.role}</span><strong>{accessProfileLabel(wizardResult.membership.accessProfile, locale)}</strong></div>
             <div><span>{copy.scope}</span><strong>{wizardResult.membership.rootDocumentTitle ? formatCopy(copy.subtree, { title: wizardResult.membership.rootDocumentTitle }) : copy.allDocuments}</strong></div>
           </div>
-          {wizardResult.credential ? <><div className={styles.agentHandoffCard}>
-            <div className={styles.agentHandoffHeading}><span><Bot size={18} /></span><div><strong>{copy.handoffTitle}</strong><small>{copy.handoffHint}</small></div></div>
-            <button type="button" onClick={() => void copyWizardValue(wizardHandoff, "handoff")}><Copy size={15} /> {wizardCopied === "handoff" ? copy.handoffCopied : wizardResult.token ? copy.copyHandoff : copy.copyHandoffWithoutKey}</button>
-            {wizardResult.token
-              ? <em>{copy.secretWarning}</em>
-              : <em>{formatCopy(copy.existingSecretWarning, { name: wizardResult.credential.name })}</em>}
-          </div>
+          {wizardResult.credential ? <><AgentSetupGuide
+            agentName={wizardResult.agent.displayName} credentialName={wizardResult.credential.name}
+            documentScope={wizardResult.membership.rootDocumentTitle ? formatCopy(copy.subtree, { title: wizardResult.membership.rootDocumentTitle }) : copy.allDocuments}
+            locale={locale} mcpUrl={scopedMcpUrl} role={accessProfileLabel(wizardResult.membership.accessProfile, locale)}
+            token={wizardResult.token} workspaceName={workspace.name}
+          />
           {wizardResult.token ? <div className={styles.connectionSecretSection}><strong>{copy.keyOnce}</strong><div className={styles.secretBox}><code>{wizardResult.token}</code><button type="button" onClick={() => void copyWizardValue(wizardResult.token!, "token")}><Copy size={14} /> {wizardCopied === "token" ? copy.copied : copy.copyKey}</button></div></div> : <div className={styles.connectionExistingKeyNotice}><KeyRound size={17} /><span><strong>{formatCopy(copy.continueKey, { name: wizardResult.credential.name })}</strong><small>{copy.existingKeyHint}</small></span></div>}
           <details className={styles.connectionAdvancedDetails}>
             <summary>{copy.manualSetup}</summary>
@@ -2112,6 +2178,7 @@ export function WorkspaceAgentsPanel({
               <pre className={styles.connectionCodeBlock}>{openClawSnippet}</pre>
             </div>
           </details></> : <div className={styles.connectionWizardNotice}>{copy.accessSavedNoKey}</div>}
+          {returnTo && <p className={styles.connectionWizardNotice}>{copy.returnHint}</p>}
           <button className={styles.doneButton} type="button" onClick={finishWizard}>{copy.done}</button>
         </div>}
 
@@ -2122,15 +2189,15 @@ export function WorkspaceAgentsPanel({
           {wizardStep === "access" && <button type="button" onClick={advanceToCredential} disabled={pending}>{copy.next} <ArrowRight size={14} /></button>}
           {wizardStep === "credential" && <button type="button" onClick={() => void connectAgent()} disabled={pending || (wizardCredentialMode === "existing" ? !wizardCredentialId : wizardCredentialMode === "new" ? !wizardKeyName.trim() : false)}>{pending ? copy.connecting : copy.connectAgent} <ArrowRight size={14} /></button>}
         </footer>}
-      </section>
+      </ModalDialog>
     </div>}
 
     {editing && <div className={styles.modalBackdrop} role="presentation">
-      <section className={styles.membershipModal} role="dialog" aria-modal="true" aria-labelledby="membership-editor-title">
+      <ModalDialog open hideOnInteractOutside={false} hideOnEscape={() => !pending && !editScopeRef.current?.querySelector('[aria-haspopup="tree"][aria-expanded="true"]')} onClose={(event) => { if (pending) event.preventDefault(); else { setEditing(null); setError(""); } }} className={styles.membershipModal} aria-labelledby="membership-editor-title">
         <div className={styles.connectionEditIcon}><ShieldCheck size={20} /></div><p>WORKSPACE PERMISSIONS</p><h2 id="membership-editor-title">{agentsById.get(editing.agentId)?.displayName} · {workspace.name}</h2><span>{copy.membershipDescription}</span>
         <div className={styles.connectionEditFields}>
           <label><span>{copy.roleBundle}</span><select value={editProfile} onChange={(event) => selectAccessProfile(event.target.value as AgentAccessProfile)}>{AGENT_ACCESS_PROFILES.map((profile) => <option value={profile} key={profile}>{accessProfileLabel(profile, locale)}</option>)}</select></label>
-          <div className={styles.connectionEditField}><span>{copy.documentScope}</span><DocumentScopePicker ariaLabel={copy.agentScope} documents={documents} value={editRoot} onChange={setEditRoot} workspaceName={workspace.name} /></div>
+          <div ref={editScopeRef} className={styles.connectionEditField}><span>{copy.documentScope}</span><DocumentScopePicker ariaLabel={copy.agentScope} documents={documents} value={editRoot} onChange={setEditRoot} workspaceName={workspace.name} /></div>
         </div>
         <details className={styles.permissionDetails}><summary>{copy.fineTune}</summary><div className={styles.permissionMatrix}>{delegablePermissions(locale).map((permission) => {
           const checked = editCapabilities.includes(permission.value);
@@ -2138,7 +2205,7 @@ export function WorkspaceAgentsPanel({
         })}</div><small>{copy.humanBoundary}</small></details>
         {error && <div className={styles.inlineError} role="alert">{error}</div>}
         <footer><button type="button" className={styles.dangerButton} onClick={() => { if (window.confirm(copy.unassignConfirm)) void saveMembership("disabled"); }} disabled={pending}><Trash2 size={14} /> {copy.unassign}</button><span /><button type="button" onClick={() => { setEditing(null); setError(""); }} disabled={pending}>{copy.cancel}</button><button type="button" onClick={() => void saveMembership()} disabled={pending}><Save size={14} /> {pending ? copy.saving : copy.savePermissions}</button></footer>
-      </section>
+      </ModalDialog>
     </div>}
   </>;
 }

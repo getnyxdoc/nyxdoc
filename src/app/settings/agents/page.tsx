@@ -11,8 +11,8 @@ export const dynamic = "force-dynamic";
 export default async function AgentSettingsPage({
   searchParams,
 }: {
-  searchParams: Promise<{ document?: string; workspace?: string }>;
+  searchParams: Promise<{ document?: string; workspace?: string; returnTo?: string; agent?: string; connectAgent?: string; workspaceOnboarding?: string }>;
 }) {
-  const { document, workspace } = await searchParams;
-  return <SettingsPageContent area="agents" documentSelector={document} workspaceSelector={workspace} />;
+  const { document, workspace, returnTo, agent, connectAgent, workspaceOnboarding } = await searchParams;
+  return <SettingsPageContent area="agents" initialConnectAgent={connectAgent === "1"} initialAgentId={agent} initialWorkspaceOnboarding={workspaceOnboarding === "1"} documentSelector={document} workspaceSelector={workspace} connectionReturnHref={returnTo} />;
 }

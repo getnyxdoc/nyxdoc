@@ -6,6 +6,8 @@ import { FormEvent, useState, useSyncExternalStore } from "react";
 import { ArrowRight } from "lucide-react";
 import { authClient } from "@/lib/auth-client";
 import { useI18n } from "@/lib/i18n/client";
+import { AUTH_REQUEST_ERROR } from "./auth-request-error";
+import { buildAuthPageHref, normalizeAuthCallbackURL } from "./auth-navigation";
 import styles from "./auth.module.css";
 
 const subscribeToHydration = () => () => undefined;
@@ -19,35 +21,42 @@ function useHydrated() {
 }
 
 export function SignInForm({ callbackURL = "/app" }: { callbackURL?: string }) {
-  const { t } = useI18n();
+  const { locale, t } = useI18n();
   const router = useRouter();
+  const destination = normalizeAuthCallbackURL(callbackURL);
   const [error, setError] = useState("");
   const hydrated = useHydrated();
   const [pending, setPending] = useState(false);
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    if (pending) return;
     setError("");
     setPending(true);
     const data = new FormData(event.currentTarget);
     const email = String(data.get("email") || "").trim().toLowerCase();
-    const result = await authClient.signIn.email({
-      email,
-      password: String(data.get("password") || ""),
-      callbackURL,
-    });
-    setPending(false);
-    if (result.error) {
-      if (result.error.code === "EMAIL_NOT_VERIFIED") {
-        router.push(`/verify-email?email=${encodeURIComponent(email)}`);
+    try {
+      const result = await authClient.signIn.email({
+        email,
+        password: String(data.get("password") || ""),
+        callbackURL: destination,
+      });
+      if (result.error) {
+        if (result.error.code === "EMAIL_NOT_VERIFIED") {
+          router.push(buildAuthPageHref("/verify-email", { email, callbackURL: destination }));
+          return;
+        }
+        setError(t("auth.invalidCredentials"));
         return;
       }
-      setError(t("auth.invalidCredentials"));
-      return;
+      await fetch("/api/settings/profile", { cache: "no-store" }).catch(() => null);
+      router.push(destination);
+      router.refresh();
+    } catch {
+      setError(AUTH_REQUEST_ERROR[locale]);
+    } finally {
+      setPending(false);
     }
-    await fetch("/api/settings/profile", { cache: "no-store" }).catch(() => null);
-    router.push(callbackURL);
-    router.refresh();
   }
 
   return (
@@ -69,7 +78,7 @@ export function SignInForm({ callbackURL = "/app" }: { callbackURL?: string }) {
           {pending ? t("auth.checking") : t("auth.openWorkspace")} <ArrowRight size={17} />
         </button>
       </form>
-      <p className={styles.footer}>{t("auth.newHere")} <Link href="/sign-up">{t("auth.createAccount")}</Link></p>
+      <p className={styles.footer}>{t("auth.newHere")} <Link href={buildAuthPageHref("/sign-up", { callbackURL: destination })}>{t("auth.createAccount")}</Link></p>
     </>
   );
 }

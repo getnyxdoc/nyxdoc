@@ -30,6 +30,7 @@ import {
 } from "react";
 import { createPortal } from "react-dom";
 import { UserAvatar } from "@/components/profile/user-avatar";
+import { ModalDialog } from "@/components/ui/modal-dialog";
 import type { WorkspaceAgentSummary } from "@/lib/collaboration/types";
 import type { DocumentSummary } from "@/lib/documents/types";
 import type {
@@ -126,6 +127,8 @@ const TASK_COPY = defineUiCopy({
     pastedImage: "Pasted image",
     removeAttachment: "Remove attached image",
     loadFailed: "Could not load Agent To-dos.",
+    loading: "Loading the task…",
+    createdRefreshFailed: "The task was added, but the list could not be refreshed. You do not need to add it again.",
     createFailed: "Could not create the Agent To-do.",
     saveFailed: "Could not save the Agent To-do.",
     todoCount: "{count} Agent To-dos",
@@ -206,6 +209,8 @@ const TASK_COPY = defineUiCopy({
     pastedImage: "붙여넣은 이미지",
     removeAttachment: "첨부 이미지 제거",
     loadFailed: "Agent To-do를 불러오지 못했습니다.",
+    loading: "작업을 불러오는 중…",
+    createdRefreshFailed: "작업은 추가됐지만 목록을 새로 불러오지 못했습니다. 다시 추가할 필요는 없습니다.",
     createFailed: "Agent To-do를 만들지 못했습니다.",
     saveFailed: "Agent To-do를 저장하지 못했습니다.",
     todoCount: "Agent To-do {count}개",
@@ -286,6 +291,8 @@ const TASK_COPY = defineUiCopy({
     pastedImage: "貼り付けた画像",
     removeAttachment: "添付画像を削除",
     loadFailed: "Agent To-doを読み込めませんでした。",
+    loading: "タスクを読み込み中…",
+    createdRefreshFailed: "タスクは追加されましたが、一覧を更新できませんでした。再度追加する必要はありません。",
     createFailed: "Agent To-doを作成できませんでした。",
     saveFailed: "Agent To-doを保存できませんでした。",
     todoCount: "Agent To-do {count}件",
@@ -613,6 +620,10 @@ export function DocumentTasks({
   const [filter, setFilter] = useState<TaskFilter>("todo");
   const [events, setEvents] = useState<DocumentTaskEvent[]>([]);
   const [draft, setDraft] = useState<TaskDraft | null>(null);
+  const [detailsLoading, setDetailsLoading] = useState(false);
+  const detailRequestRef = useRef(0);
+  const [listLoading, setListLoading] = useState(false);
+  const listRequestRef = useRef(0);
   const [createDraft, setCreateDraft] = useState<TaskDraft>({
     title: "",
     description: "",
@@ -631,6 +642,7 @@ export function DocumentTasks({
   const [attachmentUploads, setAttachmentUploads] = useState(0);
   const [error, setError] = useState("");
   const titleInputRef = useRef<HTMLInputElement>(null);
+  const taskBodyRef = useRef<HTMLDivElement>(null);
   const selectedTask = tasks.find((task) => task.id === selectedTaskId) ?? null;
   const openCount = tasks.filter((task) => !["completed", "cancelled"].includes(task.status)).length;
   const attachmentUploadState = useCallback((uploading: boolean) => {
@@ -645,21 +657,65 @@ export function DocumentTasks({
   }, [workspaceId]);
 
   const refreshTasks = useCallback(async () => {
-    const response = await workspaceRequest("/api/tasks?limit=200");
-    const body = await response.json().catch(() => ({})) as ApiBody;
-    if (!response.ok || !body.tasks) throw new Error(body.error || copy.loadFailed);
-    setTasks(body.tasks);
-    return body.tasks;
+    const requestId = ++listRequestRef.current;
+    try {
+      const response = await workspaceRequest("/api/tasks?limit=200");
+      const body = await response.json().catch(() => ({})) as ApiBody;
+      if (requestId !== listRequestRef.current) return null;
+      if (!response.ok || !body.tasks) throw new Error(body.error || copy.loadFailed);
+      setTasks(body.tasks);
+      return body.tasks;
+    } catch (reason) {
+      if (requestId !== listRequestRef.current) return null;
+      throw reason;
+    }
   }, [copy.loadFailed, workspaceRequest]);
 
-  const loadTaskDetails = useCallback(async (taskId: string) => {
-    const response = await workspaceRequest(`/api/tasks/${encodeURIComponent(taskId)}`);
-    const body = await response.json().catch(() => ({})) as ApiBody;
-    if (!response.ok || !body.task) throw new Error(body.error || copy.loadFailed);
-    setTasks((current) => current.map((task) => task.id === body.task!.id ? body.task! : task));
-    setEvents(body.events ?? []);
-    setDraft(taskDraft(body.task));
+  const loadTaskDetails = useCallback(async (taskId: string, preserveDraft = false) => {
+    const requestId = ++detailRequestRef.current;
+    setDetailsLoading(true);
+    if (!preserveDraft) setDraft(null);
+    setEvents([]);
+    try {
+      const response = await workspaceRequest(`/api/tasks/${encodeURIComponent(taskId)}`);
+      const body = await response.json().catch(() => ({})) as ApiBody;
+      if (requestId !== detailRequestRef.current) return;
+      if (!response.ok || !body.task || body.task.id !== taskId) {
+        throw new Error(body.error || copy.loadFailed);
+      }
+      setTasks((current) => current.map((task) => task.id === body.task!.id ? body.task! : task));
+      setEvents(body.events ?? []);
+      setDraft(taskDraft(body.task));
+    } catch (reason) {
+      if (requestId === detailRequestRef.current) {
+        setError(reason instanceof Error ? reason.message : copy.loadFailed);
+      }
+    } finally {
+      if (requestId === detailRequestRef.current) setDetailsLoading(false);
+    }
   }, [copy.loadFailed, workspaceRequest]);
+
+  function invalidateTaskDetails() {
+    detailRequestRef.current += 1;
+    setDetailsLoading(false);
+  }
+
+  function invalidateTaskList() {
+    listRequestRef.current += 1;
+    setListLoading(false);
+  }
+
+  function closePanel() {
+    if (pending || attachmentUploads > 0) return;
+    invalidateTaskDetails();
+    invalidateTaskList();
+    setOpen(false);
+  }
+
+  useEffect(() => () => {
+    detailRequestRef.current += 1;
+    listRequestRef.current += 1;
+  }, []);
 
   useEffect(() => {
     if (!open || !creating) return;
@@ -672,6 +728,8 @@ export function DocumentTasks({
   );
 
   function changeFilter(nextFilter: TaskFilter) {
+    if (pending || attachmentUploads > 0) return;
+    invalidateTaskList();
     setFilter(nextFilter);
     setCreating(false);
     setError("");
@@ -681,25 +739,23 @@ export function DocumentTasks({
       ?? null;
     setSelectedTaskId(nextTask?.id ?? null);
     if (!nextTask) {
+      invalidateTaskDetails();
       setDraft(null);
       setEvents([]);
       return;
     }
-    void loadTaskDetails(nextTask.id).catch((reason: unknown) => {
-      setError(reason instanceof Error ? reason.message : copy.loadFailed);
-    });
+    void loadTaskDetails(nextTask.id);
   }
 
   function openPanel(create = false) {
+    if (pending || attachmentUploads > 0) return;
     setError("");
     setOpen(true);
     setCreating(create);
-    if (!create && selectedTaskId) {
-      void loadTaskDetails(selectedTaskId).catch((reason: unknown) => {
-        setError(reason instanceof Error ? reason.message : copy.loadFailed);
-      });
-    }
+    if (!create) void refreshOpenPanel();
     if (create) {
+      invalidateTaskDetails();
+      invalidateTaskList();
       setCreateDraft((current) => ({
         ...current,
         title: "",
@@ -716,9 +772,32 @@ export function DocumentTasks({
     }
   }
 
+  async function refreshOpenPanel() {
+    invalidateTaskDetails();
+    setDraft(null);
+    setEvents([]);
+    setListLoading(true);
+    const requestId = listRequestRef.current + 1;
+    try {
+      const refreshed = await refreshTasks();
+      if (!refreshed || requestId !== listRequestRef.current) return;
+      const visibleTasks = refreshed.filter((task) => taskMatchesFilter(task, filter));
+      const nextTask = visibleTasks.find((task) => task.id === selectedTaskId) ?? visibleTasks[0];
+      setSelectedTaskId(nextTask?.id ?? null);
+      if (nextTask) await loadTaskDetails(nextTask.id);
+    } catch (reason) {
+      if (requestId !== listRequestRef.current) return;
+      setError(reason instanceof Error ? reason.message : copy.loadFailed);
+      if (selectedTaskId) await loadTaskDetails(selectedTaskId);
+    } finally {
+      if (requestId === listRequestRef.current) setListLoading(false);
+    }
+  }
+
   async function createTask(event: FormEvent) {
     event.preventDefault();
-    if (!createDraft.title.trim() || pending) return;
+    if (!createDraft.title.trim() || pending || attachmentUploads > 0) return;
+    invalidateTaskList();
     setPending(true);
     setError("");
     try {
@@ -737,13 +816,20 @@ export function DocumentTasks({
       });
       const body = await response.json().catch(() => ({})) as ApiBody;
       if (!response.ok || !body.task) throw new Error(body.error || copy.createFailed);
-      const refreshed = await refreshTasks();
+      invalidateTaskDetails();
+      setTasks((current) => [body.task!, ...current.filter((task) => task.id !== body.task!.id)]);
       setSelectedTaskId(body.task.id);
       setFilter("todo");
       setCreating(false);
       setDraft(taskDraft(body.task));
-      if (!refreshed.some((task) => task.id === body.task!.id)) {
-        setTasks((current) => [body.task!, ...current]);
+      setEvents([]);
+      try {
+        const refreshed = await refreshTasks();
+        if (refreshed && !refreshed.some((task) => task.id === body.task!.id)) {
+          setTasks((current) => [body.task!, ...current]);
+        }
+      } catch {
+        setError(copy.createdRefreshFailed);
       }
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : copy.createFailed);
@@ -756,7 +842,8 @@ export function DocumentTasks({
     task: DocumentTask,
     changes: Record<string, unknown>,
   ) {
-    if (pending) return;
+    if (pending || detailsLoading || attachmentUploads > 0) return;
+    invalidateTaskList();
     setPending(true);
     setError("");
     try {
@@ -768,7 +855,7 @@ export function DocumentTasks({
       if (!response.ok || !body.task) throw new Error(body.error || copy.saveFailed);
       setTasks((current) => current.map((item) => item.id === body.task!.id ? body.task! : item));
       setDraft(taskDraft(body.task));
-      await loadTaskDetails(body.task.id);
+      await loadTaskDetails(body.task.id, true);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : copy.saveFailed);
     } finally {
@@ -778,7 +865,7 @@ export function DocumentTasks({
 
   async function saveTask(event: FormEvent) {
     event.preventDefault();
-    if (!selectedTask || !draft) return;
+    if (!selectedTask || !draft || detailsLoading) return;
     await patchTask(selectedTask, {
       title: draft.title,
       description: draft.description,
@@ -821,12 +908,19 @@ export function DocumentTasks({
 
       {open && typeof document !== "undefined" && createPortal((
         <div className={styles.modalBackdrop} role="presentation" onMouseDown={(event) => {
-          if (event.target === event.currentTarget && !pending) setOpen(false);
+          if (event.target === event.currentTarget) closePanel();
         }}>
-          <section
+          <ModalDialog
+            open
+            hideOnInteractOutside={false}
+            hideOnEscape={() => !pending && attachmentUploads === 0
+              && !taskBodyRef.current?.querySelector('[aria-haspopup="tree"][aria-expanded="true"]')}
+            onClose={(event) => {
+              if (pending || attachmentUploads > 0) event.preventDefault();
+              else closePanel();
+            }}
+            initialFocus={creating ? titleInputRef : undefined}
             className={styles.taskDialog}
-            role="dialog"
-            aria-modal="true"
             aria-label="Agent To-do"
           >
             <header>
@@ -837,12 +931,12 @@ export function DocumentTasks({
                   <p>{copy.dialogDescription}</p>
                 </div>
               </div>
-              <button type="button" onClick={() => setOpen(false)} disabled={pending} aria-label={copy.close}>
+              <button type="button" onClick={closePanel} disabled={pending || attachmentUploads > 0} aria-label={copy.close}>
                 <X size={19} />
               </button>
             </header>
 
-            <div className={styles.taskBody}>
+            <div className={styles.taskBody} ref={taskBodyRef}>
               <aside>
                 <div className={styles.taskFilters}>
                   {([
@@ -856,6 +950,7 @@ export function DocumentTasks({
                       type="button"
                       key={value}
                       className={filter === value ? styles.taskFilterActive : ""}
+                      disabled={pending || attachmentUploads > 0}
                       onClick={() => changeFilter(value)}
                     >
                       {label}
@@ -863,7 +958,7 @@ export function DocumentTasks({
                   ))}
                 </div>
                 {canCreate && (
-                  <button type="button" className={styles.taskCreateButton} onClick={() => setCreating(true)}>
+                  <button type="button" className={styles.taskCreateButton} disabled={pending || attachmentUploads > 0} onClick={() => { invalidateTaskDetails(); invalidateTaskList(); setCreating(true); setError(""); }}>
                     <Plus size={15} /> {copy.newTodo}
                   </button>
                 )}
@@ -875,13 +970,13 @@ export function DocumentTasks({
                         type="button"
                         key={task.id}
                         className={!creating && selectedTaskId === task.id ? styles.taskListActive : ""}
+                        disabled={pending || attachmentUploads > 0}
                         onClick={() => {
+                          invalidateTaskList();
                           setCreating(false);
                           setSelectedTaskId(task.id);
                           setError("");
-                          void loadTaskDetails(task.id).catch((reason: unknown) => {
-                            setError(reason instanceof Error ? reason.message : copy.loadFailed);
-                          });
+                          void loadTaskDetails(task.id);
                         }}
                       >
                         <span
@@ -1027,7 +1122,7 @@ export function DocumentTasks({
                       onUploadStateChange={attachmentUploadState}
                     />
                     <div className={styles.taskFormActions}>
-                      <button type="button" onClick={() => setCreating(false)} disabled={pending}>{copy.cancel}</button>
+                      <button type="button" onClick={() => { setCreating(false); if (selectedTaskId) void loadTaskDetails(selectedTaskId); }} disabled={pending || attachmentUploads > 0}>{copy.cancel}</button>
                       <button
                         type="submit"
                         disabled={!createDraft.title.trim() || pending || attachmentUploads > 0}
@@ -1272,7 +1367,7 @@ export function DocumentTasks({
                           <button
                             type="button"
                             onClick={() => void patchTask(selectedTask, { status: "completed" })}
-                            disabled={pending}
+                            disabled={pending || detailsLoading || attachmentUploads > 0}
                           >
                             <Check size={15} /> {copy.markReviewed}
                           </button>
@@ -1281,14 +1376,14 @@ export function DocumentTasks({
                           <button
                             type="button"
                             onClick={() => void patchTask(selectedTask, { status: "ready" })}
-                            disabled={pending}
+                            disabled={pending || detailsLoading || attachmentUploads > 0}
                           >
                             <RotateCcw size={15} /> {copy.reopen}
                           </button>
                         )}
                         <button
                           type="submit"
-                          disabled={!draft.title.trim() || pending || attachmentUploads > 0}
+                          disabled={!draft.title.trim() || pending || detailsLoading || attachmentUploads > 0}
                         >
                           <Save size={15} /> {attachmentUploads > 0
                             ? copy.imageUploading
@@ -1303,14 +1398,14 @@ export function DocumentTasks({
                 ) : (
                   <div className={styles.taskWelcome}>
                     <ListTodo size={34} />
-                    <h3>{copy.chooseTask}</h3>
+                    <h3 role={detailsLoading || listLoading ? "status" : undefined}>{detailsLoading || listLoading ? copy.loading : copy.chooseTask}</h3>
                     <p>{copy.recordContinuity}</p>
                   </div>
                 )}
                 {error && <div className={styles.taskError} role="status">{error}</div>}
               </main>
             </div>
-          </section>
+          </ModalDialog>
         </div>
       ), document.body)}
     </>

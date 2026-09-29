@@ -115,7 +115,7 @@ export function WorkspaceCreateDialog({
       }
       rememberWorkspaceSelection(body.workspace.id);
       router.replace(
-        `/settings/workspace?workspace=${encodeURIComponent(body.workspace.id)}`
+        `/settings/agents?workspace=${encodeURIComponent(body.workspace.id)}`
         + "&connectAgent=1&workspaceOnboarding=1#workspace-agents",
       );
     } catch (cause) {

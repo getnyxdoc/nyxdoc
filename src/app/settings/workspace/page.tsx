@@ -16,14 +16,18 @@ export default async function WorkspaceSettingsPage({
     document?: string;
     connectAgent?: string;
     workspaceOnboarding?: string;
+    agent?: string;
+    returnTo?: string;
   }>;
 }) {
-  const { connectAgent, document, workspace, workspaceOnboarding } = await searchParams;
+  const { agent, connectAgent, document, returnTo, workspace, workspaceOnboarding } = await searchParams;
   return <SettingsPageContent
     area="workspace"
     documentSelector={document}
     initialConnectAgent={connectAgent === "1"}
     initialWorkspaceOnboarding={workspaceOnboarding === "1"}
+    initialAgentId={agent}
+    connectionReturnHref={returnTo}
     workspaceSelector={workspace}
   />;
 }

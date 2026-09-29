@@ -2,11 +2,13 @@
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useMemo, useState } from "react";
+import { ModalDialog } from "@/components/ui/modal-dialog";
+import { useEffect, useMemo, useState } from "react";
 import { createPortal } from "react-dom";
 import { Check, UserPlus, Users, X } from "lucide-react";
 import { UserAvatar } from "@/components/profile/user-avatar";
 import { useI18n } from "@/lib/i18n/client";
+import { buildAgentConnectionHref, buildAppReturnHref } from "@/lib/settings/navigation";
 import type {
   AssignmentType,
   DocumentAssignment,
@@ -127,10 +129,26 @@ export function DocumentAssignments({
   const [note, setNote] = useState("");
   const [pending, setPending] = useState<string | null>(null);
   const [error, setError] = useState("");
+  useEffect(() => {
+    function restoreAssignmentPanel() {
+      if (window.location.hash === "#document-assignments") setOpen(true);
+    }
+    restoreAssignmentPanel();
+    window.addEventListener("hashchange", restoreAssignmentPanel);
+    return () => window.removeEventListener("hashchange", restoreAssignmentPanel);
+  }, []);
   const activeAssignments = useMemo(
     () => assignments.filter((assignment) => assignment.documentId === documentId && assignment.status === "active"),
     [assignments, documentId],
   );
+
+  function closePanel() {
+    if (pending) return;
+    setOpen(false);
+    if (window.location.hash === "#document-assignments") {
+      window.history.replaceState(window.history.state, "", `${window.location.pathname}${window.location.search}`);
+    }
+  }
 
   function workspaceRequest(input: RequestInfo | URL, init: RequestInit = {}) {
     const headers = new Headers(init.headers);
@@ -144,35 +162,45 @@ export function DocumentAssignments({
     if (!agentId || pending) return;
     setPending("create");
     setError("");
-    const response = await workspaceRequest("/api/assignments", {
-      method: "POST",
-      body: JSON.stringify({ documentId, agentId, assignmentType, note: note.trim() || null }),
-    });
-    const body = await readResponse(response);
-    setPending(null);
-    if (!response.ok) {
-      setError(body.error || copy.assignFailed);
-      return;
+    try {
+      const response = await workspaceRequest("/api/assignments", {
+        method: "POST",
+        body: JSON.stringify({ documentId, agentId, assignmentType, note: note.trim() || null }),
+      });
+      const body = await readResponse(response);
+      if (!response.ok) {
+        setError(body.error || copy.assignFailed);
+        return;
+      }
+      setNote("");
+      router.refresh();
+    } catch {
+      setError(copy.assignFailed);
+    } finally {
+      setPending(null);
     }
-    setNote("");
-    router.refresh();
   }
 
   async function changeAssignment(assignmentId: string, status: "completed" | "cancelled") {
     if (pending) return;
     setPending(assignmentId);
     setError("");
-    const response = await workspaceRequest(`/api/assignments/${assignmentId}`, {
-      method: "PATCH",
-      body: JSON.stringify({ status }),
-    });
-    const body = await readResponse(response);
-    setPending(null);
-    if (!response.ok) {
-      setError(body.error || copy.statusFailed);
-      return;
+    try {
+      const response = await workspaceRequest(`/api/assignments/${assignmentId}`, {
+        method: "PATCH",
+        body: JSON.stringify({ status }),
+      });
+      const body = await readResponse(response);
+      if (!response.ok) {
+        setError(body.error || copy.statusFailed);
+        return;
+      }
+      router.refresh();
+    } catch {
+      setError(copy.statusFailed);
+    } finally {
+      setPending(null);
     }
-    router.refresh();
   }
 
   return (
@@ -203,9 +231,11 @@ export function DocumentAssignments({
 
       {open && createPortal((
         <div className={styles.modalBackdrop} role="presentation" onMouseDown={(event) => {
-          if (event.target === event.currentTarget && !pending) setOpen(false);
+          if (event.target === event.currentTarget) closePanel();
         }}>
-          <section className={styles.assignmentDialog} role="dialog" aria-modal="true" aria-labelledby="assignment-title">
+          <ModalDialog open hideOnInteractOutside={false} hideOnEscape={!pending}
+            onClose={(event) => { if (pending) event.preventDefault(); else closePanel(); }}
+            className={styles.assignmentDialog} aria-labelledby="assignment-title">
             <header>
               <div>
                 <span><Users size={18} /></span>
@@ -214,7 +244,7 @@ export function DocumentAssignments({
                   <p>{copy.description}</p>
                 </div>
               </div>
-              <button type="button" onClick={() => setOpen(false)} disabled={Boolean(pending)} aria-label={copy.close}><X size={18} /></button>
+              <button type="button" onClick={closePanel} disabled={Boolean(pending)} aria-label={copy.close}><X size={18} /></button>
             </header>
 
             <div className={styles.assignmentList}>
@@ -265,11 +295,11 @@ export function DocumentAssignments({
             )}
 
             {canManage && agents.length === 0 && (
-              <p className={styles.noAgentsNotice}>{copy.settingsLead} <Link href={`/settings/workspace?workspace=${encodeURIComponent(workspaceId)}#workspace-agents`}>{copy.workspaceSettings}</Link>{copy.settingsTail}</p>
+              <p className={styles.noAgentsNotice}>{copy.settingsLead} <Link href={buildAgentConnectionHref({ workspaceId, documentId, returnTo: `${buildAppReturnHref(workspaceId, documentId)}#document-assignments` })}>{copy.workspaceSettings}</Link>{copy.settingsTail}</p>
             )}
             {error && <div className={styles.assignmentError} role="alert">{error}</div>}
-            <footer><button type="button" onClick={() => setOpen(false)} disabled={Boolean(pending)}>{copy.close}</button></footer>
-          </section>
+            <footer><button type="button" onClick={closePanel} disabled={Boolean(pending)}>{copy.close}</button></footer>
+          </ModalDialog>
         </div>
       ), document.body)}
     </>

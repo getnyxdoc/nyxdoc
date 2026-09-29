@@ -534,6 +534,22 @@ test("shows only the Notion-friendly shortcuts Nyxdoc actually supports", async 
   await expect(dialog).toBeHidden();
 });
 
+test("keeps shortcut-help keyboard focus inside the dialog and returns it on Escape", async ({ page }) => {
+  const trigger = page.getByRole("button", { name: "키보드 단축키", exact: true });
+  await trigger.focus();
+  await page.keyboard.press("Enter");
+  const dialog = page.getByRole("dialog", { name: "키보드 단축키", exact: true });
+  const close = dialog.getByRole("button", { name: "단축키 도움말 닫기" });
+  await expect(close).toBeFocused();
+  await page.keyboard.press("Tab");
+  await expect(close).toBeFocused();
+  await page.keyboard.press("Shift+Tab");
+  await expect(close).toBeFocused();
+  await page.keyboard.press("Escape");
+  await expect(dialog).toBeHidden();
+  await expect(trigger).toBeFocused();
+});
+
 test("keeps Markdown quote and list shortcuts flat and schema-valid", async ({ page }) => {
   const editor = page.getByRole("textbox", { name: "문서 본문" });
   await focusDocumentEnd(page, editor);

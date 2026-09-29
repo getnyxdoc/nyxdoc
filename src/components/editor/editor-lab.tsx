@@ -17,6 +17,7 @@ import {
 import { createPortal } from "react-dom";
 import Link from "next/link";
 import { useHorizontalDragScroll } from "@/components/use-horizontal-drag-scroll";
+import { ModalDialog } from "@/components/ui/modal-dialog";
 import {
   AlignCenter,
   AlignJustify,
@@ -1613,15 +1614,6 @@ function EditorToolbar({
     setLinkOpen(true);
   }, [linkShortcutRequest, prepareLinkEditor]);
 
-  useEffect(() => {
-    if (!shortcutHelpOpen) return;
-    function closeOnEscape(event: KeyboardEvent) {
-      if (event.key === "Escape") setShortcutHelpOpen(false);
-    }
-    window.addEventListener("keydown", closeOnEscape);
-    return () => window.removeEventListener("keydown", closeOnEscape);
-  }, [shortcutHelpOpen]);
-
   function run(action: () => void) {
     syncEditorSelectionFromDOM(editor);
     action();
@@ -1689,6 +1681,7 @@ function EditorToolbar({
 
   async function applyLink(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    event.stopPropagation();
     if (linkPending) return;
     const editingExistingLink = Boolean(editingLinkNode.current);
     const selectionCollapsed = savedLinkSelection.current
@@ -1833,12 +1826,12 @@ function EditorToolbar({
       title={copy.horizontalToolbarHint}
       {...toolbarDrag}
     >
-      <div className={styles.toolbarGroup}>
+      <div className={styles.toolbarGroup} role="group" aria-label={locale === "ko" ? "편집 기록" : locale === "ja" ? "編集履歴" : "History"}>
         <ToolbarButton label={copy.undo} onAction={() => run(() => editor.tf.undo())}><Undo2 size={17} /></ToolbarButton>
         <ToolbarButton label={copy.redo} onAction={() => run(() => editor.tf.redo())}><Redo2 size={17} /></ToolbarButton>
       </div>
 
-      <div className={styles.toolbarGroup}>
+      <div className={styles.toolbarGroup} role="group" aria-label={locale === "ko" ? "문단" : locale === "ja" ? "段落" : "Text style"}>
         <select
           aria-label={copy.blockType}
           className={styles.blockTypeSelect}
@@ -1871,7 +1864,7 @@ function EditorToolbar({
         </select>
       </div>
 
-      <div className={styles.toolbarGroup}>
+      <div className={styles.toolbarGroup} role="group" aria-label={locale === "ko" ? "글자" : locale === "ja" ? "文字" : "Text formatting"}>
         <ToolbarButton active={marks.bold === true} label={copy.bold} onAction={() => run(() => editor.tf.toggleMark(KEYS.bold))}><Bold size={17} /></ToolbarButton>
         <ToolbarButton active={marks.italic === true} label={copy.italic} onAction={() => run(() => editor.tf.toggleMark(KEYS.italic))}><Italic size={17} /></ToolbarButton>
         <ToolbarButton active={marks.underline === true} label={copy.underline} onAction={() => run(() => editor.tf.toggleMark(KEYS.underline))}><Underline size={17} /></ToolbarButton>
@@ -1880,7 +1873,18 @@ function EditorToolbar({
         <div className={styles.linkControl}>
           <ToolbarButton active={Boolean(linkEntry || documentReferenceEntry)} label={copy.linkAddOrEdit} onAction={openLinkEditor}><Link2 size={17} /></ToolbarButton>
           {linkOpen && (
-            <form className={styles.linkForm} aria-label={copy.linkEditor} onSubmit={applyLink}>
+            <form
+              className={styles.linkForm}
+              aria-label={copy.linkEditor}
+              data-editor-link-popup
+              onSubmit={applyLink}
+              onKeyDown={(event) => {
+                if (event.key !== "Escape") return;
+                event.preventDefault();
+                event.stopPropagation();
+                closeLinkEditor();
+              }}
+            >
               <div className={styles.linkKindTabs} role="tablist" aria-label={copy.linkKind}>
                 <button
                   type="button"
@@ -1916,9 +1920,6 @@ function EditorToolbar({
                       setLinkUrl(event.target.value);
                       setLinkError(null);
                     }}
-                    onKeyDown={(event) => {
-                      if (event.key === "Escape") closeLinkEditor();
-                    }}
                   />
                   <input
                     aria-label={copy.displayTitle}
@@ -1938,9 +1939,6 @@ function EditorToolbar({
                       setDocumentSearch(event.target.value);
                       setSelectedDocumentId(null);
                       setLinkError(null);
-                    }}
-                    onKeyDown={(event) => {
-                      if (event.key === "Escape") closeLinkEditor();
                     }}
                   />
                   <div className={styles.internalLinkResults}>
@@ -1972,7 +1970,7 @@ function EditorToolbar({
             </form>
           )}
         </div>
-        <ToolbarButton disabled={!linkEntry && !documentReferenceEntry} label={copy.unlink} onAction={removeLink}><Unlink2 size={17} /></ToolbarButton>
+        {(linkEntry || documentReferenceEntry) && <ToolbarButton disabled={!linkEntry && !documentReferenceEntry} label={copy.unlink} onAction={removeLink}><Unlink2 size={17} /></ToolbarButton>}
         <label className={styles.colorControl} title={copy.textColor}>
           <span>A</span>
           <input
@@ -1999,14 +1997,14 @@ function EditorToolbar({
         </label>
       </div>
 
-      <div className={styles.toolbarGroup}>
+      <div className={styles.toolbarGroup} role="group" aria-label={locale === "ko" ? "정렬" : locale === "ja" ? "配置" : "Alignment"}>
         <ToolbarButton active={["start", "left"].includes(currentAlignment)} label={copy.alignLeft} onAction={() => run(() => setAlign(editor, "left"))}><AlignLeft size={17} /></ToolbarButton>
         <ToolbarButton active={currentAlignment === "center"} label={copy.alignCenter} onAction={() => run(() => setAlign(editor, "center"))}><AlignCenter size={17} /></ToolbarButton>
         <ToolbarButton active={["end", "right"].includes(currentAlignment)} label={copy.alignRight} onAction={() => run(() => setAlign(editor, "right"))}><AlignRight size={17} /></ToolbarButton>
         <ToolbarButton active={currentAlignment === "justify"} label={copy.alignJustify} onAction={() => run(() => setAlign(editor, "justify"))}><AlignJustify size={17} /></ToolbarButton>
       </div>
 
-      <div className={styles.toolbarGroup}>
+      <div className={styles.toolbarGroup} role="group" aria-label={locale === "ko" ? "목록" : locale === "ja" ? "リスト" : "Lists"}>
         <ToolbarButton active={currentListStyle === KEYS.ul} label={copy.bulletList} onAction={() => run(() => toggleNyxdocList(editor, KEYS.ul))}><ListIcon size={17} /></ToolbarButton>
         <ToolbarButton active={currentListStyle === KEYS.ol} label={copy.numberedList} onAction={() => run(() => toggleNyxdocList(editor, KEYS.ol))}><ListOrdered size={17} /></ToolbarButton>
         <ToolbarButton active={currentListStyle === KEYS.listTodo} label={copy.todoList} onAction={() => run(() => toggleNyxdocList(editor, KEYS.listTodo))}><ListChecks size={17} /></ToolbarButton>
@@ -2014,9 +2012,12 @@ function EditorToolbar({
         <ToolbarButton label={copy.indent} onAction={() => run(() => indent(editor))}><IndentIncrease size={17} /></ToolbarButton>
       </div>
 
-      <div className={styles.toolbarGroup}>
+      <div className={styles.toolbarGroup} role="group" aria-label={locale === "ko" ? "삽입" : locale === "ja" ? "挿入" : "Insert"}>
         <ToolbarButton label={copy.insertCodeBlock} onAction={() => run(() => insertEmptyCodeBlock(editor))}><FileCode2 size={17} /></ToolbarButton>
         <ToolbarButton label={copy.insertTable} onAction={() => run(() => insertTable(editor, { colCount: 3, header: true, rowCount: 3 }))}><Table2 size={17} /></ToolbarButton>
+      </div>
+      {inTable && <div className={`${styles.toolbarGroup} ${styles.tableContextGroup}`} role="group" aria-label={locale === "ko" ? "표 편집" : locale === "ja" ? "表の編集" : "Table editing"}>
+        <span className={styles.toolbarGroupLabel}>{locale === "ko" ? "표" : locale === "ja" ? "表" : "Table"}</span>
         <ToolbarButton disabled={!inTable} label={copy.addRowBelow} onAction={() => run(() => insertTableRow(editor))}><BetweenHorizontalEnd size={17} /></ToolbarButton>
         <ToolbarButton destructive disabled={!inTable} label={copy.deleteSelectedRow} onAction={() => run(() => deleteRow(editor))}><PanelTopClose size={17} /></ToolbarButton>
         <ToolbarButton disabled={!inTable} label={copy.addColumnRight} onAction={() => run(() => insertTableColumn(editor))}><BetweenVerticalEnd size={17} /></ToolbarButton>
@@ -2024,9 +2025,9 @@ function EditorToolbar({
         <ToolbarButton disabled={!canMerge} label={copy.mergeSelectedCells} onAction={() => run(() => mergeTableCells(editor))}><Combine size={17} /></ToolbarButton>
         <ToolbarButton disabled={!canSplit} label={copy.splitCell} onAction={() => run(() => splitTableCell(editor))}><Split size={17} /></ToolbarButton>
         <ToolbarButton destructive disabled={!inTable} label={copy.deleteTable} onAction={() => run(() => deleteTable(editor))}><Trash2 size={17} /></ToolbarButton>
-      </div>
+      </div>}
 
-      <div className={styles.toolbarGroup}>
+      <div className={styles.toolbarGroup} role="group" aria-label={locale === "ko" ? "도움말" : locale === "ja" ? "ヘルプ" : "Help"}>
         <ToolbarButton
           active={shortcutHelpOpen}
           label={copy.keyboardShortcuts}
@@ -2044,10 +2045,10 @@ function EditorToolbar({
             if (event.target === event.currentTarget) setShortcutHelpOpen(false);
           }}
         >
-          <section
+          <ModalDialog
+            open
+            onClose={() => setShortcutHelpOpen(false)}
             className={styles.shortcutHelpDialog}
-            role="dialog"
-            aria-modal="true"
             aria-labelledby="nyxdoc-shortcut-help-title"
           >
             <header>
@@ -2076,7 +2077,7 @@ function EditorToolbar({
               ))}
             </div>
             <footer>{copy.shortcutUnsupported}</footer>
-          </section>
+          </ModalDialog>
         </div>,
         document.body,
       )}

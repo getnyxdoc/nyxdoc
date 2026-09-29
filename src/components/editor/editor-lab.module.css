@@ -88,6 +88,9 @@
   border-right: 1px solid var(--line-soft);
 }
 .toolbarGroup:last-child { border-right: 0; }
+.toolbarGroup { padding-right: 10px; gap: 3px; }
+.tableContextGroup { padding: 3px 9px; border: 1px solid #dce7dd; border-radius: 8px; background: #f0f5ee; }
+.toolbarGroupLabel { margin-right: 4px; color: #476151; font-size: 11px; font-weight: 700; }
 .uploadStatus {
   display: flex;
   min-width: max-content;

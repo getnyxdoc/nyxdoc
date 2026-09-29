@@ -9,6 +9,7 @@ import {
 } from "@/lib/site-settings/service";
 import { getActiveOrganizationInvitation } from "@/lib/organizations/service";
 import { getServerI18n } from "@/lib/i18n/server";
+import { buildAuthPageHref, normalizeAuthCallbackURL } from "@/components/auth/auth-navigation";
 
 export async function generateMetadata(): Promise<Metadata> {
   const { t } = await getServerI18n();
@@ -19,9 +20,10 @@ export const dynamic = "force-dynamic";
 export default async function SignUpPage({
   searchParams,
 }: {
-  searchParams: Promise<{ invite?: string }>;
+  searchParams: Promise<{ invite?: string; callbackURL?: string }>;
 }) {
-  const { invite = "" } = await searchParams;
+  const { invite = "", callbackURL } = await searchParams;
+  const destination = normalizeAuthCallbackURL(callbackURL);
   const { t } = await getServerI18n();
   const settings = getSiteSettings(sqlite);
   const setup = initialSetupRequired(sqlite);
@@ -57,9 +59,10 @@ export default async function SignUpPage({
         inviteToken={activeInvite ? invite : ""}
         registrationBlocked={registrationBlocked}
         setup={setup}
+        callbackURL={destination}
         signInHref={activeOrganizationInvite
-          ? `/sign-in?callbackURL=${encodeURIComponent(`/organization-invite?invite=${invite}`)}`
-          : "/sign-in"}
+          ? buildAuthPageHref("/sign-in", { callbackURL: `/organization-invite?invite=${encodeURIComponent(invite)}` })
+          : buildAuthPageHref("/sign-in", { callbackURL: destination })}
       />
     </AuthShell>
   );

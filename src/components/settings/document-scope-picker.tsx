@@ -120,6 +120,7 @@ export function DocumentScopePicker({
       message,
     );
   const rootRef = useRef<HTMLDivElement>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
@@ -136,7 +137,11 @@ export function DocumentScopePicker({
       if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
     };
     const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setOpen(false);
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      event.stopPropagation();
+      setOpen(false);
+      triggerRef.current?.focus();
     };
     document.addEventListener("pointerdown", closeOnOutsideClick);
     document.addEventListener("keydown", closeOnEscape);
@@ -173,6 +178,7 @@ export function DocumentScopePicker({
   return (
     <div className={styles.scopePicker} ref={rootRef}>
       <button
+        ref={triggerRef}
         type="button"
         className={styles.scopePickerButton}
         aria-controls={open ? `${ariaLabel.replaceAll(" ", "-")}-tree` : undefined}

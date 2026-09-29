@@ -5,6 +5,7 @@ import { useState } from "react";
 import { createPortal } from "react-dom";
 import { ChevronRight, FileText, Filter, Plus, Search, Trash2, X } from "lucide-react";
 import { UserAvatar } from "@/components/profile/user-avatar";
+import { ModalDialog } from "@/components/ui/modal-dialog";
 import { useI18n } from "@/lib/i18n/client";
 import { formatCopy } from "@/lib/i18n/copy";
 import type {
@@ -42,6 +43,7 @@ export function SavedViewsPanel({
   const copy = {
     en: {
       runFailed: "Could not run the saved view.",
+      loading: "Loading documents…",
       saveFailed: "Could not save the view.",
       deleteConfirm: "Delete “{name}”? Documents will not be deleted.",
       deleteFailed: "Could not delete the view.",
@@ -96,6 +98,7 @@ export function SavedViewsPanel({
     },
     ko: {
       runFailed: "저장된 보기를 실행하지 못했습니다.",
+      loading: "문서를 불러오는 중…",
       saveFailed: "보기를 저장하지 못했습니다.",
       deleteConfirm: "“{name}” 보기를 삭제할까요? 문서는 삭제되지 않습니다.",
       deleteFailed: "보기를 삭제하지 못했습니다.",
@@ -150,6 +153,7 @@ export function SavedViewsPanel({
     },
     ja: {
       runFailed: "保存ビューを実行できませんでした。",
+      loading: "文書を読み込み中…",
       saveFailed: "ビューを保存できませんでした。",
       deleteConfirm: "「{name}」を削除しますか？文書は削除されません。",
       deleteFailed: "ビューを削除できませんでした。",
@@ -207,7 +211,10 @@ export function SavedViewsPanel({
   const [open, setOpen] = useState(false);
   const [creating, setCreating] = useState(false);
   const [result, setResult] = useState<SavedViewResult | null>(null);
-  const [pending, setPending] = useState<string | null>(null);
+  const [pending, setPending] = useState<{
+    kind: "run" | "create" | "delete";
+    viewId?: string;
+  } | null>(null);
   const [error, setError] = useState("");
   const [name, setName] = useState("");
   const [visibility, setVisibility] = useState<"private" | "workspace">("workspace");
@@ -228,19 +235,31 @@ export function SavedViewsPanel({
     return fetch(input, { ...init, headers });
   }
 
+  async function loadViewResult(viewId: string) {
+    setResult(null);
+    try {
+      const response = await workspaceRequest(`/api/saved-views/${viewId}/run`);
+      const body = await readBody<SavedViewResult>(response);
+      if (!response.ok || !body.view || !Array.isArray(body.documents)) {
+        setError(body.error || copy.runFailed);
+        return;
+      }
+      setResult(body);
+    } catch {
+      setError(copy.runFailed);
+    }
+  }
+
   async function runView(viewId: string) {
     if (pending) return;
-    setPending(viewId);
+    setPending({ kind: "run", viewId });
     setCreating(false);
     setError("");
-    const response = await workspaceRequest(`/api/saved-views/${viewId}/run`);
-    const body = await readBody<SavedViewResult>(response);
-    setPending(null);
-    if (!response.ok) {
-      setError(body.error || copy.runFailed);
-      return;
+    try {
+      await loadViewResult(viewId);
+    } finally {
+      setPending(null);
     }
-    setResult(body);
   }
 
   async function createView(event: React.FormEvent<HTMLFormElement>) {
@@ -259,43 +278,58 @@ export function SavedViewsPanel({
       sort: "updated_desc",
       limit: 100,
     };
-    setPending("create");
+    setPending({ kind: "create" });
     setError("");
-    const response = await workspaceRequest("/api/saved-views", {
-      method: "POST",
-      body: JSON.stringify({ name, visibility, query }),
-    });
-    const body = await readBody<{ view: SavedView }>(response);
-    setPending(null);
-    if (!response.ok) {
-      setError(body.error || copy.saveFailed);
-      return;
+    try {
+      const response = await workspaceRequest("/api/saved-views", {
+        method: "POST",
+        body: JSON.stringify({ name, visibility, query }),
+      });
+      const body = await readBody<{ view: SavedView }>(response);
+      if (!response.ok || !body.view?.id) {
+        setError(body.error || copy.saveFailed);
+        return;
+      }
+      setName("");
+      setCreating(false);
+      setPending({ kind: "run", viewId: body.view.id });
+      router.refresh();
+      await loadViewResult(body.view.id);
+    } catch {
+      setError(copy.saveFailed);
+    } finally {
+      setPending(null);
     }
-    setName("");
-    setCreating(false);
-    router.refresh();
-    await runView(body.view.id);
   }
 
   async function deleteView(view: SavedView) {
     if (pending || !window.confirm(formatCopy(copy.deleteConfirm, { name: view.name }))) return;
-    setPending(view.id);
+    setPending({ kind: "delete", viewId: view.id });
     setError("");
-    const response = await workspaceRequest(`/api/saved-views/${view.id}`, { method: "DELETE" });
-    const body = await readBody<Record<string, never>>(response);
-    setPending(null);
-    if (!response.ok) {
-      setError(body.error || copy.deleteFailed);
-      return;
+    try {
+      const response = await workspaceRequest(`/api/saved-views/${view.id}`, { method: "DELETE" });
+      const body = await readBody<Record<string, never>>(response);
+      if (!response.ok) {
+        setError(body.error || copy.deleteFailed);
+        return;
+      }
+      if (result?.view.id === view.id) setResult(null);
+      router.refresh();
+    } catch {
+      setError(copy.deleteFailed);
+    } finally {
+      setPending(null);
     }
-    if (result?.view.id === view.id) setResult(null);
-    router.refresh();
   }
 
   function navigateToDocument(documentId: string) {
     const query = new URLSearchParams({ workspace: workspaceId, document: documentId });
     setOpen(false);
     router.push(`/app?${query.toString()}`);
+  }
+
+  function closePanel() {
+    if (!pending) setOpen(false);
   }
 
   return (
@@ -311,15 +345,17 @@ export function SavedViewsPanel({
 
       {open && createPortal((
         <div className={styles.modalBackdrop} role="presentation" onMouseDown={(event) => {
-          if (event.target === event.currentTarget && !pending) setOpen(false);
+          if (event.target === event.currentTarget) closePanel();
         }}>
-          <section className={styles.savedViewsDialog} role="dialog" aria-modal="true" aria-labelledby="saved-views-title">
+          <ModalDialog open hideOnInteractOutside={false} hideOnEscape={!pending}
+            onClose={(event) => { if (pending) event.preventDefault(); else closePanel(); }}
+            className={styles.savedViewsDialog} aria-labelledby="saved-views-title">
             <header>
               <div>
                 <span><Filter size={18} /></span>
                 <div><h2 id="saved-views-title">{copy.savedViews}</h2><p>{copy.description}</p></div>
               </div>
-              <button type="button" onClick={() => setOpen(false)} disabled={Boolean(pending)} aria-label={copy.close}><X size={18} /></button>
+              <button type="button" onClick={closePanel} disabled={Boolean(pending)} aria-label={copy.close}><X size={18} /></button>
             </header>
             <div className={styles.savedViewsBody}>
               <aside>
@@ -329,14 +365,14 @@ export function SavedViewsPanel({
                     setCreating(true);
                     setResult(null);
                     setError("");
-                  }} title={copy.newView}><Plus size={15} /></button>}
+                  }} title={copy.newView} disabled={Boolean(pending)}><Plus size={15} /></button>}
                 </div>
                 {views.length === 0 && <p>{copy.noViews}</p>}
                 {views.map((view) => {
                   const canDelete = view.createdBy.type === "human" && view.createdBy.id === userId
                     || (canManageAll && view.visibility === "workspace");
                   return (
-                    <div className={result?.view.id === view.id ? styles.savedViewActive : ""} key={view.id}>
+                    <div className={result?.view.id === view.id || pending?.kind === "run" && pending.viewId === view.id ? styles.savedViewActive : ""} key={view.id}>
                       <button type="button" onClick={() => runView(view.id)} disabled={Boolean(pending)}>
                         <Search size={14} /><span>{view.name}</span><small>{view.visibility === "private" ? copy.private : copy.shared}</small>
                       </button>
@@ -369,8 +405,10 @@ export function SavedViewsPanel({
                       if (event.target.checked) setAssignedAgentId("");
                     }} /> {copy.unassignedOnly}</label>
                     <label>{copy.visibility}<select value={visibility} onChange={(event) => setVisibility(event.target.value as "private" | "workspace")}><option value="workspace">{copy.workspaceShared}</option><option value="private">{copy.private}</option></select></label>
-                    <div className={styles.savedViewFormActions}><button type="button" onClick={() => setCreating(false)}>{copy.cancel}</button><button type="submit" disabled={!name.trim() || Boolean(pending)}>{pending === "create" ? copy.saving : copy.saveView}</button></div>
+                    <div className={styles.savedViewFormActions}><button type="button" onClick={() => setCreating(false)} disabled={Boolean(pending)}>{copy.cancel}</button><button type="submit" disabled={!name.trim() || Boolean(pending)}>{pending?.kind === "create" ? copy.saving : copy.saveView}</button></div>
                   </form>
+                ) : pending?.kind === "run" ? (
+                  <div className={styles.savedViewWelcome} role="status">{copy.loading}</div>
                 ) : result ? (
                   <div className={styles.savedViewResults}>
                     <header><div><h3>{result.view.name}</h3><p>{formatCopy(copy.documentCount, { count: result.total })}</p></div></header>
@@ -389,7 +427,7 @@ export function SavedViewsPanel({
                 {error && <div className={styles.savedViewError} role="alert">{error}</div>}
               </main>
             </div>
-          </section>
+          </ModalDialog>
         </div>
       ), document.body)}
     </>

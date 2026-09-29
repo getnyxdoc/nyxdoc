@@ -4,6 +4,7 @@ import { I18nProvider } from "@/lib/i18n/client";
 import { getRequestLocale, getServerI18n } from "@/lib/i18n/server";
 import { getAuthBaseUrl } from "@/lib/config";
 import "./globals.css";
+import "./refinement.css";
 
 const geistSans = Geist({ variable: "--font-geist-sans", subsets: ["latin"] });
 const geistMono = Geist_Mono({ variable: "--font-geist-mono", subsets: ["latin"] });

@@ -1,6 +1,7 @@
 "use client";
 
 import Image from "next/image";
+import { Popover, PopoverDisclosure, PopoverProvider } from "@ariakit/react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import {
@@ -32,6 +33,7 @@ import {
   FolderTree,
   History,
   ImagePlus,
+  MoreHorizontal,
   PencilLine,
   RotateCcw,
   Save,
@@ -51,7 +53,7 @@ import type {
   NyxdocRichEditorChange,
 } from "@/components/editor/editor-lab";
 import { UserAvatar } from "@/components/profile/user-avatar";
-import { useHorizontalDragScroll } from "@/components/use-horizontal-drag-scroll";
+import { ModalDialog } from "@/components/ui/modal-dialog";
 import { DocumentAssignments } from "@/components/workspace/document-assignments";
 import { DocumentTasks } from "@/components/workspace/document-tasks";
 import { DocumentTree } from "@/components/workspace/document-tree";
@@ -460,6 +462,9 @@ export function WorkspaceShell({ view }: { view: WorkspaceView }) {
     [view.collaboration.roomName],
   );
   const [editorMode, setEditorMode] = useState<"edit" | "create" | null>(null);
+  const editorModalScopeRef = useRef<HTMLDivElement>(null);
+  const editorModalTriggerRef = useRef<HTMLElement>(null);
+  const editorTitleRef = useRef<HTMLInputElement>(null);
   const [editorSessionId, setEditorSessionId] = useState(0);
   const [draftTitle, setDraftTitle] = useState("");
   const [draftParentId, setDraftParentId] = useState<string | null>(null);
@@ -493,10 +498,13 @@ export function WorkspaceShell({ view }: { view: WorkspaceView }) {
   const [restoringRevisionId, setRestoringRevisionId] = useState<string | null>(null);
   const [loadingRevisionId, setLoadingRevisionId] = useState<string | null>(null);
   const [revisionPreview, setRevisionPreview] = useState<DocumentRevisionSnapshot | null>(null);
+  const revisionPreviewTriggerRef = useRef<HTMLElement>(null);
   const [revisionPreviewError, setRevisionPreviewError] = useState("");
   const [historyOpen, setHistoryOpen] = useState(false);
   const [documentDialog, setDocumentDialog] = useState<{ mode: "rename" | "delete"; documentId: string } | null>(null);
+  const documentDialogTriggerRef = useRef<HTMLButtonElement>(null);
   const [renameTitle, setRenameTitle] = useState("");
+  const renameTitleRef = useRef<HTMLInputElement>(null);
   const [documentActionPending, setDocumentActionPending] = useState(false);
   const [documentActionError, setDocumentActionError] = useState("");
   const sidebarWidth = useSyncExternalStore(
@@ -505,6 +513,7 @@ export function WorkspaceShell({ view }: { view: WorkspaceView }) {
     () => DEFAULT_SIDEBAR_WIDTH,
   );
   const [trashOpen, setTrashOpen] = useState(false);
+  const trashTriggerRef = useRef<HTMLButtonElement>(null);
   const [trashPendingId, setTrashPendingId] = useState<string | null>(null);
   const [trashError, setTrashError] = useState("");
   const [workspaceCreateOpen, setWorkspaceCreateOpen] = useState(false);
@@ -513,9 +522,13 @@ export function WorkspaceShell({ view }: { view: WorkspaceView }) {
     workspaceName: string;
   } | null>(null);
   const [workspaceLifecycleConfirmation, setWorkspaceLifecycleConfirmation] = useState("");
+  const workspaceLifecycleTriggerRef = useRef<HTMLElement>(null);
+  const workspaceLifecycleConfirmationRef = useRef<HTMLInputElement>(null);
   const [workspaceLifecyclePending, setWorkspaceLifecyclePending] = useState<string | null>(null);
   const [workspaceLifecycleError, setWorkspaceLifecycleError] = useState("");
   const [shareOpen, setShareOpen] = useState(false);
+  const shareTriggerRef = useRef<HTMLButtonElement>(null);
+  const bugReportTriggerRef = useRef<HTMLButtonElement>(null);
   const [shareLoading, setShareLoading] = useState(false);
   const [sharePending, setSharePending] = useState(false);
   const [shareError, setShareError] = useState("");
@@ -545,7 +558,7 @@ export function WorkspaceShell({ view }: { view: WorkspaceView }) {
   const navigationInitializedKeyRef = useRef<string | null>(null);
   const navigationSaveTailRef = useRef<Promise<void>>(Promise.resolve());
   const recentEditorDiagnosticsRef = useRef(new Map<string, number>());
-  const documentActionsDrag = useHorizontalDragScroll<HTMLDivElement>();
+  const [documentMoreOpen, setDocumentMoreOpen] = useState(false);
   const recordTreeDiagnostic = useCallback((event: {
     action: "expand" | "collapse" | "navigate" | "active_revealed" | "storage_fallback";
   }) => {
@@ -1306,6 +1319,7 @@ export function WorkspaceShell({ view }: { view: WorkspaceView }) {
   }, [saveToastCycle]);
 
   function openCreate(parentDocumentId: string | null = null) {
+    if (!editorMode) editorModalTriggerRef.current = window.document.activeElement as HTMLElement | null;
     const content: NyxdocDocumentV2 = {
       schemaVersion: 2,
       blocks: [{ id: globalThis.crypto.randomUUID(), type: "p", children: [{ text: "" }] }],
@@ -1324,6 +1338,11 @@ export function WorkspaceShell({ view }: { view: WorkspaceView }) {
   function openDocumentDialog(mode: "rename" | "delete", documentId: string) {
     const document = documents.find((item) => item.id === documentId);
     if (!document) return;
+    // The menu item disappears when the dialog opens. Return to its persistent
+    // tree trigger instead of trying to focus the removed item on dismissal.
+    documentDialogTriggerRef.current = window.document.querySelector<HTMLButtonElement>(
+      '[data-document-menu-trigger][aria-expanded="true"]',
+    );
     setRenameTitle(document.title);
     setDocumentActionError("");
     setDocumentDialog({ mode, documentId });
@@ -1350,65 +1369,76 @@ export function WorkspaceShell({ view }: { view: WorkspaceView }) {
 
   async function saveDocument(event: FormEvent) {
     event.preventDefault();
-    if (!editorMode) return;
+    if (!editorMode || pending || !draftContentValid) return;
     setPending(true);
     setError("");
-    const normalizedTitle = draftTitle.trim()
-      || (editorMode === "create" ? copy.untitled : draftTitle);
-    const payload = {
-      title: normalizedTitle,
-      parentDocumentId: draftParentId,
-      content: draftContent,
-      ...(summary.trim() ? { summary: summary.trim() } : {}),
-    };
-    const response = await workspaceRequest(
-      editorMode === "edit" ? `/api/documents/${view.activeDocument.id}` : "/api/documents",
-      {
-        method: editorMode === "edit" ? "PUT" : "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify(
-          editorMode === "edit"
-            ? {
-                ...payload,
-                baseRevision: view.activeDocument.revisionNumber,
-                expectedDraftVersion: collaborativeDraftVersion,
-              }
-            : payload,
-        ),
-      },
-    );
-    const body = await responseBody(response);
-    setPending(false);
-    if (!response.ok) {
-      setError(
-        body.code === "REVISION_CONFLICT" || body.code === "DRAFT_CONFLICT"
-          ? copy.documentConflict
-          : body.error || copy.documentSaveFailed,
+    try {
+      const normalizedTitle = draftTitle.trim()
+        || (editorMode === "create" ? copy.untitled : draftTitle);
+      const payload = {
+        title: normalizedTitle,
+        parentDocumentId: draftParentId,
+        content: draftContent,
+        ...(summary.trim() ? { summary: summary.trim() } : {}),
+      };
+      const response = await workspaceRequest(
+        editorMode === "edit" ? `/api/documents/${view.activeDocument.id}` : "/api/documents",
+        {
+          method: editorMode === "edit" ? "PUT" : "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(
+            editorMode === "edit"
+              ? {
+                  ...payload,
+                  baseRevision: view.activeDocument.revisionNumber,
+                  expectedDraftVersion: collaborativeDraftVersion,
+                }
+              : payload,
+          ),
+        },
       );
-      return;
+      const body = await responseBody(response);
+      if (!response.ok) {
+        setError(
+          body.code === "REVISION_CONFLICT" || body.code === "DRAFT_CONFLICT"
+            ? copy.documentConflict
+            : body.error || copy.documentSaveFailed,
+        );
+        return;
+      }
+      setSaveToastCycle((current) => current + 1);
+      setEditorMode(null);
+      if (editorMode === "create" && body.document?.id) {
+        router.push(workspaceHref(view.workspace.id, body.document.id));
+      }
+      router.refresh();
+    } catch {
+      setError(copy.documentSaveFailed);
+    } finally {
+      setPending(false);
     }
-    setSaveToastCycle((current) => current + 1);
-    setEditorMode(null);
-    if (editorMode === "create" && body.document?.id) {
-      router.push(workspaceHref(view.workspace.id, body.document.id));
-    }
-    router.refresh();
   }
 
   async function openRevisionPreview(revisionId: string) {
     if (loadingRevisionId || restoringRevisionId) return;
+    revisionPreviewTriggerRef.current = window.document.activeElement as HTMLElement | null;
     setLoadingRevisionId(revisionId);
     setRevisionPreviewError("");
-    const response = await workspaceRequest(
-      `/api/documents/${view.activeDocument.id}/revisions/${revisionId}`,
-    );
-    const body = await responseBody(response);
-    setLoadingRevisionId(null);
-    if (!response.ok || !body.revision) {
-      setRevisionPreviewError(body.error || copy.revisionLoadFailed);
-      return;
+    try {
+      const response = await workspaceRequest(
+        `/api/documents/${view.activeDocument.id}/revisions/${revisionId}`,
+      );
+      const body = await responseBody(response);
+      if (!response.ok || !body.revision) {
+        setRevisionPreviewError(body.error || copy.revisionLoadFailed);
+        return;
+      }
+      setRevisionPreview(body.revision);
+    } catch {
+      setRevisionPreviewError(copy.revisionLoadFailed);
+    } finally {
+      setLoadingRevisionId(null);
     }
-    setRevisionPreview(body.revision);
   }
 
   async function restoreRevision(revisionId: string, revisionNumber: number) {
@@ -1416,31 +1446,37 @@ export function WorkspaceShell({ view }: { view: WorkspaceView }) {
     if (!window.confirm(formatCopy(copy.revisionRestoreConfirm, { revision: revisionNumber }))) return;
     setRestoringRevisionId(revisionId);
     setError("");
-    const response = await workspaceRequest(
-      `/api/documents/${view.activeDocument.id}/revisions/${revisionId}/restore`,
-      {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          requestId: `revision-restore-${globalThis.crypto.randomUUID()}`,
-          baseRevision: view.activeDocument.revisionNumber,
-          expectedGeneration: view.collaboration.generation,
-          expectedDraftVersion: collaborativeDraftVersion,
-        }),
-      },
-    );
-    const body = await responseBody(response);
-    setRestoringRevisionId(null);
-    if (!response.ok) {
-      setError(
-        body.code === "REVISION_CONFLICT"
-          ? copy.revisionConflict
-          : body.error || copy.revisionRestoreFailed,
+    setRevisionPreviewError("");
+    try {
+      const response = await workspaceRequest(
+        `/api/documents/${view.activeDocument.id}/revisions/${revisionId}/restore`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            requestId: `revision-restore-${globalThis.crypto.randomUUID()}`,
+            baseRevision: view.activeDocument.revisionNumber,
+            expectedGeneration: view.collaboration.generation,
+            expectedDraftVersion: collaborativeDraftVersion,
+          }),
+        },
       );
-      return;
+      const body = await responseBody(response);
+      if (!response.ok) {
+        setRevisionPreviewError(
+          body.code === "REVISION_CONFLICT"
+            ? copy.revisionConflict
+            : body.error || copy.revisionRestoreFailed,
+        );
+        return;
+      }
+      setRevisionPreview(null);
+      router.refresh();
+    } catch {
+      setRevisionPreviewError(copy.revisionRestoreFailed);
+    } finally {
+      setRestoringRevisionId(null);
     }
-    setRevisionPreview(null);
-    router.refresh();
   }
 
   async function renameDocument(event: FormEvent) {
@@ -1450,42 +1486,46 @@ export function WorkspaceShell({ view }: { view: WorkspaceView }) {
     if (!title || title === dialogDocument.title || documentActionPending) return;
     setDocumentActionPending(true);
     setDocumentActionError("");
-    const currentResponse = await workspaceRequest(`/api/documents/${dialogDocument.id}`, {
-      cache: "no-store",
-    });
-    const currentBody = await responseBody(currentResponse);
-    if (!currentResponse.ok || typeof currentBody.workingDocument?.draftVersion !== "number") {
+    try {
+      const currentResponse = await workspaceRequest(`/api/documents/${dialogDocument.id}`, {
+        cache: "no-store",
+      });
+      const currentBody = await responseBody(currentResponse);
+      if (!currentResponse.ok || typeof currentBody.workingDocument?.draftVersion !== "number") {
+        setDocumentActionError(currentBody.error || copy.renameFailed);
+        return;
+      }
+      const response = await workspaceRequest(`/api/documents/${dialogDocument.id}`, {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          requestId: `document-rename-${globalThis.crypto.randomUUID()}`,
+          baseRevision: dialogDocument.revisionNumber,
+          expectedDraftVersion: currentBody.workingDocument.draftVersion,
+          title,
+          summary: formatCopy(copy.renameSummary, { title }),
+        }),
+      });
+      const body = await responseBody(response);
+      if (!response.ok) {
+        setDocumentActionError(
+          body.code === "REVISION_CONFLICT" || body.code === "DRAFT_CONFLICT"
+            ? copy.revisionConflict
+            : body.error || copy.renameFailed,
+        );
+        return;
+      }
+      setDocumentDialog(null);
+      // router.refresh() refreshes server props, but the navigation tree is kept
+      // in client state while a document is open. Refresh that state explicitly
+      // so a renamed inactive document is visible without navigating away.
+      refreshDocumentList(0);
+      router.refresh();
+    } catch {
+      setDocumentActionError(copy.renameFailed);
+    } finally {
       setDocumentActionPending(false);
-      setDocumentActionError(currentBody.error || copy.renameFailed);
-      return;
     }
-    const response = await workspaceRequest(`/api/documents/${dialogDocument.id}`, {
-      method: "PUT",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        requestId: `document-rename-${globalThis.crypto.randomUUID()}`,
-        baseRevision: dialogDocument.revisionNumber,
-        expectedDraftVersion: currentBody.workingDocument.draftVersion,
-        title,
-        summary: formatCopy(copy.renameSummary, { title }),
-      }),
-    });
-    const body = await responseBody(response);
-    setDocumentActionPending(false);
-    if (!response.ok) {
-      setDocumentActionError(
-        body.code === "REVISION_CONFLICT" || body.code === "DRAFT_CONFLICT"
-          ? copy.revisionConflict
-          : body.error || copy.renameFailed,
-      );
-      return;
-    }
-    setDocumentDialog(null);
-    // router.refresh() refreshes server props, but the navigation tree is kept
-    // in client state while a document is open. Refresh that state explicitly
-    // so a renamed inactive document is visible without navigating away.
-    refreshDocumentList(0);
-    router.refresh();
   }
 
   async function archiveSelectedDocument(event: FormEvent) {
@@ -1493,44 +1533,56 @@ export function WorkspaceShell({ view }: { view: WorkspaceView }) {
     if (!dialogDocument || deletingLastDocument || documentActionPending) return;
     setDocumentActionPending(true);
     setDocumentActionError("");
-    const response = await workspaceRequest(`/api/documents/${dialogDocument.id}`, {
-      method: "DELETE",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ baseRevision: dialogDocument.revisionNumber }),
-    });
-    const body = await responseBody(response);
-    setDocumentActionPending(false);
-    if (!response.ok) {
-      setDocumentActionError(
-        body.code === "REVISION_CONFLICT"
-          ? copy.revisionConflict
-          : body.error || copy.deleteFailed,
-      );
-      return;
+    try {
+      const response = await workspaceRequest(`/api/documents/${dialogDocument.id}`, {
+        method: "DELETE",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ baseRevision: dialogDocument.revisionNumber }),
+      });
+      const body = await responseBody(response);
+      if (!response.ok) {
+        setDocumentActionError(
+          body.code === "REVISION_CONFLICT"
+            ? copy.revisionConflict
+            : body.error || copy.deleteFailed,
+        );
+        return;
+      }
+      setDocumentDialog(null);
+      if (deletingActiveDocument) {
+        router.replace(workspaceHref(view.workspace.id, body.nextDocumentId));
+      }
+      refreshDocumentList(0);
+      router.refresh();
+    } catch {
+      setDocumentActionError(copy.deleteFailed);
+    } finally {
+      setDocumentActionPending(false);
     }
-    setDocumentDialog(null);
-    if (deletingActiveDocument) {
-      router.replace(workspaceHref(view.workspace.id, body.nextDocumentId));
-    }
-    router.refresh();
   }
 
   async function restoreTrashDocument(workspaceId: string, rootDocumentId: string) {
     if (trashPendingId) return;
     setTrashPendingId(`${workspaceId}:${rootDocumentId}`);
     setTrashError("");
-    const response = await workspaceScopedRequest(
-      workspaceId,
-      `/api/trash/${rootDocumentId}/restore`,
-      { method: "POST" },
-    );
-    const body = await responseBody(response);
-    setTrashPendingId(null);
-    if (!response.ok) {
-      setTrashError(body.error || copy.documentRestoreFailed);
-      return;
+    try {
+      const response = await workspaceScopedRequest(
+        workspaceId,
+        `/api/trash/${rootDocumentId}/restore`,
+        { method: "POST" },
+      );
+      const body = await responseBody(response);
+      if (!response.ok) {
+        setTrashError(body.error || copy.documentRestoreFailed);
+        return;
+      }
+      if (workspaceId === view.workspace.id) refreshDocumentList(0);
+      router.refresh();
+    } catch {
+      setTrashError(copy.documentRestoreFailed);
+    } finally {
+      setTrashPendingId(null);
     }
-    router.refresh();
   }
 
   async function purgeTrashDocument(
@@ -1543,18 +1595,23 @@ export function WorkspaceShell({ view }: { view: WorkspaceView }) {
     )) return;
     setTrashPendingId(`${workspaceId}:${rootDocumentId}`);
     setTrashError("");
-    const response = await workspaceScopedRequest(
-      workspaceId,
-      `/api/trash/${rootDocumentId}`,
-      { method: "DELETE" },
-    );
-    const body = await responseBody(response);
-    setTrashPendingId(null);
-    if (!response.ok) {
-      setTrashError(body.error || copy.documentPurgeFailed);
-      return;
+    try {
+      const response = await workspaceScopedRequest(
+        workspaceId,
+        `/api/trash/${rootDocumentId}`,
+        { method: "DELETE" },
+      );
+      const body = await responseBody(response);
+      if (!response.ok) {
+        setTrashError(body.error || copy.documentPurgeFailed);
+        return;
+      }
+      router.refresh();
+    } catch {
+      setTrashError(copy.documentPurgeFailed);
+    } finally {
+      setTrashPendingId(null);
     }
-    router.refresh();
   }
 
   async function emptyWorkspaceTrash(
@@ -1570,20 +1627,26 @@ export function WorkspaceShell({ view }: { view: WorkspaceView }) {
     )) return;
     setTrashPendingId(`${workspaceId}:all`);
     setTrashError("");
-    const response = await workspaceScopedRequest(workspaceId, "/api/trash", { method: "DELETE" });
-    const body = await responseBody(response);
-    setTrashPendingId(null);
-    if (!response.ok) {
-      setTrashError(body.error || copy.emptyTrashFailed);
-      return;
+    try {
+      const response = await workspaceScopedRequest(workspaceId, "/api/trash", { method: "DELETE" });
+      const body = await responseBody(response);
+      if (!response.ok) {
+        setTrashError(body.error || copy.emptyTrashFailed);
+        return;
+      }
+      router.refresh();
+    } catch {
+      setTrashError(copy.emptyTrashFailed);
+    } finally {
+      setTrashPendingId(null);
     }
-    router.refresh();
   }
 
   function openWorkspaceLifecycleAction(
     workspaceId: string,
     workspaceName: string,
   ) {
+    workspaceLifecycleTriggerRef.current = window.document.activeElement as HTMLElement | null;
     setWorkspaceLifecycleAction({ workspaceId, workspaceName });
     setWorkspaceLifecycleConfirmation("");
     setWorkspaceLifecycleError("");
@@ -1596,43 +1659,52 @@ export function WorkspaceShell({ view }: { view: WorkspaceView }) {
     if (workspaceLifecycleConfirmation.trim() !== workspaceName) return;
     setWorkspaceLifecyclePending(`purge:${workspaceId}`);
     setWorkspaceLifecycleError("");
-    const response = await fetch(
-      `/api/workspaces/${encodeURIComponent(workspaceId)}/purge`,
-      {
-        method: "DELETE",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ confirmationName: workspaceLifecycleConfirmation.trim() }),
-      },
-    );
-    const body = (await response.json().catch(() => ({}))) as WorkspaceLifecycleApiBody;
-    if (!response.ok || !body.workspace) {
-      setWorkspaceLifecyclePending(null);
-      setWorkspaceLifecycleError(
-        body.error || copy.workspacePurgeFailed,
+    try {
+      const response = await fetch(
+        `/api/workspaces/${encodeURIComponent(workspaceId)}/purge`,
+        {
+          method: "DELETE",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ confirmationName: workspaceLifecycleConfirmation.trim() }),
+        },
       );
-      return;
+      const body = (await response.json().catch(() => ({}))) as WorkspaceLifecycleApiBody;
+      if (!response.ok || !body.workspace) {
+        setWorkspaceLifecycleError(
+          body.error || copy.workspacePurgeFailed,
+        );
+        return;
+      }
+      setWorkspaceLifecycleAction(null);
+      setWorkspaceLifecycleConfirmation("");
+      router.refresh();
+    } catch {
+      setWorkspaceLifecycleError(copy.workspacePurgeFailed);
+    } finally {
+      setWorkspaceLifecyclePending(null);
     }
-    setWorkspaceLifecyclePending(null);
-    setWorkspaceLifecycleAction(null);
-    setWorkspaceLifecycleConfirmation("");
-    router.refresh();
   }
 
   async function restoreTrashedWorkspace(workspaceId: string) {
     if (workspaceLifecyclePending) return;
     setWorkspaceLifecyclePending(`restore:${workspaceId}`);
     setWorkspaceLifecycleError("");
-    const response = await fetch(`/api/workspaces/${encodeURIComponent(workspaceId)}/restore`, {
-      method: "POST",
-    });
-    const body = (await response.json().catch(() => ({}))) as WorkspaceLifecycleApiBody;
-    if (!response.ok || !body.workspace) {
+    try {
+      const response = await fetch(`/api/workspaces/${encodeURIComponent(workspaceId)}/restore`, {
+        method: "POST",
+      });
+      const body = (await response.json().catch(() => ({}))) as WorkspaceLifecycleApiBody;
+      if (!response.ok || !body.workspace) {
+        setWorkspaceLifecycleError(body.error || copy.workspaceRestoreFailed);
+        return;
+      }
+      rememberWorkspaceSelection(workspaceId);
+      window.location.assign(workspaceHref(workspaceId));
+    } catch {
+      setWorkspaceLifecycleError(copy.workspaceRestoreFailed);
+    } finally {
       setWorkspaceLifecyclePending(null);
-      setWorkspaceLifecycleError(body.error || copy.workspaceRestoreFailed);
-      return;
     }
-    rememberWorkspaceSelection(workspaceId);
-    window.location.assign(workspaceHref(workspaceId));
   }
 
   async function openPublicShare() {
@@ -2165,12 +2237,11 @@ export function WorkspaceShell({ view }: { view: WorkspaceView }) {
             {collaborativeTitle.trim() || copy.untitled}
           </span>
         </div>
+        <div className={styles.documentCommandBar}>
         <div
           className={styles.documentActions}
           role="group"
           aria-label={copy.documentMenu}
-          title={copy.horizontalHint}
-          {...documentActionsDrag}
         >
           <RealtimePresence
             key={view.activeDocument.id}
@@ -2194,6 +2265,7 @@ export function WorkspaceShell({ view }: { view: WorkspaceView }) {
             type="button"
             className={`${styles.historyButton} ${historyOpen ? styles.historyButtonActive : ""}`}
             aria-controls="document-history-panel"
+            aria-label={`${copy.history} · ${formatCopy(copy.revision, { revision: view.activeDocument.revisionNumber })}`}
             aria-expanded={historyOpen}
             onClick={() => {
               setRevisionPreviewError("");
@@ -2206,6 +2278,21 @@ export function WorkspaceShell({ view }: { view: WorkspaceView }) {
             <small>{formatCopy(copy.revision, { revision: view.activeDocument.revisionNumber })}</small>
             <ChevronRight size={14} />
           </button>
+              {view.permissions.canShareDocuments && (
+                <button
+                  type="button"
+                  className={styles.documentUtilityButton}
+                  onClick={() => void openPublicShare()}
+                  ref={shareTriggerRef}
+                  title={copy.shareTitle}
+                >
+                  <Share2 size={15} />
+                  <span>{copy.share}</span>
+                </button>
+              )}
+          <PopoverProvider open={documentMoreOpen} setOpen={setDocumentMoreOpen} placement="bottom-end">
+            <PopoverDisclosure ref={bugReportTriggerRef} className={styles.moreDocumentButton} aria-label={locale === "ko" ? "문서 더보기" : locale === "ja" ? "文書のその他の操作" : "More document actions"}><MoreHorizontal size={18} /><span>{locale === "ko" ? "더보기" : locale === "ja" ? "その他" : "More"}</span></PopoverDisclosure>
+            <Popover portal gutter={8} className={styles.documentMoreMenu} aria-label={locale === "ko" ? "문서 추가 작업" : locale === "ja" ? "文書の操作" : "Document actions"}>
               {view.permissions.canExportDocuments && (
                 <a
                   className={styles.documentUtilityButton}
@@ -2218,20 +2305,37 @@ export function WorkspaceShell({ view }: { view: WorkspaceView }) {
                   <span>PDF</span>
                 </a>
               )}
-              {view.permissions.canShareDocuments && (
+              {view.permissions.canCreateDocuments && (
+                <button className={styles.childCreateButton} onClick={() => { setDocumentMoreOpen(false); openCreate(view.activeDocument.id); }} aria-label={copy.createChild} title={copy.createChild}><FilePlus2 size={15} /><span>{copy.childDocument}</span></button>
+              )}
+              {view.permissions.canEditDocuments && collaborativeDirty && (
+                <button
+                  type="button"
+                  className={styles.discardDraftButton}
+                  aria-label={discardPending ? copy.discarding : copy.discardDraft}
+                  disabled={discardPending || commitPending}
+                  onClick={() => { setDocumentMoreOpen(false); void discardSharedDraft(); }}
+                >
+                  <RotateCcw size={14} />
+                  <span>{discardPending ? copy.discarding : copy.discardDraft}</span>
+                </button>
+              )}
+              {bugReports.enabled && (
                 <button
                   type="button"
                   className={styles.documentUtilityButton}
-                  onClick={() => void openPublicShare()}
-                  title={copy.shareTitle}
+                  onClick={() => { setDocumentMoreOpen(false); openBugReport(); }}
+
+                  title={copy.reportBugDescription}
                 >
-                  <Share2 size={15} />
-                  <span>{copy.share}</span>
+                  <Bug size={15} />
+                  <span>{copy.reportBug}</span>
                 </button>
               )}
-              {view.permissions.canCreateDocuments && (
-                <button className={styles.childCreateButton} onClick={() => openCreate(view.activeDocument.id)} aria-label={copy.createChild} title={copy.createChild}><FilePlus2 size={15} /><span>{copy.childDocument}</span></button>
-              )}
+            </Popover>
+          </PopoverProvider>
+        </div>
+        <div className={styles.documentSaveControls}>
               {view.permissions.canEditDocuments && (
                 <span
                   className={`${styles.collaborationState} ${!collaborationOnline ? styles.collaborationStateOffline : ""}`}
@@ -2241,20 +2345,10 @@ export function WorkspaceShell({ view }: { view: WorkspaceView }) {
                   <span>{collaborationStatusLabel}</span>
                 </span>
               )}
-              {view.permissions.canEditDocuments && collaborativeDirty && (
-                <button
-                  type="button"
-                  className={styles.discardDraftButton}
-                  disabled={discardPending || commitPending}
-                  onClick={() => void discardSharedDraft()}
-                >
-                  <RotateCcw size={14} />
-                  <span>{discardPending ? copy.discarding : copy.discardDraft}</span>
-                </button>
-              )}
               {view.permissions.canCommitDocuments && (
                 <button
                   type="button"
+                  aria-label={commitPending ? copy.saving : copy.save}
                   className={`${styles.editButton} ${commitTemporarilySyncing ? styles.editButtonSyncing : ""}`}
                   disabled={!canCommitSharedDraft}
                   onClick={() => void commitSharedDraft()}
@@ -2264,17 +2358,7 @@ export function WorkspaceShell({ view }: { view: WorkspaceView }) {
                   <span>{commitPending ? copy.saving : copy.save}</span>
                 </button>
               )}
-              {bugReports.enabled && (
-                <button
-                  type="button"
-                  className={styles.documentUtilityButton}
-                  onClick={openBugReport}
-                  title={copy.reportBugDescription}
-                >
-                  <Bug size={15} />
-                  <span>{copy.reportBug}</span>
-                </button>
-              )}
+        </div>
         </div>
         <Link href={settingsHref} className={styles.account} aria-label={copy.accountSettings}>
           <UserAvatar
@@ -2358,7 +2442,7 @@ export function WorkspaceShell({ view }: { view: WorkspaceView }) {
             onDiagnostic={bugReports.enabled ? recordTreeDiagnostic : undefined}
           />
           {view.permissions.canAccessWorkspaceFeatures && (
-            <button className={styles.trashButton} type="button" onClick={() => {
+            <button ref={trashTriggerRef} className={styles.trashButton} type="button" onClick={() => {
               setTrashError("");
               setTrashOpen(true);
             }}>
@@ -2548,12 +2632,18 @@ export function WorkspaceShell({ view }: { view: WorkspaceView }) {
             }
           }}
         >
-          <form
+          <ModalDialog
+            open
+            hideOnInteractOutside={false}
+            hideOnEscape={bugReportDialog.status !== "submitting"}
+            finalFocus={bugReportTriggerRef}
+            onClose={(event) => {
+              if (bugReportDialog.status === "submitting") event.preventDefault();
+              else closeBugReport();
+            }}
             className={styles.bugReportDialog}
-            role="dialog"
-            aria-modal="true"
             aria-labelledby="bug-report-title"
-            onSubmit={submitBugReport}
+            render={<form onSubmit={submitBugReport} />}
           >
             <header>
               <span><Bug size={19} /></span>
@@ -2717,7 +2807,7 @@ export function WorkspaceShell({ view }: { view: WorkspaceView }) {
                 </button>
               )}
             </footer>
-          </form>
+          </ModalDialog>
         </div>
       )}
 
@@ -2729,10 +2819,16 @@ export function WorkspaceShell({ view }: { view: WorkspaceView }) {
             if (event.target === event.currentTarget && !sharePending) setShareOpen(false);
           }}
         >
-          <section
+          <ModalDialog
+            open
+            hideOnInteractOutside={false}
+            hideOnEscape={!sharePending}
+            finalFocus={shareTriggerRef}
+            onClose={(event) => {
+              if (sharePending) event.preventDefault();
+              else setShareOpen(false);
+            }}
             className={styles.shareDialog}
-            role="dialog"
-            aria-modal="true"
             aria-labelledby="document-share-title"
           >
             <header>
@@ -2922,15 +3018,27 @@ export function WorkspaceShell({ view }: { view: WorkspaceView }) {
               </>
             )}
             {shareError && <div className={styles.modalError} role="alert">{shareError}</div>}
-          </section>
+          </ModalDialog>
         </div>
       )}
 
       {editorMode && (
-        <div className={`${styles.modalBackdrop} ${styles.editorBackdrop}`} role="presentation" onMouseDown={(event) => {
+        <div ref={editorModalScopeRef} className={`${styles.modalBackdrop} ${styles.editorBackdrop}`} role="presentation" onMouseDown={(event) => {
           if (event.target === event.currentTarget && !pending) setEditorMode(null);
         }}>
-          <section className={styles.editorModal} role="dialog" aria-modal="true" aria-labelledby="editor-title">
+          <ModalDialog
+            open
+            hideOnInteractOutside={false}
+            hideOnEscape={() => !pending && !editorModalScopeRef.current?.querySelector("[data-editor-link-popup]")}
+            initialFocus={editorMode === "create" ? editorTitleRef : undefined}
+            finalFocus={editorModalTriggerRef}
+            onClose={(event) => {
+              if (pending) event.preventDefault();
+              else setEditorMode(null);
+            }}
+            className={styles.editorModal}
+            aria-labelledby="editor-title"
+          >
             <header className={styles.editorTopbar}>
               <div className={styles.editorTopbarStart}>
                 <button type="button" className={styles.editorCloseButton} onClick={() => setEditorMode(null)} disabled={pending} aria-label={copy.returnToDocument}><X size={18} /></button>
@@ -2939,6 +3047,7 @@ export function WorkspaceShell({ view }: { view: WorkspaceView }) {
                   <label className={styles.editorFilenameField}>
                     <span id="editor-title" className={styles.visuallyHidden}>{editorMode === "edit" ? copy.editDocument : copy.createDocument}</span>
                     <input
+                      ref={editorTitleRef}
                       form="nyxdoc-document-editor"
                       aria-label={copy.documentName}
                       value={draftTitle}
@@ -3017,7 +3126,7 @@ export function WorkspaceShell({ view }: { view: WorkspaceView }) {
                 onKeyDown={resizeSidebarWithKeyboard}
                 onPointerDown={startSidebarResize}
               />
-              <form id="nyxdoc-document-editor" onSubmit={saveDocument}>
+              <div className={styles.editorScrollPane}>
                 <div className={styles.editorCanvas}>
                   <NyxdocRichEditor
                     key={editorSessionId}
@@ -3032,6 +3141,7 @@ export function WorkspaceShell({ view }: { view: WorkspaceView }) {
                     }}
                     onCaretAnomaly={bugReports.enabled ? reportAutomaticCaretAnomaly : undefined}
                   />
+                  <form id="nyxdoc-document-editor" onSubmit={saveDocument}>
                   <section className={styles.editorChangeNote}>
                     <div>
                       <History size={17} />
@@ -3048,10 +3158,11 @@ export function WorkspaceShell({ view }: { view: WorkspaceView }) {
                   </section>
                   {error && <div className={styles.modalError}>{error}</div>}
                   <p className={styles.editorClosingNote}>{copy.revisionSafety}</p>
+                  </form>
                 </div>
-              </form>
+              </div>
             </div>
-          </section>
+          </ModalDialog>
         </div>
       )}
 
@@ -3065,10 +3176,16 @@ export function WorkspaceShell({ view }: { view: WorkspaceView }) {
             }
           }}
         >
-          <section
+          <ModalDialog
+            open
+            hideOnInteractOutside={false}
+            hideOnEscape={restoringRevisionId === null}
+            finalFocus={revisionPreviewTriggerRef}
+            onClose={(event) => {
+              if (restoringRevisionId !== null) event.preventDefault();
+              else setRevisionPreview(null);
+            }}
             className={styles.revisionPreviewDialog}
-            role="dialog"
-            aria-modal="true"
             aria-labelledby="revision-preview-title"
           >
             <header className={styles.revisionPreviewHeader}>
@@ -3107,6 +3224,7 @@ export function WorkspaceShell({ view }: { view: WorkspaceView }) {
                 workspaceId={view.workspace.id}
               />
             </article>
+            {revisionPreviewError && <div className={styles.modalError} role="alert">{revisionPreviewError}</div>}
             <footer className={styles.revisionPreviewFooter}>
               <button
                 type="button"
@@ -3128,7 +3246,7 @@ export function WorkspaceShell({ view }: { view: WorkspaceView }) {
                 </button>
               )}
             </footer>
-          </section>
+          </ModalDialog>
         </div>
       )}
 
@@ -3136,12 +3254,19 @@ export function WorkspaceShell({ view }: { view: WorkspaceView }) {
         <div className={styles.modalBackdrop} role="presentation" onMouseDown={(event) => {
           if (event.target === event.currentTarget) closeDocumentDialog();
         }}>
-          <form
+          <ModalDialog
+            open
+            hideOnInteractOutside={false}
+            hideOnEscape={!documentActionPending}
+            initialFocus={documentDialog.mode === "rename" ? renameTitleRef : undefined}
+            finalFocus={documentDialogTriggerRef}
+            onClose={(event) => {
+              if (documentActionPending) event.preventDefault();
+              else closeDocumentDialog();
+            }}
             className={styles.documentDialog}
-            role="dialog"
-            aria-modal="true"
             aria-labelledby="document-dialog-title"
-            onSubmit={documentDialog.mode === "rename" ? renameDocument : archiveSelectedDocument}
+            render={<form onSubmit={documentDialog.mode === "rename" ? renameDocument : archiveSelectedDocument} />}
           >
             <header>
               <span className={documentDialog.mode === "delete" ? styles.documentDialogDangerIcon : ""}>
@@ -3158,6 +3283,7 @@ export function WorkspaceShell({ view }: { view: WorkspaceView }) {
               <label className={styles.renameDocumentField}>
                 <span>{copy.documentName}</span>
                 <input
+                  ref={renameTitleRef}
                   value={renameTitle}
                   onChange={(event) => setRenameTitle(event.target.value)}
                   maxLength={200}
@@ -3202,7 +3328,7 @@ export function WorkspaceShell({ view }: { view: WorkspaceView }) {
                 {documentActionPending ? copy.processing : documentDialog.mode === "rename" ? copy.rename : formatCopy(copy.moveToTrash, { count: archiveCount })}
               </button>
             </footer>
-          </form>
+          </ModalDialog>
         </div>
       )}
 
@@ -3218,7 +3344,18 @@ export function WorkspaceShell({ view }: { view: WorkspaceView }) {
             && !workspaceLifecyclePending
           ) setTrashOpen(false);
         }}>
-          <section className={styles.trashDialog} role="dialog" aria-modal="true" aria-labelledby="trash-title">
+          <ModalDialog
+            open
+            hideOnInteractOutside={false}
+            hideOnEscape={!trashPendingId && !workspaceLifecyclePending && !workspaceLifecycleAction}
+            finalFocus={trashTriggerRef}
+            onClose={(event) => {
+              if (trashPendingId || workspaceLifecyclePending || workspaceLifecycleAction) event.preventDefault();
+              else setTrashOpen(false);
+            }}
+            className={styles.trashDialog}
+            aria-labelledby="trash-title"
+          >
             <header>
               <div>
                 <span><Trash2 size={18} /></span>
@@ -3388,18 +3525,29 @@ export function WorkspaceShell({ view }: { view: WorkspaceView }) {
                 disabled={Boolean(trashPendingId) || Boolean(workspaceLifecyclePending)}
               >{copy.close}</button>
             </footer>
-          </section>
+          </ModalDialog>
         </div>
       )}
 
       {workspaceLifecycleAction && (
         <div className={`${styles.modalBackdrop} ${styles.lifecycleBackdrop}`} role="presentation">
-          <form
+          <ModalDialog
+            open
+            hideOnInteractOutside={false}
+            hideOnEscape={!workspaceLifecyclePending}
+            initialFocus={workspaceLifecycleConfirmationRef}
+            finalFocus={workspaceLifecycleTriggerRef}
+            onClose={(event) => {
+              if (workspaceLifecyclePending) event.preventDefault();
+              else {
+                setWorkspaceLifecycleAction(null);
+                setWorkspaceLifecycleConfirmation("");
+                setWorkspaceLifecycleError("");
+              }
+            }}
             className={styles.workspaceLifecycleDialog}
-            role="dialog"
-            aria-modal="true"
             aria-labelledby="workspace-lifecycle-title"
-            onSubmit={submitWorkspaceLifecycleAction}
+            render={<form onSubmit={submitWorkspaceLifecycleAction} />}
           >
             <span><AlertTriangle size={20} /></span>
             <p>PERMANENT DELETION</p>
@@ -3409,6 +3557,7 @@ export function WorkspaceShell({ view }: { view: WorkspaceView }) {
               <span>{copy.typeWorkspaceName}</span>
               <strong>{workspaceLifecycleAction.workspaceName}</strong>
               <input
+                ref={workspaceLifecycleConfirmationRef}
                 autoFocus
                 autoComplete="off"
                 value={workspaceLifecycleConfirmation}
@@ -3441,7 +3590,7 @@ export function WorkspaceShell({ view }: { view: WorkspaceView }) {
                   : copy.backupAndDelete}
               </button>
             </footer>
-          </form>
+          </ModalDialog>
         </div>
       )}
 

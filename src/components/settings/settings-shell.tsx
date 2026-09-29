@@ -39,6 +39,7 @@ import {
 import { authClient } from "@/lib/auth-client";
 import { uploadMediaFile } from "@/lib/media/client";
 import type { SettingsView } from "@/lib/settings/types";
+import { buildAppReturnHref, buildSettingsHref, normalizeSettingsReturnTo, type SettingsArea } from "@/lib/settings/navigation";
 import type { AdminActionRequest } from "@/lib/admin-requests/types";
 import { rememberWorkspaceSelection } from "@/lib/workspaces/selection";
 import {
@@ -102,6 +103,7 @@ const SETTINGS_COPY = defineUiCopy({
     workspaceTrashFailed: "Could not move the workspace to trash.",
     adminRequestFailed: "Could not process the administration request.",
     backToDocuments: "Back to documents",
+    backToPreviousScreen: "Back to previous screen",
     wholeSite: "Entire site",
     siteOwner: "Site owner",
     siteAdministrator: "Site administrator",
@@ -145,7 +147,7 @@ const SETTINGS_COPY = defineUiCopy({
     site: "Site",
     siteAdministration: "Site administration",
     accountDescription: "Manage your profile and account security.",
-    agentsDescription: "Manage agent identities and connection keys in one place.",
+    agentsDescription: "Connect agents and manage their access and keys in one place.",
     siteDescription: "Manage registration, mail, the public URL, and operational status for this Nyxdoc instance.",
     workspaceDescription: "Assign agents to {workspace} and manage their roles and document scope.",
     myInformation: "My information",
@@ -229,6 +231,7 @@ const SETTINGS_COPY = defineUiCopy({
     workspaceTrashFailed: "워크스페이스를 휴지통으로 옮기지 못했습니다.",
     adminRequestFailed: "관리 요청을 처리하지 못했습니다.",
     backToDocuments: "문서로 돌아가기",
+    backToPreviousScreen: "이전 화면으로 돌아가기",
     wholeSite: "사이트 전체",
     siteOwner: "사이트 소유자",
     siteAdministrator: "사이트 관리자",
@@ -272,7 +275,7 @@ const SETTINGS_COPY = defineUiCopy({
     site: "사이트",
     siteAdministration: "사이트 관리",
     accountDescription: "내 프로필과 계정 보안을 관리합니다.",
-    agentsDescription: "에이전트 신원과 연결 키를 한 곳에서 관리합니다.",
+    agentsDescription: "에이전트를 연결하고, 접근 범위와 연결 키를 한곳에서 관리합니다.",
     siteDescription: "가입, 메일, 공개 주소와 운영 상태를 인스턴스 전체 범위에서 관리합니다.",
     workspaceDescription: "{workspace}에 에이전트를 할당하고 역할과 문서 범위를 관리합니다.",
     myInformation: "내 정보",
@@ -356,6 +359,7 @@ const SETTINGS_COPY = defineUiCopy({
     workspaceTrashFailed: "ワークスペースをゴミ箱へ移動できませんでした。",
     adminRequestFailed: "管理リクエストを処理できませんでした。",
     backToDocuments: "文書に戻る",
+    backToPreviousScreen: "前の画面に戻る",
     wholeSite: "サイト全体",
     siteOwner: "サイト所有者",
     siteAdministrator: "サイト管理者",
@@ -399,7 +403,7 @@ const SETTINGS_COPY = defineUiCopy({
     site: "サイト",
     siteAdministration: "サイト管理",
     accountDescription: "プロフィールとアカウントのセキュリティを管理します。",
-    agentsDescription: "エージェントIDと接続キーを1か所で管理します。",
+    agentsDescription: "エージェントの接続、アクセス範囲、キーをまとめて管理します。",
     siteDescription: "登録、メール、公開URL、運用状態をNyxdocインスタンス全体で管理します。",
     workspaceDescription: "{workspace}にエージェントを割り当て、役割と文書範囲を管理します。",
     myInformation: "自分の情報",
@@ -471,31 +475,24 @@ const SETTINGS_COPY = defineUiCopy({
   },
 });
 
-export type SettingsArea = "account" | "agents" | "organization" | "workspace" | "site";
-
-function appReturnHref(workspaceId: string, documentId?: string) {
-  const query = new URLSearchParams({ workspace: workspaceId });
-  if (documentId) query.set("document", documentId);
-  return `/app?${query.toString()}`;
-}
+export type { SettingsArea } from "@/lib/settings/navigation";
 
 function settingsAreaHref(
   area: SettingsArea,
   workspaceId: string,
   documentId?: string,
+  returnTo?: string,
 ) {
-  const query = new URLSearchParams({ workspace: workspaceId });
-  if (documentId) query.set("document", documentId);
-  return `/settings/${area}?${query.toString()}`;
+  return buildSettingsHref({ area, workspaceId, documentId, returnTo });
 }
 
 function organizationSettingsHref(
   workspaceId: string,
   organizationId?: string,
+  documentId?: string,
+  returnTo?: string,
 ) {
-  const query = new URLSearchParams({ workspace: workspaceId });
-  if (organizationId) query.set("organization", organizationId);
-  return `/settings/organization?${query.toString()}`;
+  return buildSettingsHref({ area: "organization", workspaceId, organizationId, documentId, returnTo });
 }
 
 function shortDate(value: string, locale: AppLocale) {
@@ -535,6 +532,8 @@ export function SettingsShell({
   currentDocumentId,
   initialConnectAgent = false,
   initialWorkspaceOnboarding = false,
+  initialAgentId,
+  connectionReturnHref,
   initialRevealedToken = null,
   view,
 }: {
@@ -542,6 +541,8 @@ export function SettingsShell({
   currentDocumentId?: string;
   initialConnectAgent?: boolean;
   initialWorkspaceOnboarding?: boolean;
+  initialAgentId?: string;
+  connectionReturnHref?: string;
   initialRevealedToken?: string | null;
   view: SettingsView;
 }) {
@@ -615,7 +616,18 @@ export function SettingsShell({
     || avatarFile !== null
     || (avatarRemoved && savedProfile.image !== null);
   const workspaceNameChanged = normalizedWorkspaceName !== savedWorkspaceName;
-  const returnHref = appReturnHref(view.workspace.id, currentDocumentId);
+  const safeConnectionReturnHref = normalizeSettingsReturnTo(connectionReturnHref);
+  const returnHref = safeConnectionReturnHref ?? buildAppReturnHref(view.workspace.id, currentDocumentId);
+  const backLinkLabel = safeConnectionReturnHref?.startsWith("/settings")
+    ? copyText.backToPreviousScreen
+    : copyText.backToDocuments;
+  const agentManagementHref = buildSettingsHref({
+    area,
+    workspaceId: view.workspace.id,
+    documentId: currentDocumentId,
+    organizationId: view.organization?.organization.id,
+    anchor: area === "organization" ? "organization-agents" : "agent-identities",
+  });
   const personalWorkspaceCount = view.workspaces.filter(
     (workspace) => workspace.owner.type === "personal"
       && workspace.owner.id === view.user.id,
@@ -774,28 +786,29 @@ export function SettingsShell({
     ) return;
     setWorkspaceDeletePending(true);
     setWorkspaceDeleteError("");
-    const response = await fetch(
-      `/api/workspaces/${encodeURIComponent(view.workspace.id)}/trash`,
-      {
-        method: "DELETE",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          confirmationName: workspaceDeleteConfirmation.trim(),
-        }),
-      },
-    );
-    const body = (await response.json().catch(() => ({}))) as WorkspaceLifecycleApiBody;
-    if (!response.ok || !body.workspace || !body.nextWorkspaceId) {
-      setWorkspaceDeletePending(false);
-      setWorkspaceDeleteError(
-        body.error || copyText.workspaceTrashFailed,
+    try {
+      const response = await fetch(
+        `/api/workspaces/${encodeURIComponent(view.workspace.id)}/trash`,
+        {
+          method: "DELETE",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            confirmationName: workspaceDeleteConfirmation.trim(),
+          }),
+        },
       );
-      return;
+      const body = (await response.json().catch(() => ({}))) as WorkspaceLifecycleApiBody;
+      if (!response.ok || !body.workspace || !body.nextWorkspaceId) {
+        setWorkspaceDeleteError(body.error || copyText.workspaceTrashFailed);
+        return;
+      }
+      rememberWorkspaceSelection(body.nextWorkspaceId);
+      router.replace(buildSettingsHref({ area: "workspace", workspaceId: body.nextWorkspaceId }));
+    } catch {
+      setWorkspaceDeleteError(copyText.workspaceTrashFailed);
+    } finally {
+      setWorkspaceDeletePending(false);
     }
-    rememberWorkspaceSelection(body.nextWorkspaceId);
-    router.replace(
-      `/settings/workspace?workspace=${encodeURIComponent(body.nextWorkspaceId)}`,
-    );
   }
 
   async function copy(value: string, kind: CopyTarget) {
@@ -812,29 +825,38 @@ export function SettingsShell({
     if (adminPendingId) return;
     setAdminPendingId(adminRequest.id);
     setAdminError("");
-    const response = await workspaceRequest(`/api/admin-requests/${adminRequest.id}`, {
-      method: "PATCH",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ decision, note }),
-    });
-    const body = (await response.json().catch(() => ({}))) as AdminReviewApiBody;
-    setAdminPendingId(null);
-    if (!response.ok || !body.request) {
-      setAdminError(body.error || copyText.adminRequestFailed);
-      const latest = await workspaceRequest("/api/admin-requests");
-      const latestBody = (await latest.json().catch(() => ({}))) as {
-        requests?: AdminActionRequest[];
-      };
-      if (latestBody.requests) setAdminRequests(latestBody.requests);
-      return;
+    try {
+      const response = await workspaceRequest(`/api/admin-requests/${adminRequest.id}`, {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ decision, note }),
+      });
+      const body = (await response.json().catch(() => ({}))) as AdminReviewApiBody;
+      if (!response.ok || !body.request) {
+        setAdminError(body.error || copyText.adminRequestFailed);
+        // A competing review may have changed the request; keep its state current
+        // without allowing a failed reconciliation to hide the original error.
+        try {
+          const latest = await workspaceRequest("/api/admin-requests");
+          const latestBody = (await latest.json().catch(() => ({}))) as {
+            requests?: AdminActionRequest[];
+          };
+          if (latest.ok && latestBody.requests) setAdminRequests(latestBody.requests);
+        } catch { /* The review can still be retried after the network recovers. */ }
+        return;
+      }
+      setAdminReview(null);
+      setAdminReviewNote("");
+      setAdminRequests((current) => current.map((item) => (
+        item.id === body.request!.id ? body.request! : item
+      )));
+      if (body.revealedToken) setRevealedToken(body.revealedToken);
+      router.refresh();
+    } catch {
+      setAdminError(copyText.adminRequestFailed);
+    } finally {
+      setAdminPendingId(null);
     }
-    setAdminReview(null);
-    setAdminReviewNote("");
-    setAdminRequests((current) => current.map((item) => (
-      item.id === body.request!.id ? body.request! : item
-    )));
-    if (body.revealedToken) setRevealedToken(body.revealedToken);
-    router.refresh();
   }
 
   async function signOut() {
@@ -846,7 +868,7 @@ export function SettingsShell({
     <main className={styles.page}>
       <header className={styles.topbar}>
         <Link href={returnHref} className={styles.brand}><span><NyxdocMark size={38} /></span>nyxdoc</Link>
-        <Link href={returnHref} className={styles.backLink}><ArrowLeft size={16} /> {copyText.backToDocuments}</Link>
+        <Link href={returnHref} className={styles.backLink}><ArrowLeft size={16} /> {backLinkLabel}</Link>
       </header>
 
       <div className={styles.layout}>
@@ -884,7 +906,7 @@ export function SettingsShell({
                       setOrganizationCreateOpen(true);
                       return;
                     }
-                    router.push(organizationSettingsHref(view.workspace.id, value));
+                    router.push(organizationSettingsHref(view.workspace.id, value, currentDocumentId, safeConnectionReturnHref));
                   }}
                 >
                   {!view.organization && <option value="">{copyText.organizations}</option>}
@@ -914,7 +936,7 @@ export function SettingsShell({
                       return;
                     }
                     rememberWorkspaceSelection(value);
-                    router.push(settingsAreaHref(area, value));
+                    router.push(settingsAreaHref(area, value, undefined, safeConnectionReturnHref));
                   }}
                 >
                   {workspaceGroups.map(([key, group]) => (
@@ -943,17 +965,18 @@ export function SettingsShell({
           <nav aria-label={copyText.settingsMenu}>
             <span className={styles.navGroupLabel}>{copyText.myAccount}</span>
             <Link
-              href={settingsAreaHref("account", view.workspace.id, currentDocumentId)}
+              href={settingsAreaHref("account", view.workspace.id, currentDocumentId, safeConnectionReturnHref)}
               data-active={area === "account"}
               aria-current={area === "account" ? "page" : undefined}
             ><UserRound size={16} /> {copyText.accountSettings}</Link>
             <span className={styles.navGroupLabel}>{copyText.agents}</span>
             <Link
-              href={settingsAreaHref("agents", view.workspace.id, currentDocumentId)}
+              href={settingsAreaHref("agents", view.workspace.id, currentDocumentId, safeConnectionReturnHref)}
               data-active={area === "agents"}
               aria-current={area === "agents" ? "page" : undefined}
             ><Bot size={16} /> {copyText.agentManagement}</Link>
             {area === "agents" && <>
+              <a className={styles.navSubLink} href="#workspace-agents">{copyText.agentPermissions}</a>
               <a className={styles.navSubLink} href="#agent-identities">{copyText.agentIdentity}</a>
               <a className={styles.navSubLink} href="#agent-credentials">{copyText.connectionKeys}</a>
               <a className={styles.navSubLink} href="#deleted-agents">{copyText.deletedAgents}</a>
@@ -963,6 +986,8 @@ export function SettingsShell({
               href={organizationSettingsHref(
                 view.workspace.id,
                 view.organization?.organization.id ?? view.organizations[0]?.id,
+                currentDocumentId,
+                safeConnectionReturnHref,
               )}
               data-active={area === "organization"}
               aria-current={area === "organization" ? "page" : undefined}
@@ -978,13 +1003,13 @@ export function SettingsShell({
             </>}
             <span className={styles.navGroupLabel}>{copyText.workspace}</span>
             <Link
-              href={settingsAreaHref("workspace", view.workspace.id, currentDocumentId)}
+              href={settingsAreaHref("workspace", view.workspace.id, currentDocumentId, safeConnectionReturnHref)}
               data-active={area === "workspace"}
               aria-current={area === "workspace" ? "page" : undefined}
             ><Building2 size={16} /> {copyText.workspaceSettings}</Link>
             {area === "workspace" && <>
               <a className={styles.navSubLink} href="#workspace-general">{copyText.general}</a>
-              <a className={styles.navSubLink} href="#workspace-agents">{copyText.agentPermissions}</a>
+              <Link className={styles.navSubLink} href={settingsAreaHref("agents", view.workspace.id, currentDocumentId, safeConnectionReturnHref) + "#workspace-agents"}>{copyText.agentPermissions}</Link>
               {(view.permissions.canReviewAdminRequests || view.permissions.canReadAudit) && (
                 <a className={styles.navSubLink} href="#operations">{copyText.operations}</a>
               )}
@@ -993,7 +1018,7 @@ export function SettingsShell({
             {view.isSiteAdministrator && <>
               <span className={styles.navGroupLabel}>{copyText.site}</span>
               <Link
-                href={settingsAreaHref("site", view.workspace.id, currentDocumentId)}
+                href={settingsAreaHref("site", view.workspace.id, currentDocumentId, safeConnectionReturnHref)}
                 data-active={area === "site"}
                 aria-current={area === "site" ? "page" : undefined}
               ><Globe2 size={16} /> {copyText.siteAdministration}</Link>
@@ -1047,6 +1072,8 @@ export function SettingsShell({
               uploadWorkspaceId={view.workspace.id}
               accessibleWorkspaces={view.workspaces}
               currentUserId={view.user.id}
+              currentDocumentId={currentDocumentId}
+              connectionReturnHref={agentManagementHref}
             />
           )}
 
@@ -1066,6 +1093,7 @@ export function SettingsShell({
             <OrganizationDirectory
               trashedOrganizations={view.trashedOrganizations}
               workspaceId={view.workspace.id}
+              currentDocumentId={currentDocumentId}
             />
           )}
 
@@ -1210,19 +1238,18 @@ export function SettingsShell({
             </div>
           </section>}
 
-          {area === "agents" && <AccountAgentsPanel
-            key={view.accountAgents.map((agent) => `${agent.id}:${agent.updatedAt}:${agent.deletedAt ?? ""}:${agent.purgedAt ?? ""}:${agent.credentials.map((credential) => `${credential.id}:${credential.revokedAt ?? ""}:${credential.expiresAt ?? ""}`).join(",")}:${agent.memberships.map((membership) => `${membership.membershipId}:${membership.updatedAt}`).join(",")}`).join("|")}
-            initialAgents={view.accountAgents}
-            mcpUrl={view.mcpUrl}
-            uploadWorkspaceId={view.workspace.id}
-            workspaces={view.workspaces}
-          />}
+          {area === "workspace" && !initialConnectAgent && <section id="workspace-agents" className={styles.settingsCard}>
+            <div className={styles.sectionHeading}><span><Bot size={18} /></span><div><h2>{copyText.agentManagement}</h2><p>{copyText.agentsDescription}</p><Link className={styles.backLink} href={settingsAreaHref("agents", view.workspace.id, currentDocumentId, safeConnectionReturnHref) + "#workspace-agents"}>{copyText.agentManagement} →</Link></div></div>
+          </section>}
 
-          {area === "workspace" && <WorkspaceAgentsPanel
+          {view.permissions.canManageAgents && (area === "agents" || (area === "workspace" && initialConnectAgent)) && <WorkspaceAgentsPanel
             key={`${view.workspace.id}:${view.workspaceAgentMemberships.map((membership) => `${membership.membershipId}:${membership.updatedAt}`).join(",")}`}
+            currentDocumentId={currentDocumentId}
             accountAgents={view.workspaceAssignableAgents}
             documents={view.documents}
             initiallyOpen={initialConnectAgent}
+            initialAgentId={initialAgentId}
+            connectionReturnHref={safeConnectionReturnHref}
             onboardingCompletionHref={initialWorkspaceOnboarding
               ? `/app?workspace=${encodeURIComponent(view.workspace.id)}`
               : undefined}
@@ -1230,6 +1257,18 @@ export function SettingsShell({
             mcpUrl={view.mcpUrl}
             workspace={view.workspace}
           />}
+
+          {area === "agents" && <AccountAgentsPanel
+            key={view.accountAgents.map((agent) => `${agent.id}:${agent.updatedAt}:${agent.deletedAt ?? ""}:${agent.purgedAt ?? ""}:${agent.credentials.map((credential) => `${credential.id}:${credential.revokedAt ?? ""}:${credential.expiresAt ?? ""}`).join(",")}:${agent.memberships.map((membership) => `${membership.membershipId}:${membership.updatedAt}`).join(",")}`).join("|")}
+            initialAgents={view.accountAgents}
+            mcpUrl={view.mcpUrl}
+            uploadWorkspaceId={view.workspace.id}
+            currentDocumentId={currentDocumentId}
+            connectionReturnHref={agentManagementHref}
+            workspaces={view.workspaces}
+          />}
+
+
 
           {area === "workspace" && (view.permissions.canReviewAdminRequests || view.permissions.canReadAudit) && (
             <section className={styles.settingsCard} id="operations">
@@ -1281,6 +1320,7 @@ export function SettingsShell({
                               onClick={() => {
                                 setAdminReview({ request: adminRequest, decision: "reject" });
                                 setAdminReviewNote("");
+                                setAdminError("");
                               }}
                               disabled={Boolean(adminPendingId)}
                             >
@@ -1291,6 +1331,7 @@ export function SettingsShell({
                               onClick={() => {
                                 setAdminReview({ request: adminRequest, decision: "approve" });
                                 setAdminReviewNote("");
+                                setAdminError("");
                               }}
                               disabled={Boolean(adminPendingId)}
                             >
@@ -1401,6 +1442,7 @@ export function SettingsShell({
       {organizationCreateOpen && (
         <OrganizationCreateDialog
           workspaceId={view.workspace.id}
+          currentDocumentId={currentDocumentId}
           onClose={() => setOrganizationCreateOpen(false)}
         />
       )}
@@ -1480,6 +1522,7 @@ export function SettingsShell({
                 placeholder={copyText.reviewNotePlaceholder}
               />
             </label>
+            {adminError && <div className={styles.inlineError} role="alert">{adminError}</div>}
             <footer>
               <button
                 type="button"

@@ -83,6 +83,7 @@ export function DocumentTargetPicker({
       message,
     );
   const rootRef = useRef<HTMLDivElement>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
   const treeId = useId();
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
@@ -100,7 +101,11 @@ export function DocumentTargetPicker({
       if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
     };
     const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setOpen(false);
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      event.stopPropagation();
+      setOpen(false);
+      triggerRef.current?.focus();
     };
     document.addEventListener("pointerdown", closeOnOutsideClick);
     document.addEventListener("keydown", closeOnEscape);
@@ -139,6 +144,7 @@ export function DocumentTargetPicker({
   return (
     <div className={styles.taskDocumentPicker} ref={rootRef}>
       <button
+        ref={triggerRef}
         type="button"
         className={styles.taskDocumentPickerButton}
         aria-controls={open ? treeId : undefined}

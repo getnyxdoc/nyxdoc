@@ -11,8 +11,8 @@ export const dynamic = "force-dynamic";
 export default async function AccountSettingsPage({
   searchParams,
 }: {
-  searchParams: Promise<{ document?: string; workspace?: string }>;
+  searchParams: Promise<{ document?: string; workspace?: string; returnTo?: string }>;
 }) {
-  const { document, workspace } = await searchParams;
-  return <SettingsPageContent area="account" documentSelector={document} workspaceSelector={workspace} />;
+  const { document, workspace, returnTo } = await searchParams;
+  return <SettingsPageContent area="account" documentSelector={document} workspaceSelector={workspace} connectionReturnHref={returnTo} />;
 }

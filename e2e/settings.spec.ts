@@ -101,7 +101,7 @@ test("keeps site-wide administration separate from workspace settings and never 
   await expect(page.getByText(/앱을 재시작해주세요/)).toBeVisible();
 });
 
-test("separates global agent identity from workspace assignments", async ({ page }) => {
+test("consolidates connections and account agents while keeping workspace settings separate", async ({ page }) => {
   await page.goto("/dev/settings-e2e?area=account");
 
   await expect(page.getByRole("heading", { name: "계정 설정", exact: true })).toBeVisible();
@@ -114,9 +114,6 @@ test("separates global agent identity from workspace assignments", async ({ page
   await expect(page.getByRole("heading", { name: "연결 키", exact: true })).toBeVisible();
   await expect(page.getByRole("heading", { name: "에이전트 배정과 권한", exact: true })).toHaveCount(0);
 
-  await page.goto("/dev/settings-e2e");
-
-  await expect(page.getByRole("heading", { name: "워크스페이스 설정", exact: true })).toBeVisible();
   await expect(page.getByRole("heading", { name: "에이전트 접근", exact: true })).toBeVisible();
   await expect(page.getByText("신원과 키는 계정에 한 번만 등록됩니다.")).toBeVisible();
   await expect(page.getByRole("button", { name: "에이전트 연결", exact: true })).toBeVisible();
@@ -323,14 +320,14 @@ test("connects identity, workspace permissions, and a credential in one guided f
   await dialog.getByRole("button", { name: "에이전트 연결", exact: true }).click();
 
   await expect(page.getByRole("dialog", { name: "연결이 준비됐습니다." })).toBeVisible();
-  const handoffButton = page.getByRole("button", { name: "에이전트 연결 안내 전체 복사" });
+  const handoffButton = page.getByRole("button", { name: "연결 안내 복사" });
   await expect(handoffButton).toBeVisible();
-  await expect(page.getByText("사용하는 에이전트의 대화창에 붙여넣으면 연결 정보와 확인 절차를 한 번에 전달합니다.")).toBeVisible();
+  await expect(page.getByText("아래 안내를 복사해 Codex, Claude Code 등 사용 중인 에이전트 대화에 붙여넣으세요.")).toBeVisible();
   await handoffButton.click();
-  await expect(page.getByRole("button", { name: "안내 전체가 복사됐습니다" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "복사됨 · 에이전트 대화에 붙여넣으세요" })).toBeVisible();
   await expect(page.getByText("nyx_live_one_time_test_key", { exact: true })).toBeVisible();
   await page.getByText("직접 설정하기 · MCP 주소와 앱별 예시").click();
-  await expect(page.getByText(/workspace=settings-workspace-e2e/).first()).toBeVisible();
+  await expect(page.locator("details[open] pre").filter({ hasText: /workspace=settings-workspace-e2e/ }).first()).toBeVisible();
   expect(connectionRequest).toEqual({
     agent: { mode: "existing", agentId: "agent-test-unassigned-e2e" },
     accessProfile: "writer",
@@ -615,7 +612,7 @@ test("creates organization-owned workspaces and protects organization trash with
       }),
     });
   });
-  await page.route("**/settings/workspace?workspace=10000000-0000-4000-8000-000000000099**", async (route) => {
+  await page.route("**/settings/agents?workspace=10000000-0000-4000-8000-000000000099**", async (route) => {
     await route.fulfill({
       status: 200,
       contentType: "text/html",
@@ -737,7 +734,7 @@ test("keeps key bindings explicit and saves custom workspace capabilities", asyn
   await expect(workspaceSelect.getByRole("option", { name: "James의 워크스페이스" })).toBeEnabled();
 
   await keyDialog.getByRole("button", { name: "취소" }).click();
-  await page.goto("/dev/settings-e2e");
+  await page.goto("/dev/settings-e2e?area=agents");
 
   await page.getByRole("button", { name: "권한 설정" }).click();
   const permissionDialog = page.getByRole("dialog", { name: "gameroom-main · James의 워크스페이스" });

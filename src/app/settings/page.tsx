@@ -1,15 +1,11 @@
 import { redirect } from "next/navigation";
+import { buildSettingsHref } from "@/lib/settings/navigation";
 
 export default async function SettingsPage({
   searchParams,
 }: {
-  searchParams: Promise<{ document?: string; workspace?: string }>;
+  searchParams: Promise<{ document?: string; workspace?: string; returnTo?: string }>;
 }) {
-  const { document, workspace } = await searchParams;
-  const query = new URLSearchParams();
-  if (workspace) query.set("workspace", workspace);
-  if (document) query.set("document", document);
-  redirect(query.size > 0
-    ? `/settings/account?${query.toString()}`
-    : "/settings/account");
+  const { document, workspace, returnTo } = await searchParams;
+  redirect(buildSettingsHref({ area: "account", workspaceId: workspace, documentId: document, returnTo }));
 }

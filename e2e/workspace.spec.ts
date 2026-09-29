@@ -205,7 +205,7 @@ test("previews an old revision without mutation and loads it only into the share
     expectedGeneration: 1,
     requestId: expect.stringMatching(/^revision-restore-/),
   });
-  await expect(page.getByText("리비전 2", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: /변경 기록.*리비전 2/ })).toBeVisible();
 
   await historyPanel.getByRole("button", { name: "변경 기록 닫기" }).click();
   await expect(historyPanel).toBeHidden();
@@ -286,11 +286,13 @@ test("keeps document context in settings and manages general link access separat
     "href",
     "/settings/account?workspace=workspace-e2e&document=document-e2e",
   );
+  await page.getByRole("button", { name: "문서 더보기", exact: true }).click();
   await expect(page.getByRole("link", { name: "PDF" })).toHaveAttribute(
     "href",
     "/print?workspace=workspace-e2e&document=document-e2e&autoprint=1",
   );
 
+  await page.keyboard.press("Escape");
   await page.getByRole("button", { name: "공유" }).click();
   const dialog = page.getByRole("dialog", { name: /리비전 동작 검증.*공유/ });
   await expect(dialog.getByText("제한됨", { exact: true })).toBeVisible();
@@ -751,6 +753,7 @@ test("records a content-free bug code from the global document menu", async ({ p
   const editor = page.getByRole("textbox", { name: "리비전 동작 검증 공유 초안" });
   await editor.click();
   await page.keyboard.insertText("NEVER_STORE_THIS_SENTINEL");
+  await page.getByRole("button", { name: "문서 더보기", exact: true }).click();
   await page.getByRole("button", { name: "버그 기록", exact: true }).click();
   const dialog = page.getByRole("dialog", { name: "문제 기록" });
   await expect(dialog).toBeVisible();
@@ -798,6 +801,7 @@ test("uploads only explicitly selected bug report images as multipart bytes", as
   });
 
   await page.goto("/dev/workspace-e2e");
+  await page.getByRole("button", { name: "문서 더보기", exact: true }).click();
   await page.getByRole("button", { name: "버그 기록", exact: true }).click();
   const dialog = page.getByRole("dialog", { name: "문제 기록" });
   await dialog.locator('input[type="file"]').setInputFiles({
@@ -816,44 +820,21 @@ test("uploads only explicitly selected bug report images as multipart bytes", as
   expect(submittedBody.toString("utf8")).not.toContain("data:image");
 });
 
-test("keeps the top document menu on one line and drag-scrolls it when space is narrow", async ({ page }) => {
+test("keeps primary document actions visible and groups secondary actions with keyboard return", async ({ page }) => {
   await page.setViewportSize({ width: 900, height: 700 });
-  await page.addInitScript(() => {
-    window.localStorage.setItem("nyxdoc:workspace-sidebar-width", "360");
-  });
   await page.goto("/dev/workspace-e2e");
-
   const menu = page.getByRole("group", { name: "문서 메뉴" });
   await expect(menu).toBeVisible();
-  await expect(menu.locator('select[aria-label="문서 위치"]')).toHaveCount(0);
-  const before = await menu.evaluate((element) => ({
-    clientWidth: element.clientWidth,
-    scrollWidth: element.scrollWidth,
-    scrollLeft: element.scrollLeft,
-    whiteSpace: getComputedStyle(element).whiteSpace,
-    childHeights: Array.from(element.children).map(
-      (child) => child.getBoundingClientRect().height,
-    ),
-    childFlexShrink: Array.from(element.children).map(
-      (child) => getComputedStyle(child).flexShrink,
-    ),
-  }));
-  expect(before.scrollWidth).toBeGreaterThan(before.clientWidth);
-  expect(before.scrollLeft).toBe(0);
-  expect(before.whiteSpace).toBe("nowrap");
-  expect(before.childHeights.every((height) => height <= 42)).toBe(true);
-  expect(before.childFlexShrink.every((value) => value === "0")).toBe(true);
-
-  const box = await menu.boundingBox();
-  expect(box).not.toBeNull();
-  if (!box) return;
-  await page.mouse.move(box.x + box.width - 20, box.y + box.height / 2);
-  await page.mouse.down();
-  await page.mouse.move(box.x + box.width - 170, box.y + box.height / 2, { steps: 8 });
-  await page.mouse.up();
-
-  await expect.poll(() => menu.evaluate((element) => element.scrollLeft)).toBeGreaterThan(80);
-  await expect(page.getByRole("dialog", { name: "새 문서 만들기" })).toHaveCount(0);
+  const more = page.getByRole("button", { name: "문서 더보기", exact: true });
+  await expect(more).toBeInViewport();
+  await expect(page.getByRole("button", { name: "저장", exact: true })).toBeInViewport();
+  await more.click();
+  const actions = page.getByRole("dialog", { name: "문서 추가 작업", exact: true });
+  await expect(actions.getByRole("link", { name: "PDF" })).toBeVisible();
+  await expect(actions.getByRole("button", { name: "하위 문서 만들기" })).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(actions).toBeHidden();
+  await expect(more).toBeFocused();
 
   const history = page.getByRole("button", { name: /변경 기록.*리비전 2/ });
   await history.click();
@@ -1450,4 +1431,24 @@ test("saves a new document without a title as 제목 없는 문서", async ({ pa
 
   await expect.poll(() => createRequest?.title).toBe("제목 없는 문서");
   await expect(editor).toBeHidden();
+});
+
+
+test("keeps mobile document controls in view and respects reduced motion", async ({ page }, testInfo) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  await page.goto("/dev/workspace-e2e");
+  for (const name of ["저장", "공유", "문서 더보기"]) {
+    await expect(page.getByRole("button", { name, exact: true })).toBeInViewport();
+  }
+  await page.screenshot({ path: testInfo.outputPath("mobile-document-controls.png") });
+  await page.getByRole("button", { name: "문서 더보기", exact: true }).click();
+  const actions = page.getByRole("dialog", { name: "문서 추가 작업" });
+  await expect(actions.getByRole("link", { name: "PDF" })).toBeInViewport();
+  await page.keyboard.press("Escape");
+  await page.goto("/dev/settings-e2e?area=agents");
+  await page.getByRole("button", { name: "에이전트 연결", exact: true }).click();
+  const dialog = page.getByRole("dialog", { name: /에 에이전트 연결$/ });
+  await expect(dialog).toHaveCSS("animation-name", "none");
+  await page.screenshot({ path: testInfo.outputPath("mobile-agent-connection.png") });
 });

@@ -11,14 +11,15 @@ export const dynamic = "force-dynamic";
 export default async function SiteSettingsPage({
   searchParams,
 }: {
-  searchParams: Promise<{ document?: string; workspace?: string }>;
+  searchParams: Promise<{ document?: string; workspace?: string; returnTo?: string }>;
 }) {
-  const { document, workspace } = await searchParams;
+  const { document, workspace, returnTo } = await searchParams;
   return (
     <SettingsPageContent
       area="site"
       documentSelector={document}
       workspaceSelector={workspace}
+      connectionReturnHref={returnTo}
     />
   );
 }

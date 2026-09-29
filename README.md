@@ -163,7 +163,7 @@ boundaries, see [docs/open-source-readiness.md](docs/open-source-readiness.md),
 
 ## Project status
 
-Version `0.25.22` is an early 0.x release used with real documents. Data
+Version `0.25.23` is an early 0.x release used with real documents. Data
 migrations are forward-only and rehearsed against verified backups, but APIs
 and UI details may still evolve before 1.0.
 

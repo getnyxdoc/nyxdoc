@@ -96,3 +96,12 @@
   .page { padding: 0; }
   .card { min-height: 100vh; padding: 42px 24px; border: 0; border-radius: 0; }
 }
+
+.story { border-radius: 22px; background: #eaf0e5; border-color: #d8e1d1; }
+.story::after { opacity: .45; }
+.card { border-radius: 22px; box-shadow: 0 24px 64px -24px #29483726; }
+.submit { box-shadow: 0 6px 16px -6px #20483040; border-radius: 10px; }
+.field input { border-radius: 10px; }
+.floatingNote { border-radius: 10px; transform: none; background: #f4f1e2; border-color: #e3dfc8; }
+@media (prefers-reduced-motion: no-preference) { .cardInner { animation: authEnter 400ms cubic-bezier(.16,1,.3,1); } }
+@keyframes authEnter { from { opacity: .5; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }

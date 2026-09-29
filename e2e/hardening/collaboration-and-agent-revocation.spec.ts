@@ -274,7 +274,7 @@ test("a revoked agent MCP session cannot mutate and a new reader session regains
   expect((await createAgent).status()).toBe(201);
   await expect(agentCard(page, agentName)).toBeVisible();
 
-  await page.goto(`/settings/workspace?workspace=${encodeURIComponent(workspaceId)}&connectAgent=1`);
+  await page.goto(`/settings/agents?workspace=${encodeURIComponent(workspaceId)}&connectAgent=1`);
   const firstConnection = await configureAgentConnection(page, {
     agentName,
     documentTitle: document.title,
@@ -320,7 +320,7 @@ test("a revoked agent MCP session cannot mutate and a new reader session regains
     const originalRevision = initialWorking.workingDocument.baseRevisionNumber;
 
     // The workspace owner removes the grant through the real permission UI.
-    const connectedCard = agentCard(page, agentName);
+    const connectedCard = page.locator("#workspace-agents article").filter({ has: page.getByText(agentName, { exact: true }) });
     await connectedCard.getByRole("button", { name: "권한 설정", exact: true }).click();
     const permissionDialog = page.getByRole("dialog", { name: new RegExp(`${agentName}.*`) });
     await expect(permissionDialog).toBeVisible();

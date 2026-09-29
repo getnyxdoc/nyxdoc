@@ -31,6 +31,7 @@ import type {
   TeamSummary,
 } from "@/lib/organizations/service";
 import type { WorkspaceSummary } from "@/lib/workspaces/service";
+import { buildSettingsHref } from "@/lib/settings/navigation";
 import styles from "./organization-settings.module.css";
 
 type ApiBody = { error?: string; [key: string]: unknown };
@@ -430,6 +431,8 @@ export function OrganizationSettingsPanel({
   uploadWorkspaceId,
   accessibleWorkspaces,
   currentUserId,
+  currentDocumentId,
+  connectionReturnHref,
 }: {
   initialView: OrganizationView;
   agents: AccountAgentSummary[];
@@ -437,6 +440,8 @@ export function OrganizationSettingsPanel({
   uploadWorkspaceId: string;
   accessibleWorkspaces: WorkspaceSummary[];
   currentUserId: string;
+  currentDocumentId?: string;
+  connectionReturnHref?: string;
 }) {
   const { locale } = useI18n();
   const copy = copyFor(locale);
@@ -550,7 +555,7 @@ export function OrganizationSettingsPanel({
     </section>
 
     <section id="organization-agents" className={styles.agentSection}>
-      {initialView.permissions.canManageAgents ? <AccountAgentsPanel collectionEndpoint={`/api/organizations/${organizationId}/agents`} initialAgents={agents} mcpUrl={mcpUrl} uploadWorkspaceId={uploadWorkspaceId} workspaces={accessibleWorkspaces.filter((workspace) => workspace.owner.type === "organization" && workspace.owner.id === organizationId)} /> : <section className={styles.card}><div className={styles.heading}><span><UsersRound size={18} /></span><div><h2>{copy.agentsReadOnly}</h2><p>{copy.agentsReadOnlyHint}</p></div></div>{agents.length === 0 ? <div className={styles.empty}>{copy.noAgents}</div> : agents.map((agent) => <div className={styles.readOnlyAgent} key={agent.id}><UserAvatar className={styles.avatar} imageUrl={agent.avatarMediaId ? `/api/media/${agent.avatarMediaId}` : null} name={agent.displayName} /><strong>{agent.displayName}</strong></div>)}</section>}
+      {initialView.permissions.canManageAgents ? <AccountAgentsPanel collectionEndpoint={`/api/organizations/${organizationId}/agents`} initialAgents={agents} mcpUrl={mcpUrl} uploadWorkspaceId={uploadWorkspaceId} currentDocumentId={currentDocumentId} connectionReturnHref={connectionReturnHref} workspaces={accessibleWorkspaces.filter((workspace) => workspace.owner.type === "organization" && workspace.owner.id === organizationId)} /> : <section className={styles.card}><div className={styles.heading}><span><UsersRound size={18} /></span><div><h2>{copy.agentsReadOnly}</h2><p>{copy.agentsReadOnlyHint}</p></div></div>{agents.length === 0 ? <div className={styles.empty}>{copy.noAgents}</div> : agents.map((agent) => <div className={styles.readOnlyAgent} key={agent.id}><UserAvatar className={styles.avatar} imageUrl={agent.avatarMediaId ? `/api/media/${agent.avatarMediaId}` : null} name={agent.displayName} /><strong>{agent.displayName}</strong></div>)}</section>}
     </section>
 
     {initialView.permissions.canReadAudit && <section className={styles.card} id="organization-audit"><div className={styles.heading}><span><History size={18} /></span><div><h2>{copy.audit}</h2><p>{copy.auditDescription}</p></div></div><div className={styles.auditList}>{initialView.auditEvents.length === 0 ? <div className={styles.empty}>{copy.noAudit}</div> : initialView.auditEvents.map((event) => <article key={event.id}><span data-outcome={event.outcome} /><div><strong>{event.action}</strong><small>{event.actorLabel} · {event.targetType}{event.targetId ? ` · ${event.targetId}` : ""}</small></div><time suppressHydrationWarning>{dateLabel(event.createdAt, locale)}</time></article>)}</div></section>}
@@ -559,16 +564,18 @@ export function OrganizationSettingsPanel({
 
     {error && <div className={styles.floatingError} role="alert">{error}</div>}
     {workspaceCreateOpen && <WorkspaceCreateDialog fixedOrganization={initialView.organization} onClose={() => setWorkspaceCreateOpen(false)} />}
-    {trashOpen && <div className={styles.backdrop} role="presentation"><form className={styles.trashDialog} role="dialog" aria-modal="true" aria-labelledby="trash-organization-title" onSubmit={(event) => { event.preventDefault(); void run(async () => { await apiRequest(`/api/organizations/${organizationId}`, { method: "DELETE", headers: { "content-type": "application/json" }, body: JSON.stringify({ confirmationName: trashConfirmation }) }); router.replace(`/settings/organization?workspace=${encodeURIComponent(uploadWorkspaceId)}`); }); }}><Trash2 size={22} /><h2 id="trash-organization-title">{copy.danger}</h2><p>{copy.dangerDescription}</p><label><span>{copy.confirmTrash}</span><strong>{initialView.organization.name}</strong><input autoFocus value={trashConfirmation} onChange={(event) => setTrashConfirmation(event.target.value)} /></label><footer><button type="button" disabled={pending} onClick={() => setTrashOpen(false)}>{copy.cancel}</button><button className={styles.dangerButton} type="submit" disabled={pending || trashConfirmation.trim() !== initialView.organization.name}><Trash2 size={14} /> {copy.trash}</button></footer></form></div>}
+    {trashOpen && <div className={styles.backdrop} role="presentation"><form className={styles.trashDialog} role="dialog" aria-modal="true" aria-labelledby="trash-organization-title" onSubmit={(event) => { event.preventDefault(); void run(async () => { await apiRequest(`/api/organizations/${organizationId}`, { method: "DELETE", headers: { "content-type": "application/json" }, body: JSON.stringify({ confirmationName: trashConfirmation }) }); router.replace(buildSettingsHref({ area: "organization", workspaceId: uploadWorkspaceId, documentId: currentDocumentId })); }); }}><Trash2 size={22} /><h2 id="trash-organization-title">{copy.danger}</h2><p>{copy.dangerDescription}</p><label><span>{copy.confirmTrash}</span><strong>{initialView.organization.name}</strong><input autoFocus value={trashConfirmation} onChange={(event) => setTrashConfirmation(event.target.value)} /></label><footer><button type="button" disabled={pending} onClick={() => setTrashOpen(false)}>{copy.cancel}</button><button className={styles.dangerButton} type="submit" disabled={pending || trashConfirmation.trim() !== initialView.organization.name}><Trash2 size={14} /> {copy.trash}</button></footer></form></div>}
   </>;
 }
 
 export function OrganizationDirectory({
   trashedOrganizations,
   workspaceId,
+  currentDocumentId,
 }: {
   trashedOrganizations: OrganizationSummary[];
   workspaceId: string;
+  currentDocumentId?: string;
 }) {
   const { locale } = useI18n();
   const copy = copyFor(locale);
@@ -576,15 +583,17 @@ export function OrganizationDirectory({
   const [pending, setPending] = useState<string | null>(null);
   const [error, setError] = useState("");
   if (trashedOrganizations.length === 0) return null;
-  return <section className={`${styles.card} ${styles.dangerCard}`}><div className={styles.heading}><span><Trash2 size={18} /></span><div><h2>{copy.deletedOrganizations}</h2><p>{copy.deletedOrganizationsDescription}</p></div></div><div className={styles.deletedOrganizations}>{trashedOrganizations.map((organization) => <article key={organization.id}><span>{organization.icon || <Building2 size={17} />}</span><div><strong>{organization.name}</strong><small suppressHydrationWarning>{organization.purgeAfter ? dateLabel(organization.purgeAfter, locale) : ""}</small></div><button type="button" disabled={Boolean(pending)} onClick={async () => { setPending(organization.id); setError(""); try { await apiRequest(`/api/organizations/${organization.id}/restore`, { method: "POST" }); router.push(`/settings/organization?workspace=${encodeURIComponent(workspaceId)}&organization=${encodeURIComponent(organization.id)}`); router.refresh(); } catch (cause) { setError(cause instanceof Error ? cause.message : copy.requestFailed); } finally { setPending(null); } }}>{pending === organization.id ? copy.saving : copy.restore}</button></article>)}</div>{error && <div className={styles.error}>{error}</div>}</section>;
+  return <section className={`${styles.card} ${styles.dangerCard}`}><div className={styles.heading}><span><Trash2 size={18} /></span><div><h2>{copy.deletedOrganizations}</h2><p>{copy.deletedOrganizationsDescription}</p></div></div><div className={styles.deletedOrganizations}>{trashedOrganizations.map((organization) => <article key={organization.id}><span>{organization.icon || <Building2 size={17} />}</span><div><strong>{organization.name}</strong><small suppressHydrationWarning>{organization.purgeAfter ? dateLabel(organization.purgeAfter, locale) : ""}</small></div><button type="button" disabled={Boolean(pending)} onClick={async () => { setPending(organization.id); setError(""); try { await apiRequest(`/api/organizations/${organization.id}/restore`, { method: "POST" }); router.push(buildSettingsHref({ area: "organization", workspaceId, organizationId: organization.id, documentId: currentDocumentId })); router.refresh(); } catch (cause) { setError(cause instanceof Error ? cause.message : copy.requestFailed); } finally { setPending(null); } }}>{pending === organization.id ? copy.saving : copy.restore}</button></article>)}</div>{error && <div className={styles.error}>{error}</div>}</section>;
 }
 
 export function OrganizationCreateDialog({
   onClose,
   workspaceId,
+  currentDocumentId,
 }: {
   onClose: () => void;
   workspaceId: string;
+  currentDocumentId?: string;
 }) {
   const { locale } = useI18n();
   const router = useRouter();
@@ -606,7 +615,7 @@ export function OrganizationCreateDialog({
       const body = await apiRequest("/api/organizations", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ name, icon: icon.trim() || null }) });
       const organization = body.organization as OrganizationSummary | undefined;
       if (!organization) throw new Error(copy.failed);
-      router.push(`/settings/organization?workspace=${encodeURIComponent(workspaceId)}&organization=${encodeURIComponent(organization.id)}`);
+      router.push(buildSettingsHref({ area: "organization", workspaceId, organizationId: organization.id, documentId: currentDocumentId }));
       router.refresh();
       onClose();
     } catch (cause) {

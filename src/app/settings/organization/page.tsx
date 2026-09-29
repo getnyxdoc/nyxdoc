@@ -11,13 +11,15 @@ export default async function OrganizationSettingsPage({
     organization?: string;
     workspace?: string;
     document?: string;
+    returnTo?: string;
   }>;
 }) {
-  const { document, organization, workspace } = await searchParams;
+  const { document, organization, workspace, returnTo } = await searchParams;
   return <SettingsPageContent
     area="organization"
     documentSelector={document}
     organizationSelector={organization}
     workspaceSelector={workspace}
+    connectionReturnHref={returnTo}
   />;
 }
