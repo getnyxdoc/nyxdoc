@@ -67,6 +67,11 @@ export async function run(argv, env = process.env, output = text => console.log(
     Authorization: `Bearer ${env.NYXDOC_MCP_BEARER_TOKEN}`,
     "Content-Type": "application/json", Accept: "application/json, text/event-stream",
   };
+  function diagnostic(value, limit = 600) {
+    if (typeof value !== "string") return "";
+    return value.replaceAll(env.NYXDOC_MCP_BEARER_TOKEN, "[redacted]")
+      .replace(/[\u0000-\u001f\u007f-\u009f]/g, " ").slice(0, limit);
+  }
   async function rpc(method, params, notification = false) {
     const requestId = ++id;
     const response = await fetch(url, {
@@ -79,7 +84,7 @@ export async function run(argv, env = process.env, output = text => console.log(
     if (!response.headers.get("content-type")?.includes("application/json")) throw new Error("Expected the Nyxdoc stateless JSON MCP endpoint.");
     const body = await response.json();
     if (body.id !== requestId || body.jsonrpc !== "2.0") throw new Error("Invalid MCP response envelope.");
-    if (body.error) throw new Error(`MCP request failed (${body.error.code ?? "unknown"}). Inspect the operation and retry only with the same requestId for the same write.`);
+    if (body.error) throw new Error(`MCP request failed (${diagnostic(String(body.error.code ?? "unknown"), 80)}). ${diagnostic(body.error.message)} Inspect the operation and retry only with the same requestId for the same write.`);
     return body.result;
   }
   const initialized = await rpc("initialize", { protocolVersion: version, capabilities: {}, clientInfo: { name: "nyxdoc-cli", version: "1.0.0" } });
@@ -89,8 +94,18 @@ export async function run(argv, env = process.env, output = text => console.log(
   async function tool(name, toolArgs = {}) {
     const response = await rpc("tools/call", { name, arguments: toolArgs });
     if (response.isError) {
-      const code = response.structuredContent?.code ?? "TOOL_ERROR";
-      throw new Error(`Nyxdoc ${code}. Inspect the operation; re-read after a conflict. Do not retry writes with a new requestId.`);
+      let detail = response.structuredContent;
+      if (!detail) {
+        const text = response.content?.find(item => item.type === "text")?.text;
+        try { detail = JSON.parse(text); } catch { detail = { error: text }; }
+      }
+      const code = diagnostic(detail?.code, 80) || "TOOL_ERROR";
+      const reason = diagnostic(detail?.reason) || diagnostic(detail?.error);
+      const issues = Array.isArray(detail?.issues) ? detail.issues.slice(0, 5).map(issue => {
+        const path = Array.isArray(issue?.path) ? issue.path.map(part => diagnostic(String(part), 80)).join(".") : "input";
+        return diagnostic(`${path}: ${diagnostic(issue?.message)}`, 700);
+      }).join("; ") : "";
+      throw new Error(`Nyxdoc ${code}. ${reason}${issues ? ` Issues: ${issues}` : ""} Inspect the operation; re-read after a conflict. Retry the same write with the same requestId.`);
     }
     return response.structuredContent ?? response;
   }

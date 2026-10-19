@@ -26,6 +26,7 @@ import {
 } from "@platejs/table";
 import remarkGfm from "remark-gfm";
 import { BaseParagraphPlugin, createSlateEditor, type Value } from "platejs";
+import { ZodError } from "zod";
 import { DocumentServiceError } from "@/lib/documents/types";
 import {
   parseNyxdocDocumentV2,
@@ -125,6 +126,28 @@ function blockquoteInlineChildren(value: unknown) {
   return flattened.length > 0 ? flattened : [{ text: "" }];
 }
 
+function tableCellBlockChildren(value: unknown) {
+  if (!Array.isArray(value) || value.length === 0) {
+    return [{ type: "p", children: [{ text: "" }] }];
+  }
+  // GFM cells contain inline content, but Plate emits paragraph fragments and
+  // links as siblings. Rejoin them before validating the block-only cell AST.
+  const inline: unknown[] = [];
+  for (const child of value) {
+    if (!child || typeof child !== "object") return value;
+    const node = child as Record<string, unknown>;
+    if (node.type === "p" && Array.isArray(node.children)) {
+      inline.push(...node.children);
+    } else if (typeof node.text === "string" || node.type === "a") {
+      inline.push(child);
+    } else {
+      // Unsupported block content must still go through normal validation.
+      return value;
+    }
+  }
+  return [{ type: "p", children: inline.length ? inline : [{ text: "" }] }];
+}
+
 export type MarkdownConversionWarning = {
   code: string;
   message: string;
@@ -181,7 +204,9 @@ function normalizeMarkdownNode(
       : randomUUID();
   const children = node.type === "blockquote"
     ? blockquoteInlineChildren(node.children)
-    : node.children;
+    : node.type === "td" || node.type === "th"
+      ? tableCellBlockChildren(node.children)
+      : node.children;
   node.children = Array.isArray(children)
     ? children.map((child, index) => normalizeMarkdownNode(child, [...path, index], idSeed, warnings))
     : [{ text: "" }];
@@ -211,6 +236,20 @@ export function markdownToNyxdocWithReport(
     return { content: parseNyxdocDocumentV2({ schemaVersion: 2, blocks }), warnings };
   } catch (error) {
     if (error instanceof DocumentServiceError) throw error;
+    if (error instanceof ZodError) {
+      const issues = error.issues.slice(0, 5).map((issue) => ({
+        code: issue.code,
+        path: issue.path.map(String),
+        message: issue.code === "custom" && issue.path.at(-1) === "url"
+          ? issue.message
+          : "변환된 요소가 지원하는 문서 형식 또는 크기 제한에 맞지 않습니다.",
+      }));
+      throw new DocumentServiceError(
+        "INVALID_INPUT",
+        `Markdown 변환 결과가 문서 형식에 맞지 않습니다. 위치: ${issues[0]?.path.join(".") || "document"}`,
+        { issues },
+      );
+    }
     throw new DocumentServiceError("INVALID_INPUT", "Markdown을 Nyxdoc 문서로 변환할 수 없습니다.");
   }
 }

@@ -37,6 +37,7 @@ async function main() {
   });
   const client = new Client({ name: "nyxdoc-http-test", version: "1.0.0" });
   let createdDocumentId: string | undefined;
+  let markdownDocumentId: string | undefined;
   let uploadedMedia: { id: string; storageKey: string } | undefined;
   let adminRequestId: string | undefined;
 
@@ -358,9 +359,38 @@ async function main() {
     assert.equal(mediaResponse.headers.get("content-type"), "image/png");
     assert((await mediaResponse.arrayBuffer()).byteLength > 8);
 
-    console.log("MCP HTTP smoke passed: compact protocol 4.7 responses, one-time raw image upload, explicit commit, retry replay, conflicts, and search anchors.");
+    const markdownArgs = {
+      requestId: `mcp-http-table-links-${randomUUID()}`,
+      title: "Markdown table links regression",
+      markdown: [
+        "| [Header](https://example.com/header) | Reference |",
+        "| --- | --- |",
+        `| Before [**link**](https://example.com/body) after | [Document](nyxdoc://document/${createdDocumentId}) |`,
+      ].join("\n"),
+    };
+    const markdownCreated = await client.callTool({ name: "create_document_from_markdown", arguments: markdownArgs });
+    assert.notEqual(markdownCreated.isError, true, JSON.stringify(markdownCreated.structuredContent));
+    markdownDocumentId = (markdownCreated.structuredContent as { document: { id: string } }).document.id;
+    const markdownReplay = await client.callTool({ name: "create_document_from_markdown", arguments: markdownArgs });
+    assert.deepEqual(markdownReplay.structuredContent, markdownCreated.structuredContent);
+    const markdownRead = await client.callTool({ name: "get_document", arguments: { documentId: markdownDocumentId } });
+    assert.notEqual(markdownRead.isError, true);
+    const table = (markdownRead.structuredContent as {
+      document: { content: { blocks: import("../src/lib/editor/schema").NyxdocBlock[] } };
+    }).document.content.blocks[0];
+    assert.equal(table.type, "table");
+    if (table.type !== "table") throw new Error("Expected a table");
+    assert.equal(table.children[1].children[0].children.length, 1);
+    assert.deepEqual(table.children[1].children[0].children[0].children[1], {
+      id: (table.children[1].children[0].children[0].children[1] as { id: string }).id,
+      type: "a", url: "https://example.com/body", children: [{ text: "link", bold: true }],
+    });
+    assert.equal((table.children[1].children[1].children[0].children[0] as { documentId: string }).documentId, createdDocumentId);
+
+    console.log("MCP HTTP smoke passed: compact protocol 4.7 responses, one-time raw image upload, explicit commit, retry replay, conflicts, search anchors, and Markdown table links.");
   } finally {
     await client.close().catch(() => undefined);
+    if (markdownDocumentId) sqlite.prepare("DELETE FROM documents WHERE id = ?").run(markdownDocumentId);
     if (createdDocumentId) sqlite.prepare("DELETE FROM documents WHERE id = ?").run(createdDocumentId);
     if (uploadedMedia) {
       sqlite.prepare("DELETE FROM media_assets WHERE id = ?").run(uploadedMedia.id);
