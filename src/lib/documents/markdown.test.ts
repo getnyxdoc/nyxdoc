@@ -61,6 +61,39 @@ describe("Nyxdoc Markdown portability", () => {
       .toThrowError(expect.objectContaining({ code: "INVALID_INPUT" }));
   });
 
+  it("round-trips links and surrounding rich text inside table headers and cells", () => {
+    const targetId = "a9a0cf6e-1f5b-4f95-8f45-0bd46e98b5a2";
+    const markdown = [
+      "| [제목](https://example.com/header) | 상태 | 빈칸 |",
+      "| --- | --- | --- |",
+      `| 앞 **굵게** [웹 링크](https://example.com/page) 뒤 [문서](nyxdoc://document/${targetId})` + " | [**강조**](https://example.com/bold)와 `코드` | |",
+      "| https://example.com/auto | *기울임*과 ~~삭제~~ | 끝 |",
+    ].join("\n");
+    const converted = markdownToNyxdocWithReport(markdown, { idSeed: "table-links" });
+    expect(converted.warnings).toEqual([]);
+    expect(markdownToNyxdoc(markdown, { idSeed: "table-links" })).toEqual(converted.content);
+    const table = converted.content.blocks[0];
+    if (table.type !== "table") throw new Error("표 변환 결과가 아닙니다.");
+    expect(table.children[0].children[0].children).toMatchObject([
+      { type: "p", children: [{ type: "a", url: "https://example.com/header" }] },
+    ]);
+    const body = table.children[1].children[0].children;
+    expect(body).toHaveLength(1);
+    expect(body[0].children).toMatchObject([
+      { text: "앞 " }, { text: "굵게", bold: true }, { text: " " },
+      { type: "a", url: "https://example.com/page", children: [{ text: "웹 링크" }] },
+      { text: " 뒤 " }, { type: "doc_ref", documentId: targetId, children: [{ text: "문서" }] },
+    ]);
+    expect(table.children[1].children[1].children[0].children).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: "a", children: [{ text: "강조", bold: true }] }),
+      expect.objectContaining({ text: "코드", code: true }),
+    ]));
+    const exported = nyxdocToMarkdown(converted.content);
+    expect(exported).toContain(`[문서](nyxdoc://document/${targetId})`);
+    expect(exported).toContain("[웹 링크](https://example.com/page)");
+    expect(nyxdocToMarkdown(markdownToNyxdoc(exported))).toBe(exported);
+  });
+
   it("round-trips CommonMark blockquotes emitted by the exporter", () => {
     const content = markdownToNyxdoc(["# 인용", "", "> 사람이 남긴 인용문"].join("\n"));
     expect(content.blocks).toMatchObject([
@@ -71,6 +104,18 @@ describe("Nyxdoc Markdown portability", () => {
     const exported = nyxdocToMarkdown(content);
     expect(exported).toContain("> 사람이 남긴 인용문");
     expect(markdownToNyxdoc(exported).blocks.map((block) => block.type)).toEqual(["h1", "blockquote"]);
+  });
+
+  it("reports the invalid block location without echoing private input", () => {
+    const error = (() => {
+      try { markdownToNyxdoc("[private-label](relative-secret-path)"); } catch (failure) { return failure; }
+    })();
+    expect(error).toMatchObject({
+      code: "INVALID_INPUT",
+      message: expect.stringContaining("blocks.0"),
+      details: { issues: [{ path: ["blocks", "0", "children", "0", "url"], message: "올바른 웹 링크 주소가 아닙니다." }] },
+    });
+    expect(JSON.stringify(error)).not.toMatch(/private-label|relative-secret-path/);
   });
 
   it("preserves image alt text in both Markdown directions", () => {

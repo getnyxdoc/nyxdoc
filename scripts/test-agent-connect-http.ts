@@ -292,7 +292,10 @@ async function main() {
       await client.close();
     }
 
-    const cliArgs = { requestId: "compact-http-create-document", title: "Compact HTTP regression", markdown: "Created through the standalone CLI." };
+    const cliArgs = {
+      requestId: "compact-http-create-document", title: "Compact HTTP regression",
+      markdown: "Created through the standalone CLI.\n\n| [Header](https://example.com/header) | State |\n| --- | --- |\n| Before [**link**](https://example.com/body) after | Ready |",
+    };
     const cliEnvironment = { ...environment, NYXDOC_MCP_URL: `${baseUrl}/mcp`, NYXDOC_MCP_BEARER_TOKEN: cliCredential.token };
     let cliDocumentId: string | undefined;
     for (let attempt = 0; attempt < 2; attempt++) {
@@ -309,7 +312,21 @@ async function main() {
       ["cli/nyxdoc.mjs", "call", "get_document", "--args", JSON.stringify({ documentId: cliDocumentId })],
       { cwd: process.cwd(), env: cliEnvironment, encoding: "utf8", timeout: 60_000, windowsHide: true });
     assert.equal(cliRead.status, 0, cliRead.stderr);
-    assert(cliRead.stdout.includes(cliArgs.markdown));
+    const cliSaved = JSON.parse(cliRead.stdout).document.content.blocks;
+    assert.equal(cliSaved[0].children[0].text, "Created through the standalone CLI.");
+    assert.equal(cliSaved[1].type, "table");
+    assert.equal(cliSaved[1].children[0].children[0].children[0].children[0].url, "https://example.com/header");
+    const cell = cliSaved[1].children[1].children[0].children;
+    assert.equal(cell.length, 1, "Inline content must stay in one cell paragraph");
+    assert.equal(cell[0].children[1].url, "https://example.com/body");
+    assert.deepEqual(cell[0].children[1].children, [{ text: "link", bold: true }]);
+    const cliInvalid = spawnSync(process.execPath,
+      ["cli/nyxdoc.mjs", "call", "create_document_from_markdown", "--args", JSON.stringify({
+        ...cliArgs, requestId: "compact-http-invalid-image", markdown: "![invalid](https://example.com/image.png)",
+      })], { cwd: process.cwd(), env: cliEnvironment, encoding: "utf8", timeout: 60_000, windowsHide: true });
+    assert.equal(cliInvalid.status, 1);
+    assert(cliInvalid.stderr.includes("/api/media/{id}"), "CLI must expose the server's corrective guidance");
+    assert(!cliInvalid.stderr.includes(cliCredential.token));
 
     console.log(JSON.stringify({
       status: "passed",

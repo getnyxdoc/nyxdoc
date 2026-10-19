@@ -2,6 +2,17 @@
 
 All notable user-facing changes are recorded here.
 
+## 0.25.24 - 2026-10-19
+
+- Fixed Markdown table imports containing links in headers or cells. Web links,
+  internal document references, surrounding text and inline formatting now stay
+  together through creation, draft updates and Markdown export.
+- Show server error reasons and validation locations in the standalone CLI,
+  with bounded output and credential redaction. Invalid converted document
+  structures now report their location instead of only a generic failure.
+- Added table-link regressions to unit, MCP and real HTTP release checks,
+  including retry deduplication and explicit draft commits.
+
 ## 0.25.23 - 2026-09-29
 
 - Consolidated workspace agent connections, access and connection keys in Agent

@@ -57,6 +57,9 @@ Non-loopback endpoints require HTTPS, and redirects are rejected.
 `--args` accepts a JSON object; `--file` avoids shell quoting and long arguments.
 `--out result.json` saves a long result and prints only its path. Output uses
 structuredContent once. Errors exit nonzero. Inspect operations before use.
+Errors include the server's reason and available validation paths, with bounded
+text and the connection key redacted. When upgrading a copied CLI, replace the
+client script from the new release and keep the existing connection settings.
 Re-read after conflicts. A timeout does not prove a write failed: inspect state
 or retry with the same requestId, never a new ID for the same uncertain write.
 

@@ -83,11 +83,12 @@ describe("compact MCP", () => {
   it("preserves create idempotency and rejects a changed retry", async () => {
     const { call, db } = await fixture();
     const before = db.prepare("SELECT COUNT(*) AS n FROM documents").get() as { n: number };
-    const args = { requestId: randomUUID(), title: "Compact test", markdown: "A body." };
+    const args = { requestId: randomUUID(), title: "Compact test", markdown: "| 항목 | 상태 |\n| --- | --- |\n| 문서 | 앞 [링크](https://example.com) 뒤 |" };
     const first = await call("nyxdoc_write", { operation: "create_document_from_markdown", args });
     expect(first.isError).not.toBe(true);
     const replay = await call("nyxdoc_write", { operation: "create_document_from_markdown", args });
     expect(replay.isError).not.toBe(true);
+    expect(replay.structuredContent).toEqual(first.structuredContent);
     expect(db.prepare("SELECT COUNT(*) AS n FROM documents").get()).toMatchObject({ n: before.n + 1 });
     const conflict = await call("nyxdoc_write", { operation: "create_document_from_markdown", args: { ...args, markdown: "Changed" } });
     expect(conflict.structuredContent?.code).toBe("IDEMPOTENCY_CONFLICT");
@@ -109,7 +110,7 @@ describe("compact MCP", () => {
     const created = (await call("nyxdoc_write", { operation: "create_document_from_markdown", args: { requestId: randomUUID(), title: "Draft test", markdown: "Original body." } })).structuredContent!;
     const documentId = (created.document as { id: string }).id;
     const working = (await call("nyxdoc_read", { operation: "get_working_document", args: { documentId } })).structuredContent!;
-    const update = { requestId: randomUUID(), documentId, expectedDraftVersion: working.draftVersion, markdown: "Changed body." };
+    const update = { requestId: randomUUID(), documentId, expectedDraftVersion: working.draftVersion, markdown: "Changed body.\n\n| 자료 |\n| --- |\n| [링크](https://example.com/updated) |" };
     const modified = await call("nyxdoc_write", { operation: "update_document_from_markdown", args: update });
     expect(modified.isError).not.toBe(true);
     const canonical = (await call("nyxdoc_read", { operation: "get_document", args: { documentId } })).structuredContent!;
@@ -120,5 +121,6 @@ describe("compact MCP", () => {
     expect(commit.isError).not.toBe(true);
     const saved = (await call("nyxdoc_read", { operation: "get_document", args: { documentId } })).structuredContent!;
     expect(JSON.stringify(saved)).toContain("Changed body.");
+    expect(JSON.stringify(saved)).toContain("https://example.com/updated");
   });
 });
