@@ -33,9 +33,16 @@ export function stripNyxdocEditorRuntimeFields(value: unknown): unknown {
   }
   if (!value || typeof value !== "object") return value;
 
+  // Plate's HTML deserializer adds a target even when the pasted anchor has
+  // none. Link opening behavior belongs to Nyxdoc's renderer, not AST v2.
+  const isLink = "type" in value && value.type === "a";
   return Object.fromEntries(
     Object.entries(value)
-      .filter(([key, child]) => !EDITOR_RUNTIME_FIELDS.has(key) && child !== undefined)
+      .filter(([key, child]) =>
+        !EDITOR_RUNTIME_FIELDS.has(key)
+        && child !== undefined
+        && !(isLink && key === "target"),
+      )
       .map(([key, child]) => [key, stripNyxdocEditorRuntimeFields(child)]),
   );
 }
