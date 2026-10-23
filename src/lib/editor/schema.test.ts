@@ -216,6 +216,63 @@ describe("Nyxdoc Document AST v2", () => {
     expect(nyxdocDocumentV2Schema.safeParse(unknownFormatting).success).toBe(false);
   });
 
+  it("projects pasted link targets without losing URLs, formatting, or nested list content", () => {
+    const blocks = [{
+      id: "pasted-list-link",
+      type: "p",
+      indent: 1,
+      listStyleType: "decimal",
+      children: [{
+        id: "pasted-link",
+        type: "a",
+        target: "_blank",
+        url: "https://example.com/video/one",
+        children: [{ text: "굵은 링크 제목", bold: true }],
+      }],
+    }, {
+      id: "pasted-list-detail",
+      type: "p",
+      indent: 2,
+      listStyleType: "disc",
+      children: [{ text: "이유", bold: true }, { text: ": 보존되는 설명" }],
+    }];
+    const original = structuredClone(blocks);
+    const expected = structuredClone(blocks);
+    Reflect.deleteProperty(expected[0].children[0], "target");
+
+    const projected = projectNyxdocEditorContent(blocks);
+    expect(nyxdocDocumentV2Schema.safeParse(projected).success).toBe(true);
+    expect(projected.blocks).toEqual(expected);
+    expect(blocks).toEqual(original);
+    // Canonical input still rejects browser-only attributes; only the editor
+    // projection is responsible for removing them.
+    expect(nyxdocDocumentV2Schema.safeParse({ schemaVersion: 2, blocks }).success).toBe(false);
+  });
+
+  it("does not hide unknown link fields, invalid URLs, or target fields on other nodes", () => {
+    const link = {
+      type: "a",
+      target: "_blank",
+      url: "https://example.com",
+      children: [{ text: "링크" }],
+    };
+    for (const invalidLink of [
+      { ...link, mysteryFormatting: true },
+      { ...link, url: "javascript:alert(1)" },
+    ]) {
+      const projected = projectNyxdocEditorContent([
+        { id: "p-1", type: "p", children: [invalidLink] },
+      ]);
+      expect(nyxdocDocumentV2Schema.safeParse(projected).success).toBe(false);
+    }
+    for (const block of [
+      { id: "p-1", type: "p", target: "_blank", children: [{ text: "내용" }] },
+      { id: "p-1", type: "p", children: [{ text: "내용", target: "_blank" }] },
+    ]) {
+      expect(nyxdocDocumentV2Schema.safeParse(projectNyxdocEditorContent([block])).success).toBe(false);
+    }
+  });
+
   it("allows checked only on todo list blocks", () => {
     const result = nyxdocDocumentV2Schema.safeParse({
       schemaVersion: 2,

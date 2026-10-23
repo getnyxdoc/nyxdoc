@@ -11,6 +11,55 @@ function isCollaborationWebSocket(rawUrl: string) {
   return expectedPath ? path === expectedPath : !path.startsWith("/_next/");
 }
 
+test("saves pasted formatted links from the new-document dialog and preserves them after reload", async ({ context, page }) => {
+  await installConsoleErrorStackProbe(page);
+  const browserErrors = installBrowserErrorGuard(page, "pasted-links");
+  await authenticateHardeningOwner(page);
+
+  const title = `Pasted links ${Date.now()}`;
+  await page.getByRole("button", { name: "최상위 문서 만들기" }).first().click();
+  const dialog = page.getByRole("dialog", { name: "새 문서 만들기" });
+  await expect(dialog).toBeVisible();
+  await dialog.getByRole("textbox", { name: "문서 이름" }).fill(title);
+  const editor = dialog.locator('[data-slate-editor="true"][contenteditable="true"]');
+  await editor.click();
+  await context.grantPermissions(["clipboard-read", "clipboard-write"], {
+    origin: new URL(page.url()).origin,
+  });
+  await page.evaluate(async () => {
+    const html = [
+      "<h3>Linked recommendations</h3><ol>",
+      '<li><p><a href="https://example.com/one"><strong>First linked title</strong></a></p>',
+      "<ul><li><p><strong>Reason</strong>: keep the nested explanation.</p></li></ul></li>",
+      '<li><p><a href="https://example.com/two" target="_blank"><strong>Second linked title</strong></a></p></li>',
+      "</ol>",
+    ].join("");
+    const text = "Linked recommendations\nFirst linked title\nReason: keep the nested explanation.\nSecond linked title";
+    await navigator.clipboard.write([new ClipboardItem({
+      "text/html": new Blob([html], { type: "text/html" }),
+      "text/plain": new Blob([text], { type: "text/plain" }),
+    })]);
+  });
+  await page.keyboard.press("Control+v");
+  await expect(editor.getByRole("link", { name: "First linked title" })).toBeVisible();
+  const save = dialog.getByRole("button", { name: /저장/ });
+  await expect(save).toBeEnabled();
+  await save.click();
+  await expect(dialog).not.toBeVisible({ timeout: 30_000 });
+  await expect(page.getByRole("textbox", { name: "문서 이름" })).toHaveValue(title);
+
+  await page.reload();
+  await expect(page.getByRole("textbox", { name: "문서 이름" })).toBeEnabled({ timeout: 30_000 });
+  await expect(page.getByRole("textbox", { name: "문서 이름" })).toHaveValue(title);
+  const savedEditor = page.locator('[data-slate-editor="true"][contenteditable="true"]').first();
+  await expect(savedEditor.getByRole("link", { name: "First linked title" })).toHaveAttribute("href", "https://example.com/one");
+  await expect(savedEditor.getByRole("link", { name: "Second linked title" })).toHaveAttribute("href", "https://example.com/two");
+  await expect(savedEditor.locator("strong").filter({ hasText: "First linked title" })).toBeVisible();
+  await expect(savedEditor).toContainText("Reason: keep the nested explanation.");
+  await expect(page.getByText("리비전과 동일", { exact: true })).toHaveText("리비전과 동일", { timeout: 30_000 });
+  await browserErrors.assertClean();
+});
+
 test("qualifies real sign-up, session, collaboration, commit, and reload boundaries", async ({ context, page }) => {
   const websocketUrls = new Set<string>();
   await installConsoleErrorStackProbe(page);

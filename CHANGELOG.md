@@ -2,6 +2,14 @@
 
 All notable user-facing changes are recorded here.
 
+## 0.25.25 - 2026-10-24
+
+- Fixed the disabled Save button after pasting formatted content with links.
+  Browser-only link targets are now removed before document validation while
+  preserving link destinations, text, formatting, and nested list content.
+- Added regressions for strict document validation and real browser paste,
+  save, and reload behavior.
+
 ## 0.25.24 - 2026-10-19
 
 - Fixed Markdown table imports containing links in headers or cells. Web links,
