@@ -273,6 +273,68 @@ describe("Nyxdoc Document AST v2", () => {
     }
   });
 
+  it("projects relative clipboard font sizes without rejecting the whole document", () => {
+    const blocks = [{
+      id: "pasted-intro",
+      type: "p",
+      children: [{
+        text: "추천 목록",
+        fontSize: "1.6rem",
+        backgroundColor: "transparent",
+        bold: true,
+      }, {
+        type: "a",
+        target: "_blank",
+        url: "https://example.com/recommendation",
+        children: [{ text: "링크", fontSize: "16px", underline: true }],
+      }],
+    }];
+    const original = structuredClone(blocks);
+    const projected = projectNyxdocEditorContent(blocks);
+    const expected = structuredClone(blocks);
+    expected[0].children[0].fontSize = "24px";
+    Reflect.deleteProperty(expected[0].children[1], "target");
+
+    expect(nyxdocDocumentV2Schema.safeParse(projected).success).toBe(true);
+    expect(projected.blocks).toEqual(expected);
+    expect(blocks).toEqual(original);
+    expect(nyxdocDocumentV2Schema.safeParse({ schemaVersion: 2, blocks }).success).toBe(false);
+  });
+
+  it.each([
+    ["12pt", "16px"],
+    ["1.125em", "18px"],
+    ["125%", "20px"],
+    ["15.5px", "16px"],
+    [" 1.5REM ", "24px"],
+    ["1px", "12px"],
+    ["200px", "40px"],
+    ["inherit", undefined],
+    ["calc(1rem + 2px)", undefined],
+    ["0px", undefined],
+  ])("projects clipboard font size %s into the supported palette", (fontSize, expected) => {
+    const projected = projectNyxdocEditorContent([{
+      id: "font-size",
+      type: "p",
+      children: [{ text: "내용", bold: true, fontSize }],
+    }]);
+    expect(nyxdocDocumentV2Schema.parse(projected).blocks).toEqual([{
+      id: "font-size",
+      type: "p",
+      children: [{ text: "내용", bold: true, ...(expected ? { fontSize: expected } : {}) }],
+    }]);
+  });
+
+  it("keeps invalid font-size fields outside text leaves and non-string values strict", () => {
+    for (const block of [
+      { id: "p-1", type: "p", fontSize: "1.6rem", children: [{ text: "내용" }] },
+      { id: "p-1", type: "p", children: [{ text: "내용", fontSize: { value: "16px" } }] },
+      { id: "p-1", type: "p", children: [{ text: "내용", fontSize: "1.6rem", unknownStyle: true }] },
+    ]) {
+      expect(nyxdocDocumentV2Schema.safeParse(projectNyxdocEditorContent([block])).success).toBe(false);
+    }
+  });
+
   it("allows checked only on todo list blocks", () => {
     const result = nyxdocDocumentV2Schema.safeParse({
       schemaVersion: 2,

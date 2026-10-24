@@ -11,54 +11,99 @@ function isCollaborationWebSocket(rawUrl: string) {
   return expectedPath ? path === expectedPath : !path.startsWith("/_next/");
 }
 
-test("saves pasted formatted links from the new-document dialog and preserves them after reload", async ({ context, page }) => {
-  await installConsoleErrorStackProbe(page);
-  const browserErrors = installBrowserErrorGuard(page, "pasted-links");
-  await authenticateHardeningOwner(page);
+for (const clipboardKind of ["html", "slate-fragment"] as const) {
+  test(`saves pasted formatted links and relative font sizes from ${clipboardKind} in a child document`, async ({ context, page }) => {
+    await installConsoleErrorStackProbe(page);
+    const browserErrors = installBrowserErrorGuard(page, "pasted-links");
+    await authenticateHardeningOwner(page);
 
-  const title = `Pasted links ${Date.now()}`;
-  await page.getByRole("button", { name: "최상위 문서 만들기" }).first().click();
-  const dialog = page.getByRole("dialog", { name: "새 문서 만들기" });
-  await expect(dialog).toBeVisible();
-  await dialog.getByRole("textbox", { name: "문서 이름" }).fill(title);
-  const editor = dialog.locator('[data-slate-editor="true"][contenteditable="true"]');
-  await editor.click();
-  await context.grantPermissions(["clipboard-read", "clipboard-write"], {
-    origin: new URL(page.url()).origin,
-  });
-  await page.evaluate(async () => {
-    const html = [
-      "<h3>Linked recommendations</h3><ol>",
-      '<li><p><a href="https://example.com/one"><strong>First linked title</strong></a></p>',
-      "<ul><li><p><strong>Reason</strong>: keep the nested explanation.</p></li></ul></li>",
-      '<li><p><a href="https://example.com/two" target="_blank"><strong>Second linked title</strong></a></p></li>',
-      "</ol>",
-    ].join("");
-    const text = "Linked recommendations\nFirst linked title\nReason: keep the nested explanation.\nSecond linked title";
-    await navigator.clipboard.write([new ClipboardItem({
-      "text/html": new Blob([html], { type: "text/html" }),
-      "text/plain": new Blob([text], { type: "text/plain" }),
-    })]);
-  });
-  await page.keyboard.press("Control+v");
-  await expect(editor.getByRole("link", { name: "First linked title" })).toBeVisible();
-  const save = dialog.getByRole("button", { name: /저장/ });
-  await expect(save).toBeEnabled();
-  await save.click();
-  await expect(dialog).not.toBeVisible({ timeout: 30_000 });
-  await expect(page.getByRole("textbox", { name: "문서 이름" })).toHaveValue(title);
+    const title = `Pasted links ${clipboardKind} ${Date.now()}`;
+    const parentTitle = await page.getByRole("textbox", { name: "문서 이름" }).inputValue();
+    await page.getByRole("button", { name: `${parentTitle} 아래 새 문서`, exact: true }).first().click();
+    const dialog = page.getByRole("dialog", { name: "새 문서 만들기" });
+    await expect(dialog).toBeVisible();
+    await dialog.getByRole("textbox", { name: "문서 이름" }).fill(title);
+    const editor = dialog.locator('[data-slate-editor="true"][contenteditable="true"]');
+    await editor.click();
+    await context.grantPermissions(["clipboard-read", "clipboard-write"], {
+      origin: new URL(page.url()).origin,
+    });
+    await page.evaluate(async (kind) => {
+      const html = [
+        '<p><strong style="font-size:1.6rem;background-color:transparent">Imported introduction</strong></p>',
+        "<h3>Linked recommendations</h3><ol>",
+        '<li><p><a href="https://example.com/one"><strong>First linked title</strong></a></p>',
+        "<ul><li><p><strong>Reason</strong>: keep the nested explanation.</p></li></ul></li>",
+        '<li><p><a href="https://example.com/two" target="_blank"><strong>Second linked title</strong></a></p></li>',
+        "</ol>",
+      ].join("");
+      const blocks = [
+        { id: "clipboard-intro", type: "p", children: [{ text: "Imported introduction", bold: true, fontSize: "1.6rem", backgroundColor: "transparent" }] },
+        { id: "clipboard-heading", type: "h3", children: [{ text: "Linked recommendations" }] },
+        { id: "clipboard-first", type: "p", indent: 1, listStyleType: "decimal", children: [{ type: "a", target: "_blank", url: "https://example.com/one", children: [{ text: "First linked title", bold: true, fontSize: "16px" }] }] },
+        { id: "clipboard-detail", type: "p", indent: 2, listStyleType: "disc", children: [{ text: "Reason: keep the nested explanation." }] },
+        { id: "clipboard-second", type: "p", indent: 1, listStyleType: "decimal", children: [{ type: "a", target: "_blank", url: "https://example.com/two", children: [{ text: "Second linked title", bold: true }] }] },
+      ];
+      const encoded = btoa(encodeURIComponent(JSON.stringify(blocks)));
+      const clipboardHtml = kind === "slate-fragment"
+        ? `<div data-slate-fragment="${encoded}">${html}</div>`
+        : html;
+      const text = "Imported introduction\nLinked recommendations\nFirst linked title\nReason: keep the nested explanation.\nSecond linked title";
+      await navigator.clipboard.write([new ClipboardItem({
+        "text/html": new Blob([clipboardHtml], { type: "text/html" }),
+        "text/plain": new Blob([text], { type: "text/plain" }),
+      })]);
+    }, clipboardKind);
+    await page.keyboard.press("Control+v");
+    await expect(editor.getByRole("link", { name: "First linked title" })).toBeVisible();
+    const save = dialog.getByRole("button", { name: /저장/ });
+    await expect(save).toBeEnabled();
+    await save.click();
+    await expect(dialog).not.toBeVisible({ timeout: 30_000 });
+    await expect(page.getByRole("textbox", { name: "문서 이름" })).toHaveValue(title);
 
-  await page.reload();
-  await expect(page.getByRole("textbox", { name: "문서 이름" })).toBeEnabled({ timeout: 30_000 });
-  await expect(page.getByRole("textbox", { name: "문서 이름" })).toHaveValue(title);
-  const savedEditor = page.locator('[data-slate-editor="true"][contenteditable="true"]').first();
-  await expect(savedEditor.getByRole("link", { name: "First linked title" })).toHaveAttribute("href", "https://example.com/one");
-  await expect(savedEditor.getByRole("link", { name: "Second linked title" })).toHaveAttribute("href", "https://example.com/two");
-  await expect(savedEditor.locator("strong").filter({ hasText: "First linked title" })).toBeVisible();
-  await expect(savedEditor).toContainText("Reason: keep the nested explanation.");
-  await expect(page.getByText("리비전과 동일", { exact: true })).toHaveText("리비전과 동일", { timeout: 30_000 });
-  await browserErrors.assertClean();
-});
+    await page.reload();
+    await expect(page.getByRole("textbox", { name: "문서 이름" })).toBeEnabled({ timeout: 30_000 });
+    await expect(page.getByRole("textbox", { name: "문서 이름" })).toHaveValue(title);
+    const savedEditor = page.locator('[data-slate-editor="true"][contenteditable="true"]').first();
+    await expect(savedEditor.getByRole("link", { name: "First linked title" })).toHaveAttribute("href", "https://example.com/one");
+    await expect(savedEditor.getByRole("link", { name: "Second linked title" })).toHaveAttribute("href", "https://example.com/two");
+    await expect(savedEditor.locator("strong").filter({ hasText: "First linked title" })).toBeVisible();
+    await expect(savedEditor.locator("strong").filter({ hasText: "Imported introduction" })).toHaveCSS("font-size", "24px");
+    await expect(savedEditor).toContainText("Reason: keep the nested explanation.");
+    await expect(page.getByText("리비전과 동일", { exact: true })).toHaveText("리비전과 동일", { timeout: 30_000 });
+
+    // Also cover entering content after the dated child has already been created.
+    await savedEditor.evaluate((element) => {
+      element.focus();
+      const range = document.createRange();
+      range.selectNodeContents(element);
+      range.collapse(false);
+      const selection = window.getSelection();
+      selection?.removeAllRanges();
+      selection?.addRange(range);
+    });
+    await page.keyboard.press("Enter");
+    await page.evaluate(async () => {
+      await navigator.clipboard.write([new ClipboardItem({
+        "text/html": new Blob(['<p><strong style="font-size:1.6rem">Follow-up pasted content</strong></p>'], { type: "text/html" }),
+        "text/plain": new Blob(["Follow-up pasted content"], { type: "text/plain" }),
+      })]);
+    });
+    await page.keyboard.press("Control+v");
+    await expect(savedEditor).toContainText("Follow-up pasted content");
+    await expect(page.getByText("초안 저장됨", { exact: true })).toHaveText("초안 저장됨", { timeout: 30_000 });
+    const commit = page.getByRole("button", { name: "저장", exact: true }).first();
+    await expect(commit).toBeEnabled();
+    await commit.click();
+    await expect(page.getByText("리비전으로 저장되었습니다.", { exact: true })).toBeVisible({ timeout: 30_000 });
+    await page.reload();
+    await expect(page.getByRole("textbox", { name: "문서 이름" })).toBeEnabled({ timeout: 30_000 });
+    await expect(page.locator('[data-slate-editor="true"] strong').filter({ hasText: "Follow-up pasted content" })).toBeVisible();
+    await expect(page.getByText("리비전과 동일", { exact: true })).toHaveText("리비전과 동일", { timeout: 30_000 });
+    await browserErrors.assertClean();
+  });
+}
 
 test("qualifies real sign-up, session, collaboration, commit, and reload boundaries", async ({ context, page }) => {
   const websocketUrls = new Set<string>();

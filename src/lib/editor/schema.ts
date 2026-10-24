@@ -13,6 +13,24 @@ export const NYXDOC_FONT_SIZES = [
   "40px",
 ] as const;
 
+/** Clipboard CSS can use sizes outside the editor's fixed font-size palette. */
+export function normalizeNyxdocFontSize(value: string): (typeof NYXDOC_FONT_SIZES)[number] | undefined {
+  const match = value.trim().toLowerCase().match(/^(\d+(?:\.\d+)?|\.\d+)(px|pt|rem|em|%)$/);
+  if (!match) return undefined;
+  const magnitude = Number(match[1]);
+  // Relative clipboard sizes no longer have their source page's font context.
+  // Resolve them against the editor's 16px default before selecting its palette.
+  const factor = match[2] === "pt" ? 4 / 3
+    : match[2] === "rem" || match[2] === "em" ? 16
+      : match[2] === "%" ? 16 / 100 : 1;
+  const pixels = magnitude * factor;
+  if (!Number.isFinite(pixels) || pixels <= 0) return undefined;
+  return NYXDOC_FONT_SIZES.reduce((nearest, candidate) =>
+    Math.abs(Number.parseFloat(candidate) - pixels) < Math.abs(Number.parseFloat(nearest) - pixels)
+      ? candidate : nearest,
+  );
+}
+
 export const NYXDOC_TEXT_ALIGNMENTS = ["start", "left", "center", "right", "end", "justify"] as const;
 export const NYXDOC_LIST_STYLES = ["disc", "decimal", "todo"] as const;
 
@@ -36,8 +54,15 @@ export function stripNyxdocEditorRuntimeFields(value: unknown): unknown {
   // Plate's HTML deserializer adds a target even when the pasted anchor has
   // none. Link opening behavior belongs to Nyxdoc's renderer, not AST v2.
   const isLink = "type" in value && value.type === "a";
+  const isText = "text" in value && typeof value.text === "string" && !("children" in value);
   return Object.fromEntries(
     Object.entries(value)
+      .map(([key, child]) => [
+        key,
+        isText && key === "fontSize" && typeof child === "string"
+          ? normalizeNyxdocFontSize(child)
+          : child,
+      ] as const)
       .filter(([key, child]) =>
         !EDITOR_RUNTIME_FIELDS.has(key)
         && child !== undefined

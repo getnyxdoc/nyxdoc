@@ -536,6 +536,32 @@ describe("shared draft node ID repair", () => {
 });
 
 describe("collaboration update persistence", () => {
+  it("persists and reloads a shared draft pasted with relative font sizes", () => {
+    const { database, workspace, created, state, firstProcessActor } = storedDraftFixture();
+    const ydoc = collaborationYDocFromState(state.state);
+    const shared = ydoc.get("content", Y.XmlText);
+    ydoc.transact(() => {
+      shared.delete(0, shared.length);
+      shared.applyDelta(slateNodesToInsertDelta([{
+        id: "pasted-intro",
+        type: "p",
+        children: [{ text: "붙여넣은 제목", fontSize: "1.6rem", bold: true }],
+      }] as never));
+    }, "test-pasted-font-size");
+
+    persistCollaborationUpdate(database, state.roomName, ydoc, firstProcessActor);
+    const reloaded = ensureCollaborationState(database, workspace.id, created.document.id);
+    expect(collaborationDocumentFromYDoc(collaborationYDocFromState(reloaded.state)).content.blocks).toEqual([{
+      id: "pasted-intro",
+      type: "p",
+      children: [{ text: "붙여넣은 제목", fontSize: "24px", bold: true }],
+    }]);
+    const raw = yTextToSlateElement(shared) as unknown as {
+      children: Array<{ children: Array<{ fontSize?: string }> }>;
+    };
+    expect(raw.children[0].children[0].fontSize).toBe("1.6rem");
+  });
+
   it("ignores CRDT-only history when the projected document did not change", () => {
     const {
       database,

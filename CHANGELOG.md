@@ -2,6 +2,15 @@
 
 All notable user-facing changes are recorded here.
 
+## 0.25.26 - 2026-10-24
+
+- Fixed Save remaining disabled for pasted web content with relative font sizes,
+  including Gemini text copied again from an unsaved Nyxdoc document. Clipboard
+  font sizes now map to the supported palette while preserving text, links,
+  emphasis and list structure. Canonical document validation remains strict.
+- Covered HTML and Slate clipboard fragments through child-document creation,
+  saving, reload, and further edits to an existing collaborative document.
+
 ## 0.25.25 - 2026-10-24
 
 - Fixed the disabled Save button after pasting formatted content with links.
