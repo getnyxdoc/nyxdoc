@@ -1,5 +1,5 @@
 import type { Value } from "platejs";
-import { NYXDOC_FONT_SIZES } from "@/lib/editor/schema";
+import { NYXDOC_FONT_SIZES, normalizeNyxdocFontSize } from "@/lib/editor/schema";
 
 // The generic Plate HTML deserializer becomes prohibitively expensive for
 // office-sized clipboard payloads. This bounded, linear parser preserves the
@@ -96,15 +96,6 @@ function supportedColor(value: string) {
     : undefined;
 }
 
-function nearestFontSize(value: string) {
-  const size = Number.parseFloat(value);
-  if (!Number.isFinite(size)) return undefined;
-  return [...NYXDOC_FONT_SIZES].sort(
-    (left, right) => Math.abs(Number.parseFloat(left) - size)
-      - Math.abs(Number.parseFloat(right) - size),
-  )[0];
-}
-
 function elementMarks(element: HTMLElement, inherited: TextMarks): TextMarks {
   const marks = { ...inherited };
   const tag = element.tagName;
@@ -126,7 +117,7 @@ function elementMarks(element: HTMLElement, inherited: TextMarks): TextMarks {
   if (tag === "CODE") marks.code = true;
   const color = supportedColor(style.color);
   const backgroundColor = supportedColor(style.backgroundColor);
-  const fontSize = nearestFontSize(style.fontSize);
+  const fontSize = normalizeNyxdocFontSize(style.fontSize);
   if (color) marks.color = color;
   if (backgroundColor && backgroundColor !== "transparent") {
     marks.backgroundColor = backgroundColor;
