@@ -163,6 +163,35 @@ test("qualifies real sign-up, session, collaboration, commit, and reload boundar
   await page.keyboard.type(marker);
 
   await expect(observerEditor).toContainText(marker, { timeout: 30_000 });
+
+  await page.keyboard.press("Enter");
+  await page.keyboard.insertText("왼쪽 지울");
+  await page.keyboard.press("Enter");
+  await page.keyboard.insertText("문장 오른쪽");
+  await editor.evaluate((element) => {
+    const paragraphs = Array.from(element.querySelectorAll(":scope > p"));
+    const start = paragraphs.at(-2)?.querySelector("[data-slate-string]")?.firstChild;
+    const end = paragraphs.at(-1)?.querySelector("[data-slate-string]")?.firstChild;
+    if (!start || !end) throw new Error("Expected two new paragraphs for the IME edit");
+    window.getSelection()?.setBaseAndExtent(end, "문장".length, start, "왼쪽 ".length);
+  });
+  const imeText = "기다";
+  const expectedParagraph = `왼쪽 ${imeText} 오른쪽`;
+  const cdp = await context.newCDPSession(page);
+  try {
+    await page.keyboard.press("Backspace");
+    await cdp.send("Input.imeSetComposition", {
+      text: imeText,
+      selectionStart: imeText.length,
+      selectionEnd: imeText.length,
+    });
+    await page.keyboard.up("ArrowRight");
+    await cdp.send("Input.insertText", { text: imeText });
+  } finally {
+    await cdp.detach();
+  }
+  await expect(editor.locator(":scope > p").last()).toHaveText(expectedParagraph);
+  await expect(observerEditor.locator(":scope > p").last()).toHaveText(expectedParagraph, { timeout: 30_000 });
   await expect(page.getByText("초안 저장됨", { exact: true })).toHaveText("초안 저장됨", {
     timeout: 30_000,
   });
@@ -179,6 +208,7 @@ test("qualifies real sign-up, session, collaboration, commit, and reload boundar
   await expect(observer.getByRole("textbox", { name: "문서 이름" })).toBeEnabled({ timeout: 30_000 });
   const reloadedEditor = observer.locator('[data-slate-editor="true"][contenteditable="true"]').first();
   await expect(reloadedEditor).toContainText(marker, { timeout: 30_000 });
+  await expect(reloadedEditor.locator(":scope > p").last()).toHaveText(expectedParagraph);
   await expect(observer.getByText("리비전과 동일", { exact: true })).toHaveText("리비전과 동일", {
     timeout: 30_000,
   });
