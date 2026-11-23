@@ -2,6 +2,12 @@
 
 All notable user-facing changes are recorded here.
 
+## 0.25.27 - 2026-11-23
+
+- Fixed Korean IME input landing at the wrong offset when a navigation key is
+  released during composition, including after deleting a selection across
+  paragraphs in a collaborative draft.
+
 ## 0.25.26 - 2026-10-24
 
 - Fixed Save remaining disabled for pasted web content with relative font sizes,

@@ -713,6 +713,67 @@ test("keeps the collaborative table caret through a Korean IME composition", asy
   await expect(page.getByTestId("collaboration-repair-count")).toHaveText("0");
 });
 
+test("keeps Korean IME text at the insertion point when a navigation key is released", async ({ context, page }) => {
+  await page.goto("/dev/collaboration-e2e");
+  await expect(page.getByTestId("collaboration-ready")).toHaveText("ready");
+  const editor = page.getByRole("textbox", { name: "협업 선택 테스트" });
+  const paragraph = editor.getByText("첫 문단", { exact: true });
+  await paragraph.click();
+  await page.keyboard.press("Home");
+  await page.keyboard.press("ArrowRight");
+  await page.keyboard.press("ArrowRight");
+
+  const cdp = await context.newCDPSession(page);
+  try {
+    await cdp.send("Input.imeSetComposition", {
+      text: "ㄱ",
+      selectionStart: 1,
+      selectionEnd: 1,
+    });
+    await page.keyboard.up("ArrowRight");
+    await cdp.send("Input.insertText", { text: "기" });
+  } finally {
+    await cdp.detach();
+  }
+
+  await expect(editor.locator(":scope > p").first()).toHaveText("첫 기문단");
+});
+
+test("inserts Korean text at the join immediately after deleting a cross-paragraph selection", async ({ context, page }) => {
+  await page.goto("/dev/collaboration-e2e");
+  await expect(page.getByTestId("collaboration-ready")).toHaveText("ready");
+  const editor = page.getByRole("textbox", { name: "협업 선택 테스트" });
+  const paragraphs = editor.locator(":scope > p");
+  await paragraphs.first().click();
+  await editor.evaluate((element) => {
+    const [first, second] = element.querySelectorAll(":scope > p [data-slate-string]");
+    if (!first?.firstChild || !second?.firstChild) throw new Error("Expected two text paragraphs");
+    window.getSelection()?.setBaseAndExtent(second.firstChild, 2, first.firstChild, 2);
+  });
+
+  const cdp = await context.newCDPSession(page);
+  try {
+    await page.keyboard.press("Backspace");
+    await cdp.send("Input.imeSetComposition", {
+      text: "ㄱ",
+      selectionStart: 1,
+      selectionEnd: 1,
+    });
+    await cdp.send("Input.imeSetComposition", {
+      text: "기다",
+      selectionStart: 2,
+      selectionEnd: 2,
+    });
+    await page.keyboard.up("ArrowRight");
+    await cdp.send("Input.insertText", { text: "기다" });
+  } finally {
+    await cdp.detach();
+  }
+
+  await expect(paragraphs.first()).toHaveText("첫 기다 문단");
+  await expect(paragraphs).toHaveCount(3);
+});
+
 test("keeps the collaborative table caret when an agent-style document replacement arrives", async ({ page }) => {
   await page.goto("/dev/collaboration-e2e");
   await expect(page.getByTestId("collaboration-ready")).toHaveText("ready");

@@ -774,6 +774,8 @@ function domEditorSelection(editor: PlateEditor) {
 }
 
 function syncEditorSelectionFromDOM(editor: PlateEditor) {
+  // The DOM also contains uncommitted IME text, so its offsets may not match Slate's text.
+  if (editor.api.isComposing()) return editor.selection;
   const selection = domEditorSelection(editor);
   if (selection) editor.tf.select(selection);
   return selection;
@@ -2201,7 +2203,7 @@ function handleEditorShortcut(
   requestLinkEditor: (selection: PlateEditor["selection"]) => void,
   onDiagnostic?: (event: NyxdocEditorDiagnostic) => void,
 ) {
-  if (event.nativeEvent.isComposing) return;
+  if (event.nativeEvent.isComposing || editor.api.isComposing()) return;
 
   const mod = event.ctrlKey || event.metaKey;
   const key = event.key.toLowerCase();
@@ -3572,7 +3574,8 @@ export function NyxdocRichEditor({
               });
             }}
             onKeyDownCapture={readOnly ? undefined : (event) => {
-              if (!event.nativeEvent.isComposing) {
+              const composing = composingRef.current || event.nativeEvent.isComposing;
+              if (!composing) {
                 const selection = syncEditorSelectionFromDOM(editor);
                 const bookmark = stableCaretBookmark(editor, selection);
                 if (bookmark) stableCaretRef.current = bookmark;
@@ -3583,8 +3586,9 @@ export function NyxdocRichEditor({
                 key: diagnosticKey(event.nativeEvent),
                 selection: caretSelectionSnapshot(editor, editor.selection, editorRootRef.current),
                 blockCount: editor.children.length,
-                composing: event.nativeEvent.isComposing,
+                composing,
               });
+              if (composing) return;
               handleEditorShortcut(
                 event,
                 editor,
@@ -3596,6 +3600,7 @@ export function NyxdocRichEditor({
               );
             }}
             onKeyUp={readOnly ? undefined : (event) => {
+              if (composingRef.current || event.nativeEvent.isComposing) return;
               if (event.shiftKey || ["ArrowDown", "ArrowLeft", "ArrowRight", "ArrowUp", "End", "Home"].includes(event.key)) {
                 syncEditorSelectionFromDOM(editor);
                 recordCaretTrace({
@@ -3616,7 +3621,9 @@ export function NyxdocRichEditor({
               selection: caretSelectionSnapshot(editor, editor.selection, editorRootRef.current),
               blockCount: editor.children.length,
             })}
-            onMouseUp={readOnly ? undefined : () => syncEditorSelectionFromDOM(editor)}
+            onMouseUp={readOnly ? undefined : () => {
+              if (!composingRef.current) syncEditorSelectionFromDOM(editor);
+            }}
           >
             <PlateContent
               className={`${styles.editorContent} ${readOnly ? styles.documentViewContent : styles.embeddedEditorContent}`}
@@ -3803,6 +3810,7 @@ export function EditorLab({ userName }: { userName: string }) {
                 })),
               )}
               onKeyUp={(event) => {
+                if (event.nativeEvent.isComposing) return;
                 if (event.shiftKey || ["ArrowDown", "ArrowLeft", "ArrowRight", "ArrowUp", "End", "Home"].includes(event.key)) {
                   syncEditorSelectionFromDOM(editor);
                 }
