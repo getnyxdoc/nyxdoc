@@ -74,10 +74,7 @@ VMで実行してください。ローカル開発にはNode.js 24を使用し�
 git clone https://github.com/getnyxdoc/nyxdoc.git && cd nyxdoc && ./scripts/install.sh
 ```
 
-インストーラーは`.env.production`を作成し、異なる2つの秘密値を画面へ表示せずに
-生成し、このcheckoutのバージョンに対応するバージョン付きリリースイメージを取得して
-全サービスを起動し、health checkを待ちます。このcheckoutからビルドする場合は
-`./scripts/install.sh --build`を使います。
+インストーラーは2つの秘密値を生成し、チェックアウトしたコミットからLinux AMD64用のイメージをビルドしてサービスを起動します。GitHubではソースを公開し、本番環境には検証済みの`main`コミットをデプロイします。
 
 [http://localhost:3191](http://localhost:3191)を開きます。最初のアカウントがサイト
 所有者になります。SMTPや独自メールドメインは不要です。最初の所有者作成後は、
@@ -91,16 +88,7 @@ git clone https://github.com/getnyxdoc/nyxdoc.git && cd nyxdoc && ./scripts/inst
 ./scripts/uninstall.sh --purge --confirm-purge=nyxdoc
 ```
 
-まだ`0.25.17`または`0.25.18`を利用している環境では、Nyxdoc checkoutから現在の
-release bridgeを実行します。
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/getnyxdoc/nyxdoc/v0.25.19/scripts/update-bootstrap.sh | bash
-```
-
-このbridgeは公開共同編集境界を先に閉じ、受理済みの編集をすべて保存してから、旧版の
-updaterにバックアップを作成させます。`0.25.19`以降は通常どおり
-`./scripts/update.sh`を使用します。
+旧リリースから更新する場合は[ソースデプロイへの移行手順](DEPLOYMENT.md#switching-an-existing-release-installation)を一度実行します。
 
 `update.sh`にはクリーンなGit checkoutが必要で、実行中の環境を変更する前に検証済み
 バックアップを作成します。同じ更新が失敗した場合のみ、保存済みかつ再検証された
@@ -164,7 +152,7 @@ UIの詳細が変更される可能性があります。
 - [Agent To-do](docs/document-tasks.md)
 - [エディター品質基準](docs/editor-quality-gate.md)
 - [オープンソース新規ユーザーガイド](docs/open-source-readiness.md)
-- [テストとリリース適格性](docs/testing-and-release-qualification.md)
+- [テストと本番デプロイ](docs/testing-and-release-qualification.md)
 
 ## コミュニティとセキュリティ
 

@@ -9,16 +9,13 @@ usage() {
   cat <<'EOF'
 Usage: ./scripts/install.sh [--build]
 
-Install the current Nyxdoc release with Docker Compose.
-  default   pull the versioned image from ghcr.io/getnyxdoc/nyxdoc
-  --build   build the image from this checkout instead
+Build and install the current Git commit on Linux AMD64. --build is optional.
 EOF
 }
 
-build_local=false
 for argument in "$@"; do
   case "$argument" in
-    --build) build_local=true ;;
+    --build) ;;
     -h|--help) usage; exit 0 ;;
     *) usage >&2; nyxdoc_die "Unknown argument: $argument" ;;
   esac
@@ -58,57 +55,27 @@ if nyxdoc_env_remove NYXDOC_SOURCE_REVISION; then
 fi
 mkdir -p "$(nyxdoc_backup_host_path)"
 
-# Existing installations from before v0.25.18 did not record which Git
-# lineage they intended to follow. Preserve their established behavior once,
-# then persist it so future updates never infer authority from an image alone.
-configured_image="$(nyxdoc_env_get NYXDOC_IMAGE)"
-authority="$(nyxdoc_update_authority "$configured_image" "")"
-if ! nyxdoc_update_authority_is_explicit; then
-  nyxdoc_env_set NYXDOC_UPDATE_AUTHORITY "$authority"
-  nyxdoc_info "Persisted NYXDOC_UPDATE_AUTHORITY=$authority for deterministic updates."
-fi
-
-version="$(nyxdoc_package_version)"
 source_revision="$(nyxdoc_source_revision)"
-if $build_local; then
-  image="nyxdoc-app:${version}"
-  nyxdoc_env_set NYXDOC_IMAGE "$image"
-  nyxdoc_info "Building $image from source revision $source_revision."
-  nyxdoc_compose config --quiet
-  nyxdoc_compose build --build-arg "SOURCE_REVISION=$source_revision"
-else
-  configured_image="$(nyxdoc_env_get NYXDOC_IMAGE)"
-  image="$configured_image"
-  case "$configured_image" in
-    ""|nyxdoc-app:*|ghcr.io/getnyxdoc/nyxdoc:*)
-      image="ghcr.io/getnyxdoc/nyxdoc:${version}"
-      ;;
-  esac
-
-  if nyxdoc_is_official_release_image "$image"; then
-    [[ "$source_revision" =~ ^[0-9a-f]{40}$ ]] \
-      || nyxdoc_die "Verified official image installation requires a Git checkout at the release revision."
-    image="$(nyxdoc_pin_official_release_image "$image")"
-    nyxdoc_info "Pulling verified official image $image."
-    NYXDOC_IMAGE="$image" nyxdoc_compose config --quiet
-    NYXDOC_IMAGE="$image" nyxdoc_compose pull app collaboration gateway
-    nyxdoc_verify_official_image_revision "$image" "$source_revision"
-    # Persist only the immutable, provenance-verified digest. A failed pull or
-    # verification must never replace a previously known-good image setting.
-    nyxdoc_env_set NYXDOC_IMAGE "$image"
-  else
-    nyxdoc_info "Pulling $image."
-    NYXDOC_IMAGE="$image" nyxdoc_compose config --quiet
-    NYXDOC_IMAGE="$image" nyxdoc_compose pull app collaboration gateway
-  fi
-fi
+[[ "$source_revision" =~ ^[0-9a-f]{40}$ ]] || nyxdoc_die "Installation requires a Git checkout."
+[ -z "$(git -C "$NYXDOC_ROOT" status --porcelain)" ] || nyxdoc_die "Installation requires a clean checkout."
+[ ! -e "$(nyxdoc_update_state_file)" ] || nyxdoc_die "Resume the interrupted update with ./scripts/update.sh."
+image="nyxdoc-app:${source_revision}"
 
 running_data_containers="$(nyxdoc_running_containers_using_data_volume)"
 if [ -n "$running_data_containers" ]; then
   nyxdoc_services_use_image "$image" \
     || nyxdoc_die "The Nyxdoc data volume is in use by different or incomplete services. Use ./scripts/update.sh for upgrades, or stop the conflicting containers first."
+  nyxdoc_verify_image_source_revision "$image" "$source_revision"
   nyxdoc_info "The selected image is already running; no offline database migration is required."
 else
+  nyxdoc_info "Building $image from source revision $source_revision."
+  NYXDOC_IMAGE="$image" nyxdoc_compose config --quiet
+  NYXDOC_IMAGE="$image" nyxdoc_compose build --build-arg "SOURCE_REVISION=$source_revision"
+  nyxdoc_verify_image_source_revision "$image" "$source_revision"
+fi
+nyxdoc_env_set NYXDOC_IMAGE "$image"
+nyxdoc_env_set NYXDOC_UPDATE_AUTHORITY origin
+if [ -z "$running_data_containers" ]; then
   nyxdoc_run_offline_database_migrations
 fi
 

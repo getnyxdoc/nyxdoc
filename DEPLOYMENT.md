@@ -1,6 +1,6 @@
 # Self-hosting Nyxdoc
 
-The supported production path is Linux with Docker Compose. Windows, macOS,
+The supported production path is Linux AMD64 with Docker Compose. Windows, macOS,
 and native Node.js execution are useful for development but are best effort.
 
 Nyxdoc runs three processes from one image:
@@ -13,7 +13,7 @@ Nyxdoc runs three processes from one image:
 ## 1. Requirements
 
 - Docker Engine with Compose v2
-- Docker Buildx (used to verify immutable stable release images during update)
+- Git and Docker Buildx for local source builds
 - a persistent host directory for backups
 - a reverse proxy with HTTPS for an internet-facing installation
 - at least 1 GB of available memory for a small installation
@@ -32,15 +32,13 @@ The installer:
 
 - creates `.env.production` with mode `0600` when it is missing;
 - generates two independent secrets without displaying them;
-- pulls the image matching the checked-out Nyxdoc version;
+- builds the checked-out Git commit as a local Linux AMD64 image;
 - applies database migrations in an isolated one-off container before any
   public writer starts;
 - starts the app, collaboration server, and gateway; and
 - waits until the public gateway and the internal collaboration health check respond.
 
-Use `./scripts/install.sh --build` to build the current checkout instead of
-pulling the release image. Re-running the installer is safe and preserves the
-existing data volume.
+Use `./scripts/update.sh` to change the revision of a running installation.
 
 For an internet-facing installation, edit `.env.production` before exposing
 the service:
@@ -48,7 +46,6 @@ the service:
 Set:
 
 ```dotenv
-NYXDOC_IMAGE=ghcr.io/getnyxdoc/nyxdoc:0.25.22
 BETTER_AUTH_URL=https://docs.example.com
 BETTER_AUTH_SECRET=<first random value>
 AUTH_TRUSTED_ORIGINS=https://docs.example.com
@@ -168,83 +165,52 @@ fail-closed and use their normalized immediate peer address.
 
 ## 5. One-command updates and migrations
 
-### Maintainer release publication
+### Deploy a tested source commit
 
-Stable releases are started manually against `main` with an explicit version;
-do not create or push the final Git tag yourself:
-
-```bash
-gh workflow run Release --repo getnyxdoc/nyxdoc --ref main -f version=X.Y.Z
-```
-
-The workflow verifies source and metadata, builds or reuses an immutable
-candidate, qualifies its exact digest, and serializes publication. It publishes
-and verifies `ghcr.io/getnyxdoc/nyxdoc:X.Y.Z` first, creates `vX.Y.Z` at the
-exact qualified source revision second, moves `X.Y` and `latest` aliases third,
-and creates the GitHub Release last. A final tag push does not start a release.
-Rerunning a partially completed workflow is idempotent when existing image and
-tag provenance agree; a tag/revision mismatch or a final tag without its
-pullable semver image is a hard failure.
-
-### Operator update
-
-Run the stable updater from the repository checkout:
+GitHub hosts the source. Build the production image locally on the Linux AMD64
+server. Run from the deployment checkout with the full commit that passed CI:
 
 ```bash
-./scripts/update.sh
+./scripts/update.sh --revision <tested-main-commit>
 ```
 
-An installation currently on `0.25.17` or `0.25.18` must use the target
-release's one-time entry point for its first update. Run it from that checkout:
+Without a revision, the updater selects the latest commit on `origin/main`.
+It verifies the running image and takes a verified backup before checkout.
+It builds `nyxdoc-app:<commit>` while the old services are still serving,
+checks the embedded revision, stops the writers, rehearses migrations on a
+copy, then updates the live database, starts the services and checks health.
+A repeat deployment of the same healthy revision reuses its running image.
+
+### Switching an existing release installation
+
+For installations still on 0.25.17 or 0.25.18, first complete the historical
+[0.25.19 backup bridge](https://github.com/getnyxdoc/nyxdoc/blob/v0.25.19/DEPLOYMENT.md).
+For a release installation on 0.25.19 through 0.25.28, finish any interrupted
+update using its original updater. Confirm the checkout is clean, its origin
+is your intended repository and the running services are healthy. Then load
+the tested updater beside the live checkout so it can back up the old revision
+before changing it. Run the following in Bash from the installation directory:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/getnyxdoc/nyxdoc/v0.25.19/scripts/update-bootstrap.sh | bash
+(
+  set -euo pipefail
+  revision='REPLACE_WITH_TESTED_FULL_SHA'
+  git fetch --no-tags origin main
+  git merge-base --is-ancestor HEAD "$revision"
+  git merge-base --is-ancestor "$revision" FETCH_HEAD
+  test ! -e .nyxdoc-update-state
+  staging=$(mktemp -d)
+  trap 'rm -rf -- "$staging"' EXIT
+  git archive "$revision" scripts/update.sh scripts/compose-common.sh | tar -x -C "$staging"
+  source scripts/compose-common.sh
+  nyxdoc_env_set NYXDOC_UPDATE_AUTHORITY origin
+  NYXDOC_UPDATE_ROOT="$PWD" bash "$staging/scripts/update.sh" --revision "$revision"
+)
 ```
 
-The updaters shipped in `0.25.17` and `0.25.18` reach their pre-update backup
-path before repaired target code can run. The standalone bridge therefore pins
-both source and image to exactly `0.25.19`, stops the public gateway, and
-positively waits until the legacy collaboration service reports zero
-connections. While collaboration is still alive, it creates and verifies a
-backup and persists a receipt containing the backup manifest digest and the
-already verified immutable target-image digest. Only after that durable
-boundary exists does it
-stop collaboration and hand the pinned target to the installed updater. The
-release qualification test writes through a real WebSocket immediately before
-this handoff and reads the resulting Yjs draft directly from the bridge backup.
-The safety proof therefore does not depend on a sleep or the incomplete legacy
-shutdown path. If that handoff is interrupted after the source checkout moves,
-running the same bootstrap command again re-verifies the receipt and resumes
-with that recorded digest rather than resolving the mutable image tag again.
-The bridge rejects versions older than `0.25.17`, is a transparent handoff on
-`0.25.19` and newer installations, and normal future updates use
-`./scripts/update.sh`.
-
-The updater refuses a dirty Git checkout, skips Git tags that have no published
-stable semver image, creates and verifies a backup before changing source or
-containers, verifies that the running image belongs to the current source
-revision, checks out the selected qualified release, pulls its exact image,
-stops the gateway, collaboration server, and app, applies migrations in an
-isolated one-off container, starts the services, and verifies health. A legacy
-`NYXDOC_SOURCE_REVISION` value in `.env.production` is removed automatically;
-the immutable image metadata is authoritative. To follow `main` from source explicitly, use
-`./scripts/update.sh --channel main --build`.
-
-`NYXDOC_UPDATE_AUTHORITY` is the explicit source-of-truth for stable update
-lineage, independent from `NYXDOC_IMAGE`:
-
-- `official` follows the canonical GitHub stable tags. It may deliberately
-  switch an unrelated checkout to that verified release commit while leaving
-  its `origin` remote unchanged.
-- `origin` follows only the checkout's configured `origin`, including Forgejo,
-  a mirror, or a fork. It never switches to GitHub because an image happens to
-  be from GHCR.
-
-New production installs set `NYXDOC_UPDATE_AUTHORITY=official`; development
-examples set `origin`. Existing installations without the setting keep their
-former image-derived behavior once, then persist the selected authority after
-a verified pre-update backup. `main` and `--build` require `origin`; official
-authority is limited to verified stable releases.
+If interrupted after a receipt is created, retry the staged updater for the
+same commit with the existing receipt. Subsequent source deployments use
+`./scripts/update.sh --revision <tested-main-commit>` directly.
 
 During an offline install or update migration, Nyxdoc:
 

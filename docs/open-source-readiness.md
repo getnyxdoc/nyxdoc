@@ -25,16 +25,7 @@ For local development, use Node.js 24 and npm instead of Docker Compose.
 git clone https://github.com/getnyxdoc/nyxdoc.git && cd nyxdoc && ./scripts/install.sh
 ```
 
-The installer copies `.env.production.example` when needed, creates two
-different secrets without printing them, selects the versioned GHCR image tag
-matching the checked-out `package.json` version, starts `app`, `collaboration`, and
-`gateway`, and waits for the public gateway plus the internal collaboration
-health check. To build the checkout
-instead of pulling the release image:
-
-```bash
-./scripts/install.sh --build
-```
+The installer creates the production configuration and secrets, builds the current Git commit locally on Linux AMD64, starts all three services and checks their health.
 
 Open <http://localhost:3191>. The first account becomes the site owner; SMTP
 and a custom email domain are not required. After that, registration is
@@ -96,26 +87,11 @@ copy from the repository checkout:
 ./scripts/uninstall.sh --purge --confirm-purge=nyxdoc
 ```
 
-For an installation still on `0.25.17` or `0.25.18`, run the current release
-bridge from the checkout so accepted collaboration writes are drained before
-the old updater's backup:
+For an installation from an archived release, use the one-time transition
+in [DEPLOYMENT.md](../DEPLOYMENT.md#switching-an-existing-release-installation).
+Source installs update from a clean checkout using a verified backup and a
+descendant of the installed revision on `origin/main`.
 
-```bash
-curl -fsSL https://raw.githubusercontent.com/getnyxdoc/nyxdoc/v0.25.19/scripts/update-bootstrap.sh | bash
-```
-
-Use `./scripts/update.sh` for every later release.
-
-`update.sh` requires a clean Git checkout. It normally requires a running app
-so it can create and verify a pre-update backup; after an interrupted update it
-can resume only when the persisted receipt matches the same source/target and
-the backup verifies again. The default channel follows the newest canonical
-remote `vX.Y.Z` release tag. The script only moves forward to a descendant
-revision. For the source-only main channel, it requires the explicit form:
-
-```bash
-./scripts/update.sh --channel main --build
-```
 
 Normal uninstall removes containers and the Compose network while preserving
 the data volume, backups, environment, and source. Purge removes the Docker
@@ -194,26 +170,7 @@ suite when relevant. Database changes must use forward-only migrations.
   not fit a template.
 - Security reports go to the private address in `SECURITY.md` and the issue
   form; they should not be opened publicly.
-- Release qualification is documented in
-  [`testing-and-release-qualification.md`](testing-and-release-qualification.md).
-  CI runs static checks, integration checks, Compose lifecycle checks, and
-  release qualification against an immutable candidate image before promotion.
-  The immutable digest is the CI promotion boundary; normal `install.sh` and
-  `update.sh` use the matching versioned release image tag.
-
-## Review findings and follow-up recommendations
-
-The following are concrete documentation or release-hygiene follow-ups, not
-claims about missing product capabilities:
-
-1. Keep the version in all README variants, `.env.production.example`, and
-   deployment examples synchronized whenever a release is cut.
-2. Consider requiring a version-like value in the bug template instead of the
-   stale `0.24.1` placeholder, and link the release-qualification document from
-   the contributor landing path.
-3. Add a redacted screenshot of the first-agent connection wizard. The current
-   README screenshots accurately show document editing and Agent To-do, but not
-   the connection path that is most likely to block a newcomer.
+- See [Testing and production deployment](testing-and-release-qualification.md) for the checks used on source commits.
 
 ## Verification boundary
 

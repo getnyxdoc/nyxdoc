@@ -73,10 +73,7 @@ Git 저장소는 소스 코드에 탁월합니다. Nyxdoc은 일반 문서에 �
 git clone https://github.com/getnyxdoc/nyxdoc.git && cd nyxdoc && ./scripts/install.sh
 ```
 
-설치기는 `.env.production`을 만들고, 서로 다른 비밀값 두 개를 화면에 노출하지
-않고 생성하며, 이 checkout 버전에 맞는 버전 릴리스 이미지를 받은 뒤 모든 서비스를
-시작하고 상태를 확인합니다. 현재 소스에서 직접 빌드하려면
-`./scripts/install.sh --build`를 사용합니다.
+설치기는 두 비밀값을 생성하고 현재 Git 커밋을 Linux AMD64 이미지로 빌드한 뒤 서비스를 시작합니다. GitHub에는 소스를 공개하고 운영에는 검증한 `main` 커밋을 배포합니다.
 
 [http://localhost:3191](http://localhost:3191)을 엽니다. 최초 계정이 사이트 소유자가
 됩니다. SMTP와 개인 도메인은 없어도 됩니다. 첫 소유자가 만들어진 뒤에는 기본적으로
@@ -90,16 +87,7 @@ git clone https://github.com/getnyxdoc/nyxdoc.git && cd nyxdoc && ./scripts/inst
 ./scripts/uninstall.sh --purge --confirm-purge=nyxdoc
 ```
 
-아직 `0.25.17` 또는 `0.25.18`을 사용 중인 설치는 Nyxdoc checkout에서 현재 릴리스
-브리지를 실행합니다.
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/getnyxdoc/nyxdoc/v0.25.19/scripts/update-bootstrap.sh | bash
-```
-
-이 브리지는 공개 협업 경계를 먼저 닫고 이미 받아들인 편집 내용을 모두 저장한 뒤,
-구버전 업데이트기가 백업을 만들게 합니다. `0.25.19`부터는 평소처럼
-`./scripts/update.sh`를 사용합니다.
+기존 릴리스로 설치했다면 [소스 배포 전환 절차](DEPLOYMENT.md#switching-an-existing-release-installation)를 한 번 실행합니다.
 
 `update.sh`는 깨끗한 Git checkout이 필요하며 실행 중인 설치를 바꾸기 전 검증된
 백업을 만듭니다. 같은 업데이트가 실패했을 때만 저장된 검증 백업 영수증으로 재개할 수
@@ -162,7 +150,7 @@ npm run build
 - [Agent To-do](docs/document-tasks.md)
 - [편집기 품질 기준](docs/editor-quality-gate.md)
 - [오픈소스 신규 사용자 안내](docs/open-source-readiness.md)
-- [테스트 및 릴리스 적격성](docs/testing-and-release-qualification.md)
+- [테스트와 운영 배포](docs/testing-and-release-qualification.md)
 
 ## 참여와 보안
 

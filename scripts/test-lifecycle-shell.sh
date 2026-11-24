@@ -2,6 +2,9 @@
 
 set -Eeuo pipefail
 
+# Most fixtures exercise recovery of archived stable installations.
+export NYXDOC_UPDATE_CHANNEL=stable
+
 root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 temporary="$(mktemp -d "${TMPDIR:-/tmp}/nyxdoc-lifecycle-shell.XXXXXX")"
 cleanup() {
@@ -103,246 +106,6 @@ nyxdoc_clear_update_state
 sed -i \
   's#^NYXDOC_BACKUP_HOST_PATH=.*#NYXDOC_BACKUP_HOST_PATH=./data/backups#' \
   "$temporary/.env.production"
-
-fake_bin="$temporary/fake-bin"
-registry_state="$temporary/registry-state"
-docker_log="$temporary/docker.log"
-mkdir -p "$fake_bin"
-cp "$root/scripts/test-fixtures/fake-registry-docker.sh" "$fake_bin/docker"
-chmod 0755 "$fake_bin/docker"
-mv "$fake_bin/docker" "$fake_bin/docker-base"
-cat >"$fake_bin/docker" <<'EOF'
-#!/usr/bin/env bash
-set -Eeuo pipefail
-
-if [ "${1:-} ${2:-} ${3:-}" = "buildx imagetools inspect" ] \
-  && [ "${4:-}" = "${FAKE_REGISTRY_FAILURE_REFERENCE:-}" ] \
-  && [ -n "${FAKE_REGISTRY_INSPECT_DIAGNOSTIC:-}" ]; then
-  digest="$(awk -v ref="${4:-}" '$1 == ref { print $2; exit }' "$FAKE_REGISTRY_STATE" 2>/dev/null || true)"
-  if [ -z "$digest" ]; then
-    printf '%s\n' "$FAKE_REGISTRY_INSPECT_DIAGNOSTIC" >&2
-    exit 1
-  fi
-fi
-
-if [ "${1:-} ${2:-}" = "image inspect" ] && printf '%s\n' "$@" | grep -q 'Config.Env'; then
-  printf 'NODE_ENV=production\nNYXDOC_SOURCE_REVISION=%s\n' "$FAKE_CANDIDATE_REVISION"
-  exit 0
-fi
-exec "$(dirname "$0")/docker-base" "$@"
-EOF
-chmod 0755 "$fake_bin/docker"
-touch "$registry_state" "$docker_log"
-
-candidate_digest="sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-conflicting_digest="sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-candidate_image="ghcr.io/getnyxdoc/nyxdoc@$candidate_digest"
-version_tag="ghcr.io/getnyxdoc/nyxdoc:0.25.17"
-target_tags="ghcr.io/getnyxdoc/nyxdoc:latest ghcr.io/getnyxdoc/nyxdoc:0.25 $version_tag"
-
-promotion_root="$temporary/promotion-root"
-mkdir -p "$promotion_root/scripts"
-cp "$root/scripts/promote-release-image.sh" "$promotion_root/scripts/"
-git init --initial-branch=main "$promotion_root" >/dev/null
-git -C "$promotion_root" config user.name 'Nyxdoc promotion test'
-git -C "$promotion_root" config user.email 'promotion@example.test'
-git -C "$promotion_root" add scripts/promote-release-image.sh
-git -C "$promotion_root" commit -m candidate >/dev/null
-candidate_revision="$(git -C "$promotion_root" rev-parse HEAD)"
-git -C "$promotion_root" tag -a v0.25.16 -m older
-git -C "$promotion_root" tag -a v0.25.17 -m candidate
-git -C "$promotion_root" tag -a v0.25.18 -m newer
-git -C "$promotion_root" tag -a v0.25.19 -m newest
-promotion_script="$promotion_root/scripts/promote-release-image.sh"
-
-export FAKE_REGISTRY_STATE="$registry_state"
-export FAKE_DOCKER_LOG="$docker_log"
-export FAKE_CANDIDATE_DIGEST="$candidate_digest"
-export FAKE_CANDIDATE_REVISION="$candidate_revision"
-export CANDIDATE_IMAGE="$candidate_image"
-export CANDIDATE_DIGEST="$candidate_digest"
-export CANDIDATE_REVISION="$candidate_revision"
-export VERSION_TAG="$version_tag"
-export TARGET_TAGS="$target_tags"
-export PROMOTION_PHASE=immutable
-
-reset_registry() {
-  printf '%s %s\n' "$candidate_image" "$candidate_digest" >"$registry_state"
-}
-
-PROMOTION_PHASE=""
-export PROMOTION_PHASE
-if PATH="$fake_bin:$PATH" bash "$promotion_script" >"$temporary/missing-phase.out" 2>"$temporary/missing-phase.err"; then
-  printf 'promotion without an explicit phase unexpectedly succeeded\n' >&2
-  exit 1
-fi
-grep -q 'PROMOTION_PHASE must be immutable or aliases' "$temporary/missing-phase.err"
-PROMOTION_PHASE=immutable
-export PROMOTION_PHASE
-
-TARGET_TAGS="ghcr.io/getnyxdoc/nyxdoc:latest ghcr.io/getnyxdoc/nyxdoc:0.25"
-export TARGET_TAGS
-if PATH="$fake_bin:$PATH" bash "$promotion_script" >"$temporary/missing-version.out" 2>"$temporary/missing-version.err"; then
-  printf 'promotion without an immutable version tag unexpectedly succeeded\n' >&2
-  exit 1
-fi
-[ ! -s "$docker_log" ]
-grep -q 'must include the exact immutable release tag' "$temporary/missing-version.err"
-TARGET_TAGS="$target_tags"
-export TARGET_TAGS
-
-TARGET_TAGS="$version_tag registry.example.test/getnyxdoc/nyxdoc:latest"
-export TARGET_TAGS
-if PATH="$fake_bin:$PATH" bash "$promotion_script" >"$temporary/cross-repository.out" 2>"$temporary/cross-repository.err"; then
-  printf 'cross-repository target unexpectedly succeeded\n' >&2
-  exit 1
-fi
-[ ! -s "$docker_log" ]
-grep -q 'outside release repository' "$temporary/cross-repository.err"
-TARGET_TAGS="$target_tags"
-export TARGET_TAGS
-
-reset_registry
-printf '%s %s\n' "$version_tag" "$conflicting_digest" >>"$registry_state"
-if PATH="$fake_bin:$PATH" bash "$promotion_script" >"$temporary/conflict.out" 2>"$temporary/conflict.err"; then
-  printf 'conflicting immutable tag unexpectedly succeeded\n' >&2
-  exit 1
-fi
-[ ! -s "$docker_log" ]
-grep -q 'refusing to overwrite immutable release tag' "$temporary/conflict.err"
-
-# An inspection error is not proof that a tag is absent.  Generic "not
-# found" diagnostics can be caused by a missing credential helper or an
-# access-hidden repository, so neither case may publish a replacement tag.
-for diagnostic in \
-  'credential helper executable not found' \
-  'repository not found: authorization required'; do
-  reset_registry
-  : >"$docker_log"
-  export FAKE_REGISTRY_FAILURE_REFERENCE="$version_tag"
-  export FAKE_REGISTRY_INSPECT_DIAGNOSTIC="$diagnostic"
-  if PATH="$fake_bin:$PATH" bash "$promotion_script" >"$temporary/ambiguous-registry-error.out" 2>"$temporary/ambiguous-registry-error.err"; then
-    printf 'ambiguous registry diagnostic unexpectedly permitted publication: %s\n' "$diagnostic" >&2
-    exit 1
-  fi
-  [ ! -s "$docker_log" ]
-  grep -Fq 'refusing registry publication: inspection of' "$temporary/ambiguous-registry-error.err"
-  grep -Fq "$diagnostic" "$temporary/ambiguous-registry-error.err"
-done
-unset FAKE_REGISTRY_FAILURE_REFERENCE FAKE_REGISTRY_INSPECT_DIAGNOSTIC
-
-# Buildx/GHCR identifies a genuinely absent tag by echoing the exact inspected
-# reference. The candidate from the same repository was already authenticated
-# and verified, so this form must permit first publication of the semver tag.
-reset_registry
-: >"$docker_log"
-export FAKE_REGISTRY_FAILURE_REFERENCE="$version_tag"
-export FAKE_REGISTRY_INSPECT_DIAGNOSTIC="ERROR: ${version_tag}: not found"
-PATH="$fake_bin:$PATH" bash "$promotion_script" >"$temporary/buildx-ghcr-missing.out"
-[ "$(sed -n '1p' "$docker_log")" = "create $version_tag" ]
-unset FAKE_REGISTRY_FAILURE_REFERENCE FAKE_REGISTRY_INSPECT_DIAGNOSTIC
-: >"$docker_log"
-
-reset_registry
-PROMOTION_PHASE=aliases
-export PROMOTION_PHASE
-if PATH="$fake_bin:$PATH" bash "$promotion_script" >"$temporary/aliases-before-immutable.out" 2>"$temporary/aliases-before-immutable.err"; then
-  printf 'mutable alias publication without an immutable version image unexpectedly succeeded\n' >&2
-  exit 1
-fi
-[ ! -s "$docker_log" ]
-grep -q 'immutable release tag .* is not available' "$temporary/aliases-before-immutable.err"
-PROMOTION_PHASE=immutable
-export PROMOTION_PHASE
-
-reset_registry
-: >"$docker_log"
-PATH="$fake_bin:$PATH" bash "$promotion_script" >"$temporary/fresh-promotion.out"
-[ "$(sed -n '1p' "$docker_log")" = "create $version_tag" ]
-if grep -Eq 'create ghcr\.io/getnyxdoc/nyxdoc:(latest|0\.25)$' "$docker_log"; then
-  printf 'immutable phase unexpectedly moved a mutable alias\n' >&2
-  exit 1
-fi
-
-PROMOTION_PHASE=aliases
-export PROMOTION_PHASE
-PATH="$fake_bin:$PATH" bash "$promotion_script" >"$temporary/fresh-aliases.out"
-grep -Fxq 'create ghcr.io/getnyxdoc/nyxdoc:latest' "$docker_log"
-grep -Fxq 'create ghcr.io/getnyxdoc/nyxdoc:0.25' "$docker_log"
-
-reset_registry
-printf '%s %s\n' "$version_tag" "$candidate_digest" >>"$registry_state"
-: >"$docker_log"
-PATH="$fake_bin:$PATH" bash "$promotion_script" >"$temporary/retry.out"
-if grep -Fxq "create $version_tag" "$docker_log"; then
-  exit 1
-fi
-grep -Fxq 'create ghcr.io/getnyxdoc/nyxdoc:latest' "$docker_log"
-grep -Fxq 'create ghcr.io/getnyxdoc/nyxdoc:0.25' "$docker_log"
-
-# An older workflow may acquire the shared publication lock after a newer
-# release has completed. Its immutable image and Git tag remain valid, so the
-# aliases phase must succeed and let GitHub Release publication continue while
-# explicitly skipping every alias that would move backwards.
-older_version_tag="ghcr.io/getnyxdoc/nyxdoc:0.25.18"
-newer_version_tag="ghcr.io/getnyxdoc/nyxdoc:0.25.19"
-newer_digest="sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
-{
-  printf '%s %s\n' "$candidate_image" "$candidate_digest"
-  printf '%s %s\n' "$older_version_tag" "$candidate_digest"
-  printf '%s %s\n' "$newer_version_tag" "$newer_digest"
-  printf '%s %s\n' 'ghcr.io/getnyxdoc/nyxdoc:latest' "$newer_digest"
-  printf '%s %s\n' 'ghcr.io/getnyxdoc/nyxdoc:0.25' "$newer_digest"
-} >"$registry_state"
-: >"$docker_log"
-VERSION_TAG="$older_version_tag"
-TARGET_TAGS="ghcr.io/getnyxdoc/nyxdoc:latest ghcr.io/getnyxdoc/nyxdoc:0.25 $older_version_tag"
-export VERSION_TAG TARGET_TAGS
-PATH="$fake_bin:$PATH" bash "$promotion_script" >"$temporary/out-of-order.out" 2>"$temporary/out-of-order.err"
-[ ! -s "$docker_log" ]
-grep -Fq 'skipping mutable alias ghcr.io/getnyxdoc/nyxdoc:latest: existing release 0.25.19 is newer than 0.25.18' \
-  "$temporary/out-of-order.out"
-grep -Fq 'skipping mutable alias ghcr.io/getnyxdoc/nyxdoc:0.25: existing release 0.25.19 is newer than 0.25.18' \
-  "$temporary/out-of-order.out"
-
-# Skipping is per alias, not an early success for the whole phase. If only one
-# alias is newer, the other safe alias still converges to the delayed release.
-{
-  printf '%s %s\n' "$candidate_image" "$candidate_digest"
-  printf '%s %s\n' "$older_version_tag" "$candidate_digest"
-  printf '%s %s\n' "$newer_version_tag" "$newer_digest"
-  printf '%s %s\n' 'ghcr.io/getnyxdoc/nyxdoc:latest' "$newer_digest"
-  printf '%s %s\n' 'ghcr.io/getnyxdoc/nyxdoc:0.25' "$candidate_digest"
-} >"$registry_state"
-: >"$docker_log"
-PATH="$fake_bin:$PATH" bash "$promotion_script" >"$temporary/selective-skip.out" 2>"$temporary/selective-skip.err"
-grep -Fxq 'create ghcr.io/getnyxdoc/nyxdoc:0.25' "$docker_log"
-if grep -Fxq 'create ghcr.io/getnyxdoc/nyxdoc:latest' "$docker_log"; then
-  printf 'selectively skipped newer latest alias was moved\n' >&2
-  exit 1
-fi
-grep -Fq 'skipping mutable alias ghcr.io/getnyxdoc/nyxdoc:latest: existing release 0.25.19 is newer than 0.25.18' \
-  "$temporary/selective-skip.out"
-
-# A successful registry inspection with a malformed digest is not an absent
-# alias. It is corrupt state and must fail before any otherwise-safe alias can
-# move.
-{
-  printf '%s %s\n' "$candidate_image" "$candidate_digest"
-  printf '%s %s\n' "$older_version_tag" "$candidate_digest"
-  printf '%s %s\n' 'ghcr.io/getnyxdoc/nyxdoc:latest' 'not-a-digest'
-} >"$registry_state"
-: >"$docker_log"
-if PATH="$fake_bin:$PATH" bash "$promotion_script" >"$temporary/corrupt-alias.out" 2>"$temporary/corrupt-alias.err"; then
-  printf 'corrupt mutable alias unexpectedly succeeded\n' >&2
-  exit 1
-fi
-[ ! -s "$docker_log" ]
-grep -q 'returned a corrupt digest' "$temporary/corrupt-alias.err"
-VERSION_TAG="$version_tag"
-TARGET_TAGS="$target_tags"
-PROMOTION_PHASE=aliases
-export VERSION_TAG TARGET_TAGS PROMOTION_PHASE
 
 # First-hop compatibility contract for the unmodified v0.25.17 updater. The
 # final Git tag remains absent while the candidate image is unavailable and
@@ -1005,6 +768,7 @@ chmod 0755 "$install_fake_bin/docker" "$install_fake_bin/curl" "$install_root/sc
 git -C "$install_root" init -q
 git -C "$install_root" config user.name nyxdoc-test
 git -C "$install_root" config user.email nyxdoc-test@example.invalid
+printf 'data/\n.env.production\n' >"$install_root/.gitignore"
 git -C "$install_root" add .
 git -C "$install_root" commit -qm 'install fixture'
 install_revision="$(git -C "$install_root" rev-parse HEAD)"
@@ -1027,7 +791,7 @@ install_prepare_line="$(grep -n -m1 '^prepare-runtime-paths$' "$install_state/lo
 install_up_line="$(grep -n -m1 '^up -d --no-build --remove-orphans$' "$install_state/log" | cut -d: -f1)"
 [ "$install_prepare_line" -lt "$install_migration_line" ]
 [ "$install_migration_line" -lt "$install_up_line" ]
-expected_install_image="ghcr.io/getnyxdoc/nyxdoc@sha256:$(printf '%064d' 2)"
+expected_install_image="nyxdoc-app:$install_revision"
 [ "$(awk -F= '$1 == "NYXDOC_IMAGE" { print substr($0, index($0, "=") + 1); exit }' "$install_root/.env.production")" = "$expected_install_image" ]
 auth_secret_before="$(awk -F= '$1 == "BETTER_AUTH_SECRET" { print substr($0, index($0, "=") + 1); exit }' "$install_root/.env.production")"
 collaboration_secret_before="$(awk -F= '$1 == "NYXDOC_COLLABORATION_SECRET" { print substr($0, index($0, "=") + 1); exit }' "$install_root/.env.production")"
@@ -1097,4 +861,4 @@ PATH="$install_fake_bin:$PATH" bash "$install_root/scripts/uninstall.sh" --purge
 [ "$(cat "$backup_root/preserve.txt")" = preserve-backups ]
 grep -Fxq 'down --volumes --remove-orphans --rmi local' "$install_state/log"
 
-printf 'Lifecycle shell install/update interruption retries, preserve/purge, backup receipt, and immutable promotion contracts passed.\n'
+printf 'Lifecycle shell install/update interruption retries, preserve/purge, and backup receipt contracts passed.\n'

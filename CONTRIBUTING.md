@@ -53,5 +53,5 @@ and agree that it is provided under this repository's MIT License.
 Nyxdoc does not require a separate contributor license agreement or sign-off
 line.
 
-The project is maintained on a best-effort basis. Review and release timing are
+The project is maintained on a best-effort basis. Review and deployment timing are
 not guaranteed.
