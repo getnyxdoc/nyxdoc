@@ -3,22 +3,30 @@ ARG SOURCE_REVISION=unknown
 FROM node:24-bookworm-slim AS dependencies
 WORKDIR /app
 ENV NEXT_TELEMETRY_DISABLED=1
+RUN chown node:node /app
+USER node
 COPY package.json package-lock.json ./
-RUN npm ci
+# Keep npm's download cache out of the layer shared by the builder and runner.
+RUN --mount=type=cache,target=/home/node/.npm,uid=1000,gid=1000 npm ci --no-audit --no-fund
 
 FROM dependencies AS builder
+USER root
 ARG SOURCE_REVISION=unknown
 WORKDIR /app
 ENV NEXT_PUBLIC_NYXDOC_BUILD_SHA=${SOURCE_REVISION}
 COPY . .
 RUN npm run build
 
-FROM node:24-bookworm-slim AS runner
+FROM dependencies AS runner
+USER root
+RUN chown root:root /app \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends gosu \
+    && rm -rf /var/lib/apt/lists/*
+
 ARG SOURCE_REVISION=unknown
 LABEL org.opencontainers.image.revision=$SOURCE_REVISION
-WORKDIR /app
 ENV NODE_ENV=production \
-    NEXT_TELEMETRY_DISABLED=1 \
     PORT=3000 \
     HOSTNAME=0.0.0.0 \
     NYXDOC_DB_PATH=/data/nyxdoc.db \
@@ -26,11 +34,6 @@ ENV NODE_ENV=production \
     NYXDOC_BACKUP_ROOT=/data/backups \
     NYXDOC_SOURCE_REVISION=${SOURCE_REVISION}
 
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends gosu \
-    && rm -rf /var/lib/apt/lists/*
-
-COPY --from=dependencies --chown=node:node /app/node_modules ./node_modules
 COPY --from=builder --chown=node:node /app/.next/standalone ./
 COPY --from=builder --chown=node:node /app/.next/static ./.next/static
 COPY --from=builder --chown=node:node /app/public ./public
