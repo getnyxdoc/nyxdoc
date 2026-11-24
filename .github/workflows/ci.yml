@@ -46,13 +46,41 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        id: node
         with:
           node-version: 24
-          cache: npm
-      - run: npm ci
-      - run: npm run test:editor-e2e -- --grep-invert 'release-candidate\.spec\.ts' --shard=${{ matrix.shard }}/4
+      - name: Restore installed browser-test dependencies
+        id: modules
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: node_modules
+          # Include the workflow (pinned container and install command) so
+          # native modules are reused only in their original build environment.
+          key: browser-modules-${{ runner.arch }}-${{ steps.node.outputs.node-version }}-${{ hashFiles('.github/workflows/ci.yml', 'package.json', 'package-lock.json', '.npmrc') }}
+      - if: steps.modules.outputs.cache-hit != 'true'
+        run: npm ci --no-audit --no-fund
+      - name: Cache the clean installation once
+        if: matrix.shard == 2 && steps.modules.outputs.cache-hit != 'true'
+        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: node_modules
+          key: ${{ steps.modules.outputs.cache-primary-key }}
+      - name: Run interleaved browser tests
+        env:
+          SHARD_NUMBER: ${{ matrix.shard }}
+          SHARD_COUNT: ${{ strategy.job-total }}
+        run: |
+          # Keep each runner serial with its own database. Distribute cases
+          # from the large workspace spec across runners in discovery order.
+          npx playwright test --list --reporter=list --grep-invert 'release-candidate\.spec\.ts' > "$RUNNER_TEMP/discovered.txt"
+          awk -v shard="$SHARD_NUMBER" -v count="$SHARD_COUNT" '
+            /^  \[/ { if ((seen++ % count) + 1 == shard) { print; selected++ } }
+            /^Total:/ { total = $2 }
+            END { if (seen != total || !selected) exit 1 }
+          ' "$RUNNER_TEMP/discovered.txt" > "$RUNNER_TEMP/selected.txt"
+          npm run test:editor-e2e -- --test-list="$RUNNER_TEMP/selected.txt"
       # Run the signed-in scenarios once with a fresh server and login quota.
-      - if: matrix.shard == 3
+      - if: matrix.shard == 1
         run: npm run test:release-browser -- --project=chromium
 
   integration:

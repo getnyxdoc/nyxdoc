@@ -12,8 +12,9 @@ identify a deployment. The last public release was v0.25.28.
   broader Chromium, Firefox, selection, composition and collaboration cases.
 - Run CI for the proposed source tree. It covers types, lint, unit tests,
   real browser sessions, agent/MCP HTTP integration, and the production build
-  used by the Linux Compose lifecycle. Browser specs run across four isolated
-  jobs with separate app servers, databases and login quotas. A fresh server
+  used by the Linux Compose lifecycle. The four browser jobs each run every fourth discovered case, with
+  separate app servers, databases and login quotas. They reuse installed npm
+  dependencies when the lockfile, Node version and CI environment match. A fresh server
   runs the signed-in vertical suite once. Update the browser image in CI
   alongside the locked Playwright version. Lifecycle checks cover migrations,
   backup verification and restore, interrupted updates, and preserved data.
