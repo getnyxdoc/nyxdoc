@@ -32,6 +32,12 @@ jobs:
       - run: npm test
       - run: npm run test:agent-connect-http
       - run: npm run test:mcp-oauth-http
+      - name: Validate lifecycle scripts
+        run: |
+          shellcheck scripts/*.sh scripts/test-fixtures/*.sh
+          bash -n scripts/*.sh scripts/test-fixtures/*.sh
+          bash scripts/test-lifecycle-shell.sh
+          bash scripts/test-update-image-revision.sh
       # compose-lifecycle builds the production bundle from this checkout.
 
   editor-e2e:
@@ -66,7 +72,7 @@ jobs:
         uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: node_modules
-          key: browser-modules-${{ runner.arch }}-${{ steps.environment.outputs.digest }}-${{ hashFiles('package.json', 'package-lock.json', '.npmrc') }}
+          key: browser-node-modules-${{ runner.arch }}-${{ steps.environment.outputs.digest }}-${{ hashFiles('package.json', 'package-lock.json', '.npmrc') }}
       - if: steps.modules.outputs.cache-hit != 'true'
         run: npm ci $NPM_INSTALL_FLAGS
       - name: Cache the clean installation once
@@ -112,8 +118,8 @@ jobs:
           target: dependencies
           platforms: linux/amd64
           outputs: type=cacheonly
-          cache-from: &dependency-cache type=gha,scope=nyxdoc-compose-npm-amd64
-          cache-to: type=gha,scope=nyxdoc-compose-npm-amd64,mode=min,compression=zstd,compression-level=1
+          cache-from: &dependency-cache type=gha,scope=compose-amd64-dependencies-zstd
+          cache-to: type=gha,scope=compose-amd64-dependencies-zstd,mode=min,compression=zstd,compression-level=1
 
   compose-lifecycle:
     runs-on: ubuntu-latest
@@ -122,12 +128,6 @@ jobs:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           fetch-depth: 0
-      - name: Validate lifecycle scripts
-        run: |
-          shellcheck scripts/*.sh scripts/test-fixtures/*.sh
-          bash -n scripts/*.sh scripts/test-fixtures/*.sh
-          bash scripts/test-lifecycle-shell.sh
-          bash scripts/test-update-image-revision.sh
       - name: Reuse Docker dependency layers
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         env: *build-environment
