@@ -5,6 +5,10 @@ on:
     branches: [main]
   pull_request:
 
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 permissions:
   contents: read
 
@@ -25,25 +29,31 @@ jobs:
       - run: npm run typecheck
       - run: npm run lint
       - run: npm test
-      - run: npm run build
+      # compose-lifecycle builds the production bundle from this checkout.
 
   editor-e2e:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+    # Match @playwright/test in package-lock.json. This AMD64 image includes
+    # the browsers and their system libraries.
+    container:
+      image: mcr.microsoft.com/playwright:v1.61.1-noble@sha256:cf0daee9b994042e011bc29f20cdff1a9f682a039b43fcd738f7d8a9d3bcd9d6
+      options: --shm-size=1g
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-        with:
-          fetch-depth: 0
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 24
           cache: npm
       - run: npm ci
-      - run: npx playwright install --with-deps chromium firefox
-      - run: npm run test:editor-e2e -- --grep-invert 'release-candidate\.spec\.ts'
-      # Use a fresh server and database for the real sign-ins in the release
-      # vertical so earlier suites cannot exhaust its login rate limit.
-      - run: npm run test:release-browser -- --project=chromium
+      - run: npm run test:editor-e2e -- --grep-invert 'release-candidate\.spec\.ts' --shard=${{ matrix.shard }}/4
+      # Run the signed-in scenarios once with a fresh server and login quota.
+      - if: matrix.shard == 3
+        run: npm run test:release-browser -- --project=chromium
 
   integration:
     runs-on: ubuntu-latest

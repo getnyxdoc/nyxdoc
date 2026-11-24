@@ -10,8 +10,11 @@ identify a deployment. The last public release was v0.25.28.
   For editor changes, cover the original sequence in Firefox and run the editor
   suite, including Chromium, selection, composition and collaboration cases.
 - Run CI for the proposed source tree. It covers types, lint, unit tests, the
-  production build, real browser sessions, agent/MCP HTTP integration, and
-  the Linux Compose lifecycle. The lifecycle checks cover real migrations,
+  real browser sessions, agent/MCP HTTP integration, and the production build
+  used by the Linux Compose lifecycle. Browser specs run across four isolated
+  jobs with separate app servers, databases and login quotas. A fresh server
+  runs the signed-in vertical suite once. Update the browser image in CI
+  alongside the locked Playwright version. The lifecycle checks cover real migrations,
   backup verification and restore, interrupted updates, and preserved data.
 - For database, media or collaboration changes, exercise the affected data
   path with a populated fixture, including the upgrade and recovery paths.
