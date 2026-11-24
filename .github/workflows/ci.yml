@@ -79,8 +79,8 @@ jobs:
             END { if (seen != total || !selected) exit 1 }
           ' "$RUNNER_TEMP/discovered.txt" > "$RUNNER_TEMP/selected.txt"
           npm run test:editor-e2e -- --test-list="$RUNNER_TEMP/selected.txt"
-      # Run the signed-in scenarios once with a fresh server and login quota.
-      - if: matrix.shard == 1
+      # The shortest group also runs the signed-in suite on a fresh server.
+      - if: matrix.shard == 3
         run: npm run test:release-browser -- --project=chromium
 
   integration:
