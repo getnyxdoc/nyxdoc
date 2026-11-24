@@ -42,8 +42,11 @@ jobs:
           node-version: 24
           cache: npm
       - run: npm ci
-      - run: npx playwright install --with-deps chromium
-      - run: npm run test:editor-e2e
+      - run: npx playwright install --with-deps chromium firefox
+      - run: npm run test:editor-e2e -- --grep-invert 'release-candidate\.spec\.ts'
+      # Use a fresh server and database for the real sign-ins in the release
+      # vertical so earlier suites cannot exhaust its login rate limit.
+      - run: npm run test:release-browser -- --project=chromium
 
   integration:
     runs-on: ubuntu-latest

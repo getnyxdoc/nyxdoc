@@ -2,6 +2,12 @@
 
 All notable user-facing changes are recorded here.
 
+## 0.25.28 - 2026-11-24
+
+- Fixed the caret returning to an earlier horizontal position when moving up
+  or down after using the left or right arrow. Moving through a short line
+  now preserves the newly chosen column on the next longer line.
+
 ## 0.25.27 - 2026-11-23
 
 - Fixed Korean IME input landing at the wrong offset when a navigation key is

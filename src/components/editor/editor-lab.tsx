@@ -781,6 +781,26 @@ function syncEditorSelectionFromDOM(editor: PlateEditor) {
   return selection;
 }
 
+function useVerticalCaretColumn(editor: PlateEditor) {
+  const horizontalMove = useRef(false);
+  return useCallback((event: ReactKeyboardEvent<HTMLDivElement>) => {
+    if (event.defaultPrevented || event.nativeEvent.isComposing || editor.api.isComposing()) return;
+    if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
+      horizontalMove.current = true;
+    } else if (event.key === "ArrowUp" || event.key === "ArrowDown") {
+      if (!horizontalMove.current) return;
+      horizontalMove.current = false;
+      const selection = event.currentTarget.ownerDocument.getSelection();
+      if (selection?.isCollapsed && selection.focusNode && event.currentTarget.contains(selection.focusNode)) {
+        // Slate moves horizontally via setBaseAndExtent. Reaffirming the current
+        // caret clears Gecko's old vertical column before the native line move.
+        // Subsequent vertical moves must retain that column across short lines.
+        selection.collapseToStart();
+      }
+    }
+  }, [editor]);
+}
+
 function diagnosticIdentifier(value: string | undefined, fallback = "other") {
   if (!value || value.length > 200 || !/^[A-Za-z0-9._:-]+$/.test(value)) return fallback;
   return value;
@@ -2817,6 +2837,7 @@ export function NyxdocRichEditor({
       reuseId: Boolean(collaborationPlugin),
     },
   });
+  const handleCaretNavigation = useVerticalCaretColumn(editor);
   const collaborationLifecycleRef = useRef<{
     active: boolean;
     awarenessDestroyed: boolean;
@@ -3631,6 +3652,7 @@ export function NyxdocRichEditor({
               placeholder={readOnly ? undefined : copy.bodyPlaceholder}
               readOnly={readOnly}
               spellCheck={!readOnly}
+              onKeyDown={readOnly ? undefined : handleCaretNavigation}
               onCut={readOnly ? undefined : (event) => {
                 markLocalEditEvent();
                 handleCut(event);
@@ -3677,6 +3699,7 @@ export function EditorLab({ userName }: { userName: string }) {
       idCreator: () => globalThis.crypto.randomUUID(),
     },
   });
+  const handleCaretNavigation = useVerticalCaretColumn(editor);
   const validation = useMemo(
     () => nyxdocDocumentV2Schema.safeParse(projectNyxdocEditorContent(value)),
     [value],
@@ -3822,6 +3845,7 @@ export function EditorLab({ userName }: { userName: string }) {
                 aria-label={copy.documentBody}
                 placeholder={copy.bodyPlaceholder}
                 spellCheck
+                onKeyDown={handleCaretNavigation}
                 onPaste={handlePaste}
               />
             </div>

@@ -17,12 +17,15 @@ export default defineConfig({
   fullyParallel: false,
   workers: 1,
   reporter: [["line"]],
-  projects: process.platform === "win32"
-    ? [
-        { name: "chrome", use: { channel: "chrome" } },
-        { name: "edge", use: { channel: "msedge" } },
-      ]
-    : [{ name: "chromium" }],
+  projects: [
+    ...(process.platform === "win32"
+      ? [
+          { name: "chrome", use: { channel: "chrome" } },
+          { name: "edge", use: { channel: "msedge" } },
+        ]
+      : [{ name: "chromium" }]),
+    { name: "firefox-caret", testMatch: "caret-navigation.spec.ts", use: { browserName: "firefox" } },
+  ],
   use: {
     baseURL,
     browserName: "chromium",
@@ -37,6 +40,7 @@ export default defineConfig({
         command: "npm run dev",
         url: `${baseURL}/api/health`,
         env: {
+          NYXDOC_PLAYWRIGHT_SERVER: "1",
           NYXDOC_DB_PATH: path.join(runtimeRoot!, "nyxdoc.db"),
           NYXDOC_MEDIA_ROOT: path.join(runtimeRoot!, "media"),
           NYXDOC_BACKUP_ROOT: path.join(runtimeRoot!, "backups"),
