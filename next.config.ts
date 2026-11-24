@@ -6,6 +6,11 @@ const nextConfig: NextConfig = {
   // them an isolated build directory so they can run while a developer keeps
   // the normal `.next` dev server open.
   distDir: process.env.NYXDOC_NEXT_DIST_DIR || ".next",
+  // Concurrent browser-test reloads can close Next's development-only React
+  // debug stream while its hot reloader is still writing to it.
+  ...(process.env.NYXDOC_PLAYWRIGHT_SERVER === "1"
+    ? { experimental: { reactDebugChannel: false } }
+    : {}),
   // Local qualification may bind the browser to the loopback address while
   // Next reports localhost as its development origin. Keep both loopback
   // spellings on the same trusted development boundary.

@@ -40,6 +40,7 @@ export default defineConfig({
         command: "npm run dev",
         url: `${baseURL}/api/health`,
         env: {
+          NYXDOC_PLAYWRIGHT_SERVER: "1",
           NYXDOC_DB_PATH: path.join(runtimeRoot!, "nyxdoc.db"),
           NYXDOC_MEDIA_ROOT: path.join(runtimeRoot!, "media"),
           NYXDOC_BACKUP_ROOT: path.join(runtimeRoot!, "backups"),
