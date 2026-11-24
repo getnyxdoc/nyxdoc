@@ -199,7 +199,13 @@ test("qualifies real sign-up, session, collaboration, commit, and reload boundar
   for (let i = 0; i < 4; i++) await page.keyboard.press("ArrowLeft");
   await page.keyboard.press("ArrowUp");
   await expectCaret(markerParagraph, 0);
+  await page.keyboard.press("ArrowDown");
+  await expectCaret(lastParagraph, 0);
+  // The Latin marker and the Korean paragraph have different glyph widths.
+  // A vertical round trip must return to the same caret on the original line.
   await page.keyboard.press("ArrowRight");
+  await expectCaret(lastParagraph, 1);
+  await page.keyboard.press("ArrowUp");
   await page.keyboard.press("ArrowDown");
   await expectCaret(lastParagraph, 1);
   await expect(page.getByText("초안 저장됨", { exact: true })).toHaveText("초안 저장됨", {
