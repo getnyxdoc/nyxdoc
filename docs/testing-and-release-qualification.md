@@ -17,9 +17,10 @@ identify a deployment. The last public release was v0.25.28.
   server at the same time. Browser jobs reuse installed dependencies when
   the package manifests, container image, Node, npm and install flags match.
   Update the pinned image alongside the locked Playwright version. The Compose
-  job caches the AMD64 dependency stage and runs the standard installer.
-  Lifecycle checks cover migrations,
-  backup verification and restore, interrupted updates, and preserved data.
+  job reuses the AMD64 dependency stage and runs the standard installer.
+  A separate runner refreshes the layer cache alongside the installer. Lifecycle
+  checks cover migrations, backup verification and restore, interrupted updates,
+  and preserved data.
 - For database, media or collaboration changes, exercise the affected data
   path with a populated fixture, including the upgrade and recovery paths.
   Preserve immutable migration checksums and add forward migrations.

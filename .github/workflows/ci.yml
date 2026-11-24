@@ -94,6 +94,27 @@ jobs:
         if: matrix.shard == 'signed-in'
         run: npm run test:release-browser -- --project=chromium
 
+  # A cold cache upload takes longer than a minute. Run it alongside the
+  # installation so a fresh dependency graph does not delay the lifecycle checks.
+  cache-compose-dependencies:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - name: Cache Docker dependency layers
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        env: &build-environment
+          DOCKER_BUILD_RECORD_UPLOAD: false
+          DOCKER_BUILD_SUMMARY: false
+        with:
+          context: .
+          builder: default
+          target: dependencies
+          platforms: linux/amd64
+          outputs: type=cacheonly
+          cache-from: &dependency-cache type=gha,scope=nyxdoc-compose-npm-amd64
+          cache-to: type=gha,scope=nyxdoc-compose-npm-amd64,mode=min,compression=zstd,compression-level=1
+
   compose-lifecycle:
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -109,17 +130,14 @@ jobs:
           bash scripts/test-update-image-revision.sh
       - name: Reuse Docker dependency layers
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
-        env:
-          DOCKER_BUILD_RECORD_UPLOAD: false
-          DOCKER_BUILD_SUMMARY: false
+        env: *build-environment
         with:
           context: .
           builder: default
           target: dependencies
           platforms: linux/amd64
           outputs: type=cacheonly
-          cache-from: type=gha,scope=compose-dependencies-amd64
-          cache-to: type=gha,scope=compose-dependencies-amd64,mode=min
+          cache-from: *dependency-cache
       - name: Build and install
         run: ./scripts/install.sh
       - name: Create documents, draft history and uploaded media
