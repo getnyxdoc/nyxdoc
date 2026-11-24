@@ -24,11 +24,14 @@ jobs:
         with:
           node-version: 24
           cache: npm
+      - run: node scripts/check-browser-vertical-no-first-party-mocks.mjs
       - run: npm ci
       - run: node scripts/test-lifecycle-cli.mjs
       - run: npm run typecheck
       - run: npm run lint
       - run: npm test
+      - run: npm run test:agent-connect-http
+      - run: npm run test:mcp-oauth-http
       # compose-lifecycle builds the production bundle from this checkout.
 
   editor-e2e:
@@ -37,67 +40,59 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4]
+        shard: [1, 2, 3, 4, 5, 6]
+        include:
+          - shard: signed-in
     # Match @playwright/test in package-lock.json. This AMD64 image includes
     # the browsers and their system libraries.
     container:
-      image: mcr.microsoft.com/playwright:v1.61.1-noble@sha256:cf0daee9b994042e011bc29f20cdff1a9f682a039b43fcd738f7d8a9d3bcd9d6
+      image: &browser-image mcr.microsoft.com/playwright:v1.61.1-noble@sha256:cf0daee9b994042e011bc29f20cdff1a9f682a039b43fcd738f7d8a9d3bcd9d6
       options: --user 1001 --shm-size=1g
+    env:
+      BROWSER_IMAGE: *browser-image
+      NPM_INSTALL_FLAGS: --no-audit --no-fund
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
-        id: node
         with:
           node-version: 24
+      - name: Identify browser dependency environment
+        id: environment
+        run: |
+          digest=$(printf '%s\n' "$BROWSER_IMAGE" "$(node --version)" "$(npm --version)" "$NPM_INSTALL_FLAGS" | sha256sum | cut -d' ' -f1)
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
       - name: Restore installed browser-test dependencies
         id: modules
         uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: node_modules
-          # Include the workflow (pinned container and install command) so
-          # native modules are reused only in their original build environment.
-          key: browser-modules-${{ runner.arch }}-${{ steps.node.outputs.node-version }}-${{ hashFiles('.github/workflows/ci.yml', 'package.json', 'package-lock.json', '.npmrc') }}
+          key: browser-modules-${{ runner.arch }}-${{ steps.environment.outputs.digest }}-${{ hashFiles('package.json', 'package-lock.json', '.npmrc') }}
       - if: steps.modules.outputs.cache-hit != 'true'
-        run: npm ci --no-audit --no-fund
+        run: npm ci $NPM_INSTALL_FLAGS
       - name: Cache the clean installation once
-        if: matrix.shard == 2 && steps.modules.outputs.cache-hit != 'true'
+        if: matrix.shard == 'signed-in' && steps.modules.outputs.cache-hit != 'true'
         uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: node_modules
           key: ${{ steps.modules.outputs.cache-primary-key }}
       - name: Run interleaved browser tests
+        if: matrix.shard != 'signed-in'
         env:
           SHARD_NUMBER: ${{ matrix.shard }}
-          SHARD_COUNT: ${{ strategy.job-total }}
+          LANE_COUNT: ${{ strategy.job-total }}
         run: |
           # Keep each runner serial with its own database. Distribute cases
           # from the large workspace spec across runners in discovery order.
           npx playwright test --list --reporter=list --grep-invert 'release-candidate\.spec\.ts' > "$RUNNER_TEMP/discovered.txt"
-          awk -v shard="$SHARD_NUMBER" -v count="$SHARD_COUNT" '
+          awk -v shard="$SHARD_NUMBER" -v count="$((LANE_COUNT - 1))" '
             /^  \[/ { if ((seen++ % count) + 1 == shard) { print; selected++ } }
             /^Total:/ { total = $2 }
             END { if (seen != total || !selected) exit 1 }
           ' "$RUNNER_TEMP/discovered.txt" > "$RUNNER_TEMP/selected.txt"
           npm run test:editor-e2e -- --test-list="$RUNNER_TEMP/selected.txt"
-      # The shortest group also runs the signed-in suite on a fresh server.
-      - if: matrix.shard == 3
+      - name: Run the signed-in suite on its own server
+        if: matrix.shard == 'signed-in'
         run: npm run test:release-browser -- --project=chromium
-
-  integration:
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-        with:
-          fetch-depth: 0
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
-        with:
-          node-version: 24
-          cache: npm
-      - run: node scripts/check-browser-vertical-no-first-party-mocks.mjs
-      - run: npm ci
-      - run: npm run test:agent-connect-http
-      - run: npm run test:mcp-oauth-http
 
   compose-lifecycle:
     runs-on: ubuntu-latest
@@ -112,6 +107,19 @@ jobs:
           bash -n scripts/*.sh scripts/test-fixtures/*.sh
           bash scripts/test-lifecycle-shell.sh
           bash scripts/test-update-image-revision.sh
+      - name: Reuse Docker dependency layers
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        env:
+          DOCKER_BUILD_RECORD_UPLOAD: false
+          DOCKER_BUILD_SUMMARY: false
+        with:
+          context: .
+          builder: default
+          target: dependencies
+          platforms: linux/amd64
+          outputs: type=cacheonly
+          cache-from: type=gha,scope=compose-dependencies-amd64
+          cache-to: type=gha,scope=compose-dependencies-amd64,mode=min
       - name: Build and install
         run: ./scripts/install.sh
       - name: Create documents, draft history and uploaded media
