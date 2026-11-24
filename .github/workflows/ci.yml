@@ -118,8 +118,8 @@ jobs:
           target: dependencies
           platforms: linux/amd64
           outputs: type=cacheonly
-          cache-from: &dependency-cache type=gha,scope=compose-amd64-dependencies-zstd
-          cache-to: type=gha,scope=compose-amd64-dependencies-zstd,mode=min,compression=zstd,compression-level=1
+          cache-from: &dependency-cache type=gha,scope=compose-npm-linux-amd64-v1
+          cache-to: type=gha,scope=compose-npm-linux-amd64-v1,mode=min,compression=zstd,compression-level=1
 
   compose-lifecycle:
     runs-on: ubuntu-latest
@@ -128,13 +128,15 @@ jobs:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           fetch-depth: 0
-      - name: Reuse Docker dependency layers
+      # Consume the remote layer in the application build. A cache-only solve
+      # of just the dependency stage leaves the next Compose build with no local copy.
+      - name: Build the application with cached dependencies
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         env: *build-environment
         with:
           context: .
           builder: default
-          target: dependencies
+          build-args: SOURCE_REVISION=${{ github.sha }}
           platforms: linux/amd64
           outputs: type=cacheonly
           cache-from: *dependency-cache
