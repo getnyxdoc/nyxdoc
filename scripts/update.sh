@@ -7,26 +7,28 @@ source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/compose-common.sh"
 
 usage() {
   cat <<'EOF'
-Usage: ./scripts/update.sh [--channel stable|main] [--build]
+Usage: ./scripts/update.sh [--revision <full-main-commit>]
 
-Create a verified backup, move only to a descendant release or main revision,
-start the new containers, run migrations automatically, and verify health.
-With --build, build the selected checkout locally instead of trusting an
-official GHCR image from a potentially different Git history.
-
-Set NYXDOC_UPDATE_AUTHORITY=official or origin in .env.production to choose
-which Git lineage stable updates follow. New installations set official;
-older installations are migrated once from their existing configuration.
+Back up the running installation, build the selected origin/main commit on
+Linux AMD64, rehearse migrations and verify health. With --revision, require
+that exact descendant of the installed commit on origin/main. The historical
+--channel stable option is available for recovery of archived installations.
 EOF
 }
 
-channel="${NYXDOC_UPDATE_CHANNEL:-stable}"
+channel="${NYXDOC_UPDATE_CHANNEL:-main}"
+requested_revision=""
 build_local=false
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --channel)
       [ "$#" -ge 2 ] || nyxdoc_die "--channel requires stable or main."
       channel="$2"
+      shift 2
+      ;;
+    --revision)
+      [ "$#" -ge 2 ] && [[ "$2" =~ ^[0-9a-f]{40}$ ]] || nyxdoc_die "--revision requires a full commit SHA."
+      requested_revision="$2"
       shift 2
       ;;
     --build) build_local=true; shift ;;
@@ -36,8 +38,11 @@ while [ "$#" -gt 0 ]; do
 done
 [ "$channel" = stable ] || [ "$channel" = main ] \
   || nyxdoc_die "Update channel must be stable or main."
-[ "$channel" != main ] || $build_local \
-  || nyxdoc_die "The main channel is source-only; use --channel main --build."
+if [ "$channel" = main ]; then
+  build_local=true
+elif [ -n "$requested_revision" ]; then
+  nyxdoc_die "--revision requires the main channel."
+fi
 
 nyxdoc_require_compose
 nyxdoc_require_environment
@@ -86,12 +91,17 @@ if [ "$receipt_format" = "nyxdoc-update-state/v3" ]; then
     nyxdoc_die "The interrupted-update receipt belongs to update authority $receipt_authority, but .env.production selects $resolved_authority. Preserve the receipt and resolve that mismatch explicitly."
   fi
   update_authority="$receipt_authority"
+  if [[ -n "$receipt_image" && "$receipt_image" != nyxdoc-app:* ]]; then
+    [ -z "$requested_revision" ] || nyxdoc_die "Resume the archived image update before selecting a source revision."
+    channel=stable
+    build_local=false
+  fi
 else
   update_authority="$resolved_authority"
 fi
 
 [ "$channel" != main ] || [ "$update_authority" = origin ] \
-  || nyxdoc_die "The main channel always follows origin; set NYXDOC_UPDATE_AUTHORITY=origin and use --channel main --build."
+  || nyxdoc_die "The main channel always follows origin; set NYXDOC_UPDATE_AUTHORITY=origin in .env.production before switching to source deployments."
 if [ "$update_authority" = official ]; then
   if [ "$channel" != stable ] || $build_local; then
     nyxdoc_die "Official update authority supports only stable verified GitHub releases; use NYXDOC_UPDATE_AUTHORITY=origin for --build or main."
@@ -116,7 +126,14 @@ else
   target_selection="$(nyxdoc_resolve_update_target "$channel" "$update_source_kind")"
   IFS=$'\t' read -r target_ref target_label <<<"$target_selection"
   target_revision="$(git -C "$NYXDOC_ROOT" rev-parse "${target_ref}^{commit}")"
+  if [ -n "$requested_revision" ]; then
+    git -C "$NYXDOC_ROOT" merge-base --is-ancestor "$requested_revision" "$target_revision" \
+      || nyxdoc_die "Requested revision is not on origin/main."
+    target_revision="$requested_revision"
+  fi
 fi
+[ -z "$requested_revision" ] || [ "$requested_revision" = "$target_revision" ] \
+  || nyxdoc_die "The requested revision differs from the interrupted update. Resume its recorded target first."
 source_changed=false
 if $resuming_interrupted && [ -z "$update_image_override" ]; then
   if [ -n "$receipt_image" ]; then
@@ -146,7 +163,8 @@ if [ "$current_revision" != "$target_revision" ]; then
 fi
 
 if $build_local || [[ "$current_image" == nyxdoc-app:* ]]; then
-  target_image="nyxdoc-app:${target_version}"
+  target_image="nyxdoc-app:${target_revision}"
+  if $resuming_interrupted && [ -n "$receipt_image" ]; then target_image="$receipt_image"; fi
 else
   target_image="$(nyxdoc_select_update_image \
     "$current_image" "$target_version" "$update_image_override")"
@@ -166,13 +184,15 @@ fi
 if ! $source_changed; then
   desired_image="$target_image"
 
-  if ! $build_local && [ "$current_image" = "$desired_image" ]; then
+  if [ "$current_image" = "$desired_image" ]; then
     nyxdoc_compose config --quiet
     if [[ "$desired_image" != nyxdoc-app:* ]]; then
       nyxdoc_info "Checking the configured release image before declaring the update complete."
       nyxdoc_compose pull app collaboration gateway
       nyxdoc_verify_official_image_revision "$desired_image" "$target_revision"
       image_prepared=true
+    elif $build_local && nyxdoc_services_use_image "$desired_image"; then
+      nyxdoc_verify_image_source_revision "$desired_image" "$target_revision"
     fi
     if nyxdoc_services_use_image "$desired_image" && ! $removed_legacy_source_revision; then
       if ! $authority_was_explicit; then
@@ -272,6 +292,7 @@ if $build_local || [[ "$current_image" == nyxdoc-app:* ]]; then
   # verified-backup check performed by the next update attempt.
   NYXDOC_IMAGE="$image" nyxdoc_compose config --quiet
   NYXDOC_IMAGE="$image" nyxdoc_compose build --build-arg "SOURCE_REVISION=$source_revision"
+  nyxdoc_verify_image_source_revision "$image" "$source_revision"
 else
   image="$target_image"
   NYXDOC_IMAGE="$image" nyxdoc_compose config --quiet

@@ -6,6 +6,9 @@
 
 set -Eeuo pipefail
 
+# Most fixtures exercise recovery of archived stable installations.
+export NYXDOC_UPDATE_CHANNEL=stable
+
 root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 temporary="$(mktemp -d "${TMPDIR:-/tmp}/nyxdoc-update-revision.XXXXXX")"
 cleanup() {
@@ -419,7 +422,7 @@ run_third_party_advance_case third-party-local-build '' '--build' success
 local_advance_checkout="$temporary/third-party-local-build"
 grep -Fq "build --build-arg SOURCE_REVISION=$target_revision" \
   "$temporary/third-party-local-build.log"
-grep -Fq 'NYXDOC_IMAGE=nyxdoc-app:0.25.18' "$local_advance_checkout/.env.production"
+grep -Fq "NYXDOC_IMAGE=nyxdoc-app:$target_revision" "$local_advance_checkout/.env.production"
 
 # --build deliberately binds the candidate image to this checkout through
 # SOURCE_REVISION and therefore remains valid for independent Forgejo/fork
@@ -432,17 +435,33 @@ local_log="$temporary/local-build.log"
 FAKE_UPDATE_ROOT="$local_checkout" \
 FAKE_UPDATE_LOG="$local_log" \
 FAKE_OCI_REVISION=1111111111111111111111111111111111111111 \
-FAKE_ENV_REVISION=1111111111111111111111111111111111111111 \
+FAKE_ENV_REVISION="$target_revision" \
+NYXDOC_UPDATE_CHANNEL='' \
 PATH="$fake_bin:$PATH" \
-bash "$local_checkout/scripts/update.sh" --channel main --build \
+bash "$local_checkout/scripts/update.sh" --revision "$target_revision" \
   >"$temporary/local-build.out" 2>"$temporary/local-build.err"
 grep -Fq "build --build-arg SOURCE_REVISION=$target_revision" "$local_log"
-grep -Fq 'NYXDOC_IMAGE=nyxdoc-app:0.25.18' "$local_checkout/.env.production"
+grep -Fq "NYXDOC_IMAGE=nyxdoc-app:$target_revision" "$local_checkout/.env.production"
 if grep -q '^metadata oci ' "$local_log"; then
   printf 'local --build unexpectedly inspected an official-image OCI label\n' >&2
   exit 1
 fi
 grep -q '^metadata env ' "$local_log"
+
+# An unchanged deployment must avoid rebuilding or stopping writers. An
+# unrelated commit must fail before a backup, checkout or container change.
+: >"$local_log"
+NYXDOC_UPDATE_CHANNEL='' FAKE_UPDATE_ROOT="$local_checkout" FAKE_UPDATE_LOG="$local_log" \
+  PATH="$fake_bin:$PATH" bash "$local_checkout/scripts/update.sh" >"$temporary/noop.out"
+grep -Fq 'no update is required' "$temporary/noop.out"
+if grep -Eq '^(build|stop|up|migrate|pull)' "$local_log"; then exit 1; fi
+: >"$local_log"
+foreign_revision="$(git -C "$private_seed" rev-parse HEAD)"
+if NYXDOC_UPDATE_CHANNEL='' FAKE_UPDATE_ROOT="$local_checkout" FAKE_UPDATE_LOG="$local_log" \
+  PATH="$fake_bin:$PATH" bash "$local_checkout/scripts/update.sh" --revision "$foreign_revision" \
+    >"$temporary/off-main.out" 2>&1; then exit 1; fi
+grep -Fq 'not on origin/main' "$temporary/off-main.out"
+[ ! -s "$local_log" ]
 
 # A one-shot third-party image selection must survive an interruption after
 # source checkout. The retry deliberately omits NYXDOC_UPDATE_IMAGE and must

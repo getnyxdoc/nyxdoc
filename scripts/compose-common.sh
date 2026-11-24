@@ -3,7 +3,7 @@
 
 set -Eeuo pipefail
 
-NYXDOC_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -L)"
+NYXDOC_ROOT="$(cd -- "${NYXDOC_UPDATE_ROOT:-$(dirname -- "${BASH_SOURCE[0]}")/..}" && pwd -L)"
 NYXDOC_ENV_FILE="$NYXDOC_ROOT/.env.production"
 NYXDOC_COMPOSE_FILE="$NYXDOC_ROOT/compose.yaml"
 

@@ -1,5 +1,7 @@
 .git
 .next
+.next-*-http
+.nyxdoc-update-state
 node_modules
 data
 debug

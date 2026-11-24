@@ -21,5 +21,4 @@ coordinated-disclosure period before publishing details.
 
 ## Supported versions
 
-Security fixes target the latest published release and the current `main`
-branch. Older releases may not receive backports.
+Security fixes target the current `main` branch. Deploy the tested source commit containing the fix.

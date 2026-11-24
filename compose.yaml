@@ -1,6 +1,7 @@
 services:
   app:
-    image: ${NYXDOC_IMAGE:-nyxdoc-app:latest}
+    platform: linux/amd64
+    image: ${NYXDOC_IMAGE:-nyxdoc-app:local}
     build:
       context: .
       dockerfile: Dockerfile
@@ -42,7 +43,8 @@ services:
     stop_grace_period: 20s
 
   collaboration:
-    image: ${NYXDOC_IMAGE:-nyxdoc-app:latest}
+    platform: linux/amd64
+    image: ${NYXDOC_IMAGE:-nyxdoc-app:local}
     init: true
     restart: unless-stopped
     depends_on:
@@ -85,7 +87,8 @@ services:
     stop_grace_period: 20s
 
   gateway:
-    image: ${NYXDOC_IMAGE:-nyxdoc-app:latest}
+    platform: linux/amd64
+    image: ${NYXDOC_IMAGE:-nyxdoc-app:local}
     init: true
     restart: unless-stopped
     depends_on:

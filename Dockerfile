@@ -15,6 +15,7 @@ RUN npm run build
 
 FROM node:24-bookworm-slim AS runner
 ARG SOURCE_REVISION=unknown
+LABEL org.opencontainers.image.revision=$SOURCE_REVISION
 WORKDIR /app
 ENV NODE_ENV=production \
     NEXT_TELEMETRY_DISABLED=1 \

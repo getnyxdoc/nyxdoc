@@ -82,11 +82,7 @@ For a local trial, clone and install in one command:
 git clone https://github.com/getnyxdoc/nyxdoc.git && cd nyxdoc && ./scripts/install.sh
 ```
 
-The installer creates `.env.production`, generates two different secrets
-without displaying them, pulls the versioned release image matching this
-checkout, starts every service, and waits for health checks. To build this
-checkout instead, use
-`./scripts/install.sh --build`.
+The installer creates two secrets, builds the checked-out Git commit for Linux AMD64, and starts the services. GitHub hosts the source. Production updates follow tested commits on `main`.
 
 Open [http://localhost:3191](http://localhost:3191). The first account becomes
 the site owner. SMTP and a custom email domain are optional. Registration is
@@ -100,16 +96,7 @@ Update, stop, or remove the trial with explicit lifecycle commands:
 ./scripts/uninstall.sh --purge --confirm-purge=nyxdoc
 ```
 
-For the one-time update from `0.25.17` or `0.25.18`, run the current release
-bridge from the Nyxdoc checkout instead:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/getnyxdoc/nyxdoc/v0.25.19/scripts/update-bootstrap.sh | bash
-```
-
-The bridge closes the public collaboration boundary and drains already accepted
-editor writes before the legacy updater creates its backup. From `0.25.19`
-onward, use `./scripts/update.sh` normally.
+For installations from a previous release, use the [one-time transition](DEPLOYMENT.md#switching-an-existing-release-installation).
 
 `update.sh` requires a clean Git checkout and creates a verified pre-update
 backup before changing a running installation. A failed matching update can
@@ -185,7 +172,7 @@ access, which is assigned explicitly per person or team at each workspace.
 - [Agent To-do](docs/document-tasks.md)
 - [Editor quality gate](docs/editor-quality-gate.md)
 - [Open-source newcomer guide](docs/open-source-readiness.md)
-- [Testing and release qualification](docs/testing-and-release-qualification.md)
+- [Testing and production deployment](docs/testing-and-release-qualification.md)
 
 ## Community and security
 
