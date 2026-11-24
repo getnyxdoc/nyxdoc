@@ -28,7 +28,7 @@ const collaborationTableRows = Array.from({ length: 5 }, (_, rowIndex) => ({
   })),
 }));
 
-const initialDocument: NyxdocDocumentV2 = {
+const defaultDocument: NyxdocDocumentV2 = {
   schemaVersion: 2 as const,
   blocks: [
     {
@@ -74,6 +74,17 @@ const performanceBlocks = Array.from({ length: 945 }, (_, index) => ({
   }],
 }));
 
+const longLine = "가나다라마바사아자차카타파하";
+const caretDocument: NyxdocDocumentV2 = {
+  schemaVersion: 2,
+  blocks: [longLine, longLine, longLine, "짧게", longLine,
+    "alpha bravo charlie", "alpha bravo charlie", longLine.repeat(4)].map((text, index) => ({
+    id: `caret-line-${index}`,
+    type: "p",
+    children: [{ text }],
+  })),
+};
+
 function memoryProvider(ydoc: Y.Doc): UnifiedProvider {
   return {
     awareness: undefined as never,
@@ -93,7 +104,8 @@ function memoryProvider(ydoc: Y.Doc): UnifiedProvider {
   };
 }
 
-export function CollaborationE2EClient() {
+export function CollaborationE2EClient({ caretFixture }: { caretFixture: boolean }) {
+  const initialDocument = caretFixture ? caretDocument : defaultDocument;
   const [ready, setReady] = useState(false);
   const [repairCount, setRepairCount] = useState(0);
   const [changeCount, setChangeCount] = useState(0);
@@ -116,7 +128,7 @@ export function CollaborationE2EClient() {
     },
     getToken: async () => "",
     onReady: () => setReady(true),
-  }), [provider, ydoc]);
+  }), [initialDocument, provider, ydoc]);
 
   useEffect(() => {
     if (destroyYdocTimerRef.current) {

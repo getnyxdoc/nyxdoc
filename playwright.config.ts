@@ -17,12 +17,15 @@ export default defineConfig({
   fullyParallel: false,
   workers: 1,
   reporter: [["line"]],
-  projects: process.platform === "win32"
-    ? [
-        { name: "chrome", use: { channel: "chrome" } },
-        { name: "edge", use: { channel: "msedge" } },
-      ]
-    : [{ name: "chromium" }],
+  projects: [
+    ...(process.platform === "win32"
+      ? [
+          { name: "chrome", use: { channel: "chrome" } },
+          { name: "edge", use: { channel: "msedge" } },
+        ]
+      : [{ name: "chromium" }]),
+    { name: "firefox-caret", testMatch: "caret-navigation.spec.ts", use: { browserName: "firefox" } },
+  ],
   use: {
     baseURL,
     browserName: "chromium",
