@@ -436,7 +436,7 @@ FAKE_UPDATE_ROOT="$local_checkout" \
 FAKE_UPDATE_LOG="$local_log" \
 FAKE_OCI_REVISION=1111111111111111111111111111111111111111 \
 FAKE_ENV_REVISION="$target_revision" \
-NYXDOC_UPDATE_CHANNEL= \
+NYXDOC_UPDATE_CHANNEL='' \
 PATH="$fake_bin:$PATH" \
 bash "$local_checkout/scripts/update.sh" --revision "$target_revision" \
   >"$temporary/local-build.out" 2>"$temporary/local-build.err"
@@ -451,13 +451,13 @@ grep -q '^metadata env ' "$local_log"
 # An unchanged deployment must avoid rebuilding or stopping writers. An
 # unrelated commit must fail before a backup, checkout or container change.
 : >"$local_log"
-NYXDOC_UPDATE_CHANNEL= FAKE_UPDATE_ROOT="$local_checkout" FAKE_UPDATE_LOG="$local_log" \
+NYXDOC_UPDATE_CHANNEL='' FAKE_UPDATE_ROOT="$local_checkout" FAKE_UPDATE_LOG="$local_log" \
   PATH="$fake_bin:$PATH" bash "$local_checkout/scripts/update.sh" >"$temporary/noop.out"
 grep -Fq 'no update is required' "$temporary/noop.out"
 if grep -Eq '^(build|stop|up|migrate|pull)' "$local_log"; then exit 1; fi
 : >"$local_log"
 foreign_revision="$(git -C "$private_seed" rev-parse HEAD)"
-if NYXDOC_UPDATE_CHANNEL= FAKE_UPDATE_ROOT="$local_checkout" FAKE_UPDATE_LOG="$local_log" \
+if NYXDOC_UPDATE_CHANNEL='' FAKE_UPDATE_ROOT="$local_checkout" FAKE_UPDATE_LOG="$local_log" \
   PATH="$fake_bin:$PATH" bash "$local_checkout/scripts/update.sh" --revision "$foreign_revision" \
     >"$temporary/off-main.out" 2>&1; then exit 1; fi
 grep -Fq 'not on origin/main' "$temporary/off-main.out"
